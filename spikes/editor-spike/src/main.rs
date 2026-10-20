@@ -2,12 +2,14 @@
 //!
 //! - P0-01: 버전을 고정한 eframe/egui로 창을 띄우고 텍스트 입력란 하나를 표시
 //! - P0-02: OS 시스템 폰트로 Monospace / Proportional / 굵게 Fallback 체인 구성 (`fonts.rs`)
+//! - P0-03~05: 한글 IME 이벤트 로그, 위젯보다 먼저 처리하는 단축키, 창 닫기 가로채기 (`input_check.rs`)
 //!
 //! `--font-report`: 창을 띄우지 않고 폰트 로드 보고서만 출력한다 (자동 검증용).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod fonts;
+mod input_check;
 
 use std::time::{Duration, Instant};
 
@@ -46,8 +48,8 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("My-Notepad Spike (P0-02 폰트)")
-            .with_inner_size([1100.0, 760.0])
+            .with_title("My-Notepad Spike (P0-03~05 입력 검증)")
+            .with_inner_size([1200.0, 780.0])
             .with_min_inner_size([480.0, 320.0]),
         ..Default::default()
     };
@@ -59,18 +61,28 @@ fn main() -> eframe::Result {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    /// P0-03~05: IME·단축키·창 닫기
+    Input,
+    /// P0-02: 폰트 Fallback 체인
+    Fonts,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum FontMode {
-    /// PLAN.md §2.4 방식: 시스템 폰트를 직접 체인으로 구성
+    /// PLAN.md §2.4 방식: 시스템 폰트를 직접 체인으로 구성 (P0-02에서 채택)
     ExplicitChain,
     /// 비교용: egui 기본 폰트 + eframe 시스템 폰트 자동 대체
     EguiDefault,
 }
 
 struct SpikeApp {
+    screen: Screen,
     text: String,
     font_mode: FontMode,
     explicit_defs: egui::FontDefinitions,
     report: fonts::FontReport,
+    input: input_check::InputCheck,
     started: Instant,
     first_frame: Option<Duration>,
 }
@@ -80,10 +92,12 @@ impl SpikeApp {
         let (explicit_defs, report) = fonts::explicit_chain();
         cc.egui_ctx.set_fonts(explicit_defs.clone());
         Self {
+            screen: Screen::Input,
             text: SAMPLE_TEXT.to_owned(),
             font_mode: FontMode::ExplicitChain,
             explicit_defs,
             report,
+            input: input_check::InputCheck::default(),
             started,
             first_frame: None,
         }
@@ -95,32 +109,16 @@ impl SpikeApp {
             FontMode::EguiDefault => ctx.set_fonts(fonts::egui_default()),
         }
     }
-}
 
-impl eframe::App for SpikeApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.first_frame.is_none() {
-            self.first_frame = Some(self.started.elapsed());
-        }
-        let pixels_per_point = ui.ctx().pixels_per_point();
-
-        egui::Panel::top("info").show(ui, |ui| {
+    fn fonts_screen(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("font-mode").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.strong("P0-02 폰트 Fallback 체인");
-                ui.separator();
-                ui.label(format!(
-                    "egui {} · {} ({})",
-                    env!("EGUI_VERSION"),
-                    std::env::consts::OS,
-                    std::env::consts::ARCH
-                ));
-                ui.separator();
                 let before = self.font_mode;
                 ui.label("글꼴 방식:");
                 ui.radio_value(
                     &mut self.font_mode,
                     FontMode::ExplicitChain,
-                    "직접 구성 (계획안)",
+                    "직접 구성 (채택)",
                 );
                 ui.radio_value(
                     &mut self.font_mode,
@@ -129,23 +127,6 @@ impl eframe::App for SpikeApp {
                 );
                 if self.font_mode != before {
                     self.apply_font_mode(ui.ctx());
-                }
-            });
-        });
-
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!("{} chars", self.text.chars().count()));
-                ui.separator();
-                ui.label(format!("{} lines", self.text.lines().count().max(1)));
-                ui.separator();
-                ui.label(format!("scale {pixels_per_point:.2}"));
-                if let Some(first_frame) = self.first_frame {
-                    ui.separator();
-                    ui.label(format!(
-                        "첫 프레임 {:.0} ms",
-                        first_frame.as_secs_f64() * 1000.0
-                    ));
                 }
             });
         });
@@ -205,5 +186,58 @@ impl eframe::App for SpikeApp {
                 });
             });
         });
+    }
+}
+
+impl eframe::App for SpikeApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.first_frame.is_none() {
+            self.first_frame = Some(self.started.elapsed());
+        }
+        let ctx = ui.ctx().clone();
+        let pixels_per_point = ctx.pixels_per_point();
+
+        // 입력 이벤트 기록과 단축키 선처리는 어떤 위젯보다 먼저 한다 (P0-04).
+        self.input.before_widgets(&ctx);
+
+        egui::Panel::top("info").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Phase 0 스파이크");
+                ui.separator();
+                ui.selectable_value(&mut self.screen, Screen::Input, "입력 검증 (P0-03~05)");
+                ui.selectable_value(&mut self.screen, Screen::Fonts, "폰트 (P0-02)");
+                ui.separator();
+                ui.label(format!(
+                    "egui {} · {} ({})",
+                    env!("EGUI_VERSION"),
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                ));
+            });
+        });
+
+        egui::Panel::bottom("status").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("scale {pixels_per_point:.2}"));
+                if let Some(first_frame) = self.first_frame {
+                    ui.separator();
+                    ui.label(format!(
+                        "첫 프레임 {:.0} ms",
+                        first_frame.as_secs_f64() * 1000.0
+                    ));
+                }
+                if self.screen == Screen::Input {
+                    ui.separator();
+                    self.input.status(ui);
+                }
+            });
+        });
+
+        match self.screen {
+            Screen::Input => self.input.screen(ui),
+            Screen::Fonts => self.fonts_screen(ui),
+        }
+
+        self.input.close_dialog(&ctx);
     }
 }
