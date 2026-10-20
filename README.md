@@ -20,6 +20,7 @@ Windows 기본 메모장보다 강력하고, Electron 기반 에디터보다 가
 | :--- | :--- |
 | [docs/PLAN.md](docs/PLAN.md) | 기획·아키텍처 설계서 (기능 명세, 인코딩 정책, 기술 스택, 로드맵) |
 | [docs/WORKPLAN.md](docs/WORKPLAN.md) | 작업계획서 (작업 단위, 검증 체크리스트, Phase 게이트, 개발 환경 규칙) |
+| [docs/macos-checklist.md](docs/macos-checklist.md) | MacBook Pro 준비·검증 절차 (macOS 🍎 항목 모음) |
 
 ## 개발 환경
 

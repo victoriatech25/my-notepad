@@ -532,7 +532,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 
 #### P1-MAC Phase 0·1 macOS 일괄 검증 · M 🍎
 - **목표**: G0에서 리스크로 수용한 macOS 항목을 MacBook Pro에서 일괄 검증 (P0-00~07의 🍎 9개 + 그때까지 끝난 Phase 1 WU의 🍎 항목)
-- **선행**: MacBook Pro 사용 가능 시점 (Phase 1 진행 중 아무 때나)
+- **선행**: MacBook Pro 사용 가능 시점 (Phase 1 진행 중 아무 때나) · 절차: [macos-checklist.md](macos-checklist.md)
 - 🍎 **macOS 검증**
   - [ ] P0-00 준비 체크리스트·칩 종류 기록·장비 전환 흐름 연습
   - [ ] P0-01~02: Retina 선명도, `.ttc` 폰트(Menlo, Apple SD 산돌고딕 Neo) 한글·굵게
