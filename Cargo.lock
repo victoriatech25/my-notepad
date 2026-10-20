@@ -779,6 +779,8 @@ name = "editor-spike"
 version = "0.0.0"
 dependencies = [
  "eframe",
+ "memmap2",
+ "ttf-parser",
 ]
 
 [[package]]
