@@ -76,5 +76,6 @@ PLAN.md §3.1-3 기준. 사이드바와 탭 바에 같은 아이콘을 쓴다.
 | 결정 순서 | 파일 이름 정확히 일치 → 확장자 → 기본 아이콘 |
 | 폴더 | 이름별 아이콘 + 열림/닫힘 구분 |
 | `.gitignore` 대상 | 숨기지 않고 흐리게 표시 |
-| 방식 | **미결정** — A: 단색 아이콘 폰트(종류별 색) / B: 다색 SVG(Material Icon Theme 스타일) |
+| 방식 | **미결정 (UX-1b에서 선택)** — A: 단색 아이콘 폰트 Phosphor(종류별 색), 시안 [p0-ux2-icons-a-font.png](screens/p0-ux2-icons-a-font.png) / B: 다색 SVG Material Icon Theme, 시안 [p0-ux2-icons-b-svg.png](screens/p0-ux2-icons-b-svg.png) |
+| 용량 | A ≈ +0.47MB (폰트 내장) · B ≈ +1.06MB (SVG 렌더러 + 아이콘 36개) |
 | 첫 시안 대상 | `.rs`, `.md`, `.toml`, `.json`, `.txt`, `.log`, `.exe`, `Cargo.toml`, `Cargo.lock`, `.gitignore`, `README.md`, 폴더 `src`·`docs`·`tests`·`target`·`.cargo` |

@@ -149,15 +149,40 @@ fn dir(name: &'static str, path: &'static str, children: Vec<TreeNode>) -> TreeN
     }
 }
 
+/// 실제 저장소 구조를 흉내 낸 예시 트리 (`target`은 .gitignore 대상).
 pub fn sample_tree() -> TreeNode {
+    const R: &str = r"C:\devel\my-notepad";
     dir(
         "my-notepad",
-        r"C:\devel\my-notepad",
+        R,
         vec![
+            dir(
+                ".cargo",
+                r"C:\devel\my-notepad\.cargo",
+                vec![file(
+                    "config.toml",
+                    r"C:\devel\my-notepad\.cargo\config.toml",
+                )],
+            ),
             dir(
                 "docs",
                 r"C:\devel\my-notepad\docs",
                 vec![
+                    dir(
+                        "ux",
+                        r"C:\devel\my-notepad\docs\ux",
+                        vec![
+                            dir(
+                                "screens",
+                                r"C:\devel\my-notepad\docs\ux\screens",
+                                vec![file(
+                                    "p0-ux1-markdown-split.png",
+                                    r"C:\devel\my-notepad\docs\ux\screens\p0-ux1-markdown-split.png",
+                                )],
+                            ),
+                            file("ui-spec.md", r"C:\devel\my-notepad\docs\ux\ui-spec.md"),
+                        ],
+                    ),
                     file("PLAN.md", r"C:\devel\my-notepad\docs\PLAN.md"),
                     file("WORKPLAN.md", r"C:\devel\my-notepad\docs\WORKPLAN.md"),
                 ],
@@ -169,6 +194,28 @@ pub fn sample_tree() -> TreeNode {
                     file("main.rs", r"C:\devel\my-notepad\src\main.rs"),
                     file("app.rs", r"C:\devel\my-notepad\src\app.rs"),
                 ],
+            ),
+            dir(
+                "target",
+                r"C:\devel\my-notepad\target",
+                vec![dir(
+                    "release",
+                    r"C:\devel\my-notepad\target\release",
+                    vec![
+                        file(
+                            "my-notepad.exe",
+                            r"C:\devel\my-notepad\target\release\my-notepad.exe",
+                        ),
+                        file(
+                            "my_notepad.pdb",
+                            r"C:\devel\my-notepad\target\release\my_notepad.pdb",
+                        ),
+                        file(
+                            ".rustc_info.json",
+                            r"C:\devel\my-notepad\target\.rustc_info.json",
+                        ),
+                    ],
+                )],
             ),
             dir(
                 "tests",
@@ -185,13 +232,48 @@ pub fn sample_tree() -> TreeNode {
                             "broken.txt",
                             r"C:\devel\my-notepad\tests\fixtures\encoding\broken.txt",
                         ),
+                        file(
+                            "server.log",
+                            r"C:\devel\my-notepad\tests\fixtures\server.log",
+                        ),
                     ],
                 )],
             ),
-            file("README.md", r"C:\devel\my-notepad\README.md"),
+            dir(
+                "xtask",
+                r"C:\devel\my-notepad\xtask",
+                vec![file("Cargo.toml", r"C:\devel\my-notepad\xtask\Cargo.toml")],
+            ),
+            file(".editorconfig", r"C:\devel\my-notepad\.editorconfig"),
+            file(".gitattributes", r"C:\devel\my-notepad\.gitattributes"),
+            file(".gitignore", r"C:\devel\my-notepad\.gitignore"),
+            file("Cargo.lock", r"C:\devel\my-notepad\Cargo.lock"),
             file("Cargo.toml", r"C:\devel\my-notepad\Cargo.toml"),
+            file("README.md", r"C:\devel\my-notepad\README.md"),
+            file(
+                "rust-toolchain.toml",
+                r"C:\devel\my-notepad\rust-toolchain.toml",
+            ),
         ],
     )
+}
+
+/// 프로토타입용 .gitignore 판정 (실제 구현은 `ignore` 크레이트, P2-05).
+pub fn is_ignored(node: &TreeNode) -> bool {
+    node.name == "target"
+}
+
+/// 처음에 펼쳐 둘 폴더
+pub fn initially_open_dirs() -> std::collections::HashSet<&'static str> {
+    [
+        r"C:\devel\my-notepad",
+        r"C:\devel\my-notepad\.cargo",
+        r"C:\devel\my-notepad\docs",
+        r"C:\devel\my-notepad\docs\ux",
+        r"C:\devel\my-notepad\target",
+    ]
+    .into_iter()
+    .collect()
 }
 
 const README: &str = "\
