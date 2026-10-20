@@ -6,12 +6,34 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-/// `cargo xtask try <시나리오>`로 실행할 수 있는 시나리오: (이름, 패키지, 설명)
-const SCENARIOS: &[(&str, &str, &str)] = &[(
-    "spike",
-    "editor-spike",
-    "P0-01 스파이크: 창 + 텍스트 입력란",
-)];
+/// `cargo xtask try <시나리오>`로 실행할 수 있는 시나리오.
+struct Scenario {
+    name: &'static str,
+    package: &'static str,
+    args: &'static [&'static str],
+    description: &'static str,
+}
+
+const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "spike",
+        package: "editor-spike",
+        args: &[],
+        description: "에디터 스파이크 (현재 P0-02 상태)",
+    },
+    Scenario {
+        name: "fonts",
+        package: "editor-spike",
+        args: &[],
+        description: "P0-02 폰트 Fallback 체인 확인 화면",
+    },
+    Scenario {
+        name: "font-report",
+        package: "editor-spike",
+        args: &["--font-report"],
+        description: "P0-02 폰트 로드 보고서만 출력 (창 없음)",
+    },
+];
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -43,25 +65,23 @@ fn print_help() {
     println!("  doctor           개발 환경 점검 (두 장비 준비 상태 확인)");
     println!("  help             이 도움말\n");
     println!("시나리오:");
-    for (name, _, description) in SCENARIOS {
-        println!("  {name:<16} {description}");
+    for scenario in SCENARIOS {
+        println!("  {:<16} {}", scenario.name, scenario.description);
     }
 }
 
 fn try_scenario(name: Option<&str>) -> Result<(), String> {
     let name = name.ok_or("시나리오 이름이 필요합니다. 예: cargo xtask try spike")?;
-    let (_, package, description) =
-        SCENARIOS
-            .iter()
-            .find(|(n, _, _)| *n == name)
-            .ok_or_else(|| {
-                format!("알 수 없는 시나리오: {name}\n`cargo xtask help`로 목록을 확인하세요.")
-            })?;
+    let scenario = SCENARIOS.iter().find(|s| s.name == name).ok_or_else(|| {
+        format!("알 수 없는 시나리오: {name}\n`cargo xtask help`로 목록을 확인하세요.")
+    })?;
+    let package = scenario.package;
 
-    println!("▶ {description}");
+    println!("▶ {}", scenario.description);
     let status = Command::new(cargo())
         .current_dir(workspace_root())
-        .args(["run", "--release", "--package", package])
+        .args(["run", "--release", "--package", package, "--"])
+        .args(scenario.args)
         .status()
         .map_err(|e| format!("cargo 실행 실패: {e}"))?;
     if status.success() {
