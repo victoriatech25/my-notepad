@@ -4,7 +4,7 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 /// `cargo xtask try <시나리오>`로 실행할 수 있는 시나리오.
 struct Scenario {
@@ -12,6 +12,9 @@ struct Scenario {
     package: &'static str,
     args: &'static [&'static str],
     description: &'static str,
+    /// true면 끝날 때까지 기다려 출력을 보여준다. false면 창을 띄우고 바로 돌아온다
+    /// (xtask가 앱을 붙잡고 있으면 다음 빌드에서 xtask.exe를 교체하지 못한다).
+    wait: bool,
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -19,25 +22,36 @@ const SCENARIOS: &[Scenario] = &[
         name: "spike",
         package: "editor-spike",
         args: &[],
-        description: "에디터 스파이크 (현재 P0-02 상태)",
+        description: "에디터 스파이크 (입력 검증 + 폰트 화면)",
+        wait: false,
+    },
+    Scenario {
+        name: "input",
+        package: "editor-spike",
+        args: &[],
+        description: "P0-03~05 한글 IME·단축키·창 닫기 검증 화면",
+        wait: false,
     },
     Scenario {
         name: "fonts",
         package: "editor-spike",
         args: &[],
         description: "P0-02 폰트 Fallback 체인 확인 화면",
+        wait: false,
     },
     Scenario {
         name: "prototype",
         package: "ux-prototype",
         args: &[],
         description: "P0-UX1 전체 화면 UX 프로토타입 (가짜 데이터)",
+        wait: false,
     },
     Scenario {
         name: "font-report",
         package: "editor-spike",
         args: &["--font-report"],
         description: "P0-02 폰트 로드 보고서만 출력 (창 없음)",
+        wait: true,
     },
 ];
 
@@ -84,17 +98,39 @@ fn try_scenario(name: Option<&str>) -> Result<(), String> {
     let package = scenario.package;
 
     println!("▶ {}", scenario.description);
+    let root = workspace_root();
     let status = Command::new(cargo())
-        .current_dir(workspace_root())
-        .args(["run", "--release", "--package", package, "--"])
-        .args(scenario.args)
+        .current_dir(&root)
+        .args(["build", "--release", "--package", package])
         .status()
         .map_err(|e| format!("cargo 실행 실패: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{package} 실행이 실패했습니다 ({status})"))
+    if !status.success() {
+        return Err(format!("{package} 빌드가 실패했습니다 ({status})"));
     }
+
+    let exe = root
+        .join("target/release")
+        .join(format!("{package}{}", env::consts::EXE_SUFFIX));
+    let mut command = Command::new(&exe);
+    command.current_dir(&root).args(scenario.args);
+    if scenario.wait {
+        let status = command
+            .status()
+            .map_err(|e| format!("{} 실행 실패: {e}", exe.display()))?;
+        if !status.success() {
+            return Err(format!("{package} 실행이 실패했습니다 ({status})"));
+        }
+    } else {
+        // 출력을 떼어 내야 `cargo xtask try ... | tail` 같은 파이프가 앱 종료까지 기다리지 않는다.
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("{} 실행 실패: {e}", exe.display()))?;
+        println!("  실행됨 (pid {}) — 창을 닫으면 종료됩니다", child.id());
+    }
+    Ok(())
 }
 
 fn doctor() -> Result<(), String> {

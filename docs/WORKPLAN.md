@@ -962,6 +962,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-20 | P0-02 | 🤖 | 통과 | Windows: `cargo xtask try font-report` — Consolas·Segoe UI(Bold)·맑은 고딕(Bold) 5개 memory-map 로드 0.44ms, 실패 0. 참고: egui 0.37은 시스템 폰트 자동 대체(`system_font_fallback`) 기능을 내장 → 화면에서 직접 구성 방식과 비교 | |
 | 2026-10-20 | P0-02 | 👤 | 통과 | Windows: 한글 표시, 영문·숫자 정렬, 비례폭, 굵게, Tab 입력 모두 확인 (커밋 `efdcb45`). **결정: 폰트는 "직접 구성" 방식 채택** (egui 시스템 자동 대체는 보조로만 유지) | |
 | 2026-10-20 | P0-UX1 (UX-1) | 🎨 | 통과 | Windows: 체크리스트 1~10 전 항목 `좋음` (커밋 `6f9ea39`). 피드백 1건(UX-001 사이드바 화면 토글) 즉시 반영 후 재확인 완료 | |
+| 2026-10-20 | P0-03~05 | 🤖 | 통과 | 검증 화면(`cargo xtask try input`) 빌드·clippy·fmt 통과. 키 입력 자동 주입으로 Ctrl+S, F3, Shift+F3, Ctrl+H, Ctrl+Shift+V, Ctrl+K→V가 커맨드 로그에 기록됨을 확인 (IME·체감은 👤 대기) | |
 | 2026-10-20 | P0-00, P0-01, P0-02 | 🍎 | 보류 | MacBook Pro 검증은 사용자 요청으로 추후 수행. **G0 전에 macOS IME(P0-03)와 함께 일괄 수행** | |
 
 ### 9.3 측정 결과 기록표
