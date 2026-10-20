@@ -10,6 +10,7 @@
 
 mod fonts;
 mod input_check;
+mod perf;
 
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,12 @@ const PROPORTIONAL_SAMPLE: &str = "메뉴·대화상자·Markdown 미리보기 �
 fn main() -> eframe::Result {
     let started = Instant::now();
 
+    if std::env::args().any(|a| a == "--perf-bench") {
+        let (defs, _) = fonts::explicit_chain();
+        print!("{}", perf::bench(defs));
+        std::process::exit(0);
+    }
+
     if std::env::args().any(|a| a == "--font-report") {
         let (_, report) = fonts::explicit_chain();
         print!("{}", report.to_text());
@@ -66,6 +73,8 @@ enum Screen {
     Input,
     /// P0-02: 폰트 Fallback 체인
     Fonts,
+    /// P0-06: 대용량 텍스트 성능
+    Perf,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,6 +92,7 @@ struct SpikeApp {
     explicit_defs: egui::FontDefinitions,
     report: fonts::FontReport,
     input: input_check::InputCheck,
+    perf: perf::PerfScreen,
     started: Instant,
     first_frame: Option<Duration>,
 }
@@ -92,12 +102,17 @@ impl SpikeApp {
         let (explicit_defs, report) = fonts::explicit_chain();
         cc.egui_ctx.set_fonts(explicit_defs.clone());
         Self {
-            screen: Screen::Input,
+            screen: if std::env::args().any(|a| a == "--screen=perf") {
+                Screen::Perf
+            } else {
+                Screen::Input
+            },
             text: SAMPLE_TEXT.to_owned(),
             font_mode: FontMode::ExplicitChain,
             explicit_defs,
             report,
             input: input_check::InputCheck::default(),
+            perf: perf::PerfScreen::default(),
             started,
             first_frame: None,
         }
@@ -206,6 +221,7 @@ impl eframe::App for SpikeApp {
                 ui.separator();
                 ui.selectable_value(&mut self.screen, Screen::Input, "입력 검증 (P0-03~05)");
                 ui.selectable_value(&mut self.screen, Screen::Fonts, "폰트 (P0-02)");
+                ui.selectable_value(&mut self.screen, Screen::Perf, "대용량 성능 (P0-06)");
                 ui.separator();
                 ui.label(format!(
                     "egui {} · {} ({})",
@@ -236,6 +252,7 @@ impl eframe::App for SpikeApp {
         match self.screen {
             Screen::Input => self.input.screen(ui),
             Screen::Fonts => self.fonts_screen(ui),
+            Screen::Perf => self.perf.screen(ui),
         }
 
         self.input.close_dialog(&ctx);
