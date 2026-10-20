@@ -1,7 +1,12 @@
 //! B안 렌더러: 블록 모델을 egui로 그리고, 최상위 블록마다 화면 위치를 기록한다.
+//!
+//! UX-004: 화면 모양은 A(egui_commonmark 0.26)에 맞춘다 — 제목은 egui Heading/Body 크기 사이의
+//! 단계 크기 + 진한 색(굵은 글꼴 아님), 굵게는 진한 색, 블록 사이 한 줄 여백, 표는 테두리 틀 +
+//! 줄무늬 격자, 인용은 왼쪽 3px 선 + 흐린 글자. 굵게를 실제 굵은 글꼴로 그릴지는 옵션으로 비교한다.
 
 use eframe::egui::{
-    self, Align, Color32, FontFamily, FontId, Layout, RichText, Stroke, TextFormat, text::LayoutJob,
+    self, Align, FontFamily, FontId, Layout, RichText, Sense, Stroke, TextFormat, TextStyle,
+    text::LayoutJob,
 };
 use pulldown_cmark::Alignment;
 
@@ -20,33 +25,61 @@ pub struct BlockPos {
     pub height: f32,
 }
 
-pub struct Style {
-    pub base: f32,
-    pub code_bg: Color32,
-    pub rule: Color32,
+#[derive(Clone, Copy, Default)]
+pub struct Options {
+    /// 굵게·제목을 실제 굵은 글꼴(bold 패밀리)로 그린다. 끄면 A처럼 진한 색만 쓴다.
+    pub bold_font: bool,
+}
+
+struct Style {
+    body: f32,
+    heading_max: f32,
+    line: f32,
+    options: Options,
 }
 
 impl Style {
-    pub fn new(ui: &egui::Ui) -> Self {
-        let dark = ui.visuals().dark_mode;
+    fn new(ui: &egui::Ui, options: Options) -> Self {
+        let size =
+            |s: TextStyle, default: f32| ui.style().text_styles.get(&s).map_or(default, |f| f.size);
         Self {
-            base: 15.0,
-            code_bg: if dark {
-                Color32::from_gray(40)
-            } else {
-                Color32::from_gray(238)
-            },
-            rule: ui.visuals().widgets.noninteractive.bg_stroke.color,
+            body: size(TextStyle::Body, 14.0),
+            heading_max: size(TextStyle::Heading, 32.0),
+            line: ui.text_style_height(&TextStyle::Body),
+            options,
         }
+    }
+
+    /// A와 같은 제목 크기: H1은 Heading 크기, H2~H6은 Body와 Heading 사이를 단계별로
+    fn heading_size(&self, level: u8) -> f32 {
+        let diff = self.heading_max - self.body;
+        let factor = match level {
+            1 => 1.0,
+            2 => 0.835,
+            3 => 0.668,
+            4 => 0.501,
+            5 => 0.334,
+            _ => 0.167,
+        };
+        self.body + diff * factor
     }
 }
 
 /// 문서를 그리고 블록 위치표를 돌려준다.
-pub fn show(ui: &mut egui::Ui, doc: &Document) -> Vec<BlockPos> {
-    let style = Style::new(ui);
+pub fn show(ui: &mut egui::Ui, doc: &Document, options: Options) -> Vec<BlockPos> {
+    let style = Style::new(ui, options);
     let origin = ui.cursor().top();
     let mut positions = Vec::with_capacity(doc.blocks.len());
     for (index, block) in doc.blocks.iter().enumerate() {
+        if index > 0 {
+            // A처럼 블록 사이에 한 줄 여백, 제목 앞은 조금 더
+            let extra = if matches!(block.kind, BlockKind::Heading { .. }) {
+                0.6
+            } else {
+                0.0
+            };
+            ui.add_space(style.line * (0.8 + extra));
+        }
         let rect = ui
             .scope(|ui| {
                 ui.set_width(ui.available_width());
@@ -62,7 +95,6 @@ pub fn show(ui: &mut egui::Ui, doc: &Document) -> Vec<BlockPos> {
             top: rect.top() - origin,
             height: rect.height(),
         });
-        ui.add_space(style.base * 0.5);
     }
     positions
 }
@@ -70,55 +102,56 @@ pub fn show(ui: &mut egui::Ui, doc: &Document) -> Vec<BlockPos> {
 fn render_block(ui: &mut egui::Ui, block: &Block, style: &Style) {
     match &block.kind {
         BlockKind::Heading { level, text } => {
-            let scale = match level {
-                1 => 1.9,
-                2 => 1.5,
-                3 => 1.25,
-                4 => 1.1,
-                _ => 1.0,
-            };
-            ui.add_space(style.base * 0.3);
-            ui.label(inline_job(ui, text, style.base * scale, true, style));
-            if *level <= 2 {
-                let rect = ui.available_rect_before_wrap();
-                ui.painter().hline(
-                    rect.x_range(),
-                    rect.top() + 2.0,
-                    Stroke::new(1.0, style.rule),
-                );
-                ui.add_space(6.0);
-            }
+            // H1~H4는 진한 색(A의 strong), H5·H6은 본문 색
+            let strong = *level <= 4;
+            ui.label(inline_job(
+                ui,
+                text,
+                style.heading_size(*level),
+                strong,
+                style,
+            ));
         }
         BlockKind::Paragraph(text) => {
-            ui.label(inline_job(ui, text, style.base, false, style));
+            ui.label(inline_job(ui, text, style.body, false, style));
         }
         BlockKind::List { start, items } => list(ui, *start, items, style),
         BlockKind::Quote(children) => {
+            let start = ui.painter().add(egui::Shape::Noop);
             let response = egui::Frame::new()
+                .outer_margin(egui::Margin {
+                    left: 10,
+                    ..Default::default()
+                })
                 .inner_margin(egui::Margin {
-                    left: 14,
-                    right: 4,
-                    top: 2,
-                    bottom: 2,
+                    left: 10,
+                    ..Default::default()
                 })
                 .show(ui, |ui| {
                     ui.visuals_mut().override_text_color = Some(ui.visuals().weak_text_color());
-                    for child in children {
+                    for (i, child) in children.iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(style.line * 0.5);
+                        }
                         render_block(ui, child, style);
                     }
                 })
                 .response;
-            ui.painter().vline(
-                response.rect.left() + 4.0,
-                response.rect.y_range(),
-                Stroke::new(3.0, style.rule),
+            let r = response.rect;
+            ui.painter().set(
+                start,
+                egui::Shape::line_segment(
+                    [
+                        egui::pos2(r.left() + 10.0, r.top() + 2.0),
+                        egui::pos2(r.left() + 10.0, r.bottom() - 2.0),
+                    ],
+                    Stroke::new(3.0, ui.visuals().weak_text_color()),
+                ),
             );
         }
         BlockKind::Code { lang, text } => {
-            egui::Frame::new()
-                .fill(style.code_bg)
-                .corner_radius(4.0)
-                .inner_margin(egui::Margin::same(10))
+            egui::Frame::group(ui.style())
+                .fill(ui.visuals().code_bg_color)
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     if !lang.is_empty() {
@@ -127,35 +160,36 @@ fn render_block(ui: &mut egui::Ui, block: &Block, style: &Style) {
                     egui::ScrollArea::horizontal()
                         .id_salt(ui.next_auto_id())
                         .show(ui, |ui| {
-                            ui.label(RichText::new(text).monospace().size(style.base * 0.9));
+                            ui.label(RichText::new(text).monospace());
                         });
                 });
         }
         BlockKind::Table { align, head, rows } => {
-            egui::ScrollArea::horizontal()
-                .id_salt(ui.next_auto_id())
-                .show(ui, |ui| {
-                    egui::Grid::new(ui.next_auto_id())
-                        .striped(true)
-                        .spacing([18.0, 6.0])
-                        .show(ui, |ui| {
-                            for (c, cell) in head.iter().enumerate() {
-                                cell_ui(ui, cell, align.get(c), true, style);
-                            }
-                            ui.end_row();
-                            for row in rows {
-                                for (c, cell) in row.iter().enumerate() {
-                                    cell_ui(ui, cell, align.get(c), false, style);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                // A와 같이 가로 스크롤바가 마지막 행을 가리지 않도록 아래 여백을 둔다.
+                ui.spacing_mut().scroll.content_margin.bottom = ui.spacing().scroll.bar_width as i8;
+                egui::ScrollArea::horizontal()
+                    .id_salt(ui.next_auto_id())
+                    .show(ui, |ui| {
+                        egui::Grid::new(ui.next_auto_id())
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for (c, cell) in head.iter().enumerate() {
+                                    cell_ui(ui, cell, align.get(c), true, style);
                                 }
                                 ui.end_row();
-                            }
-                        });
-                });
+                                for row in rows {
+                                    for (c, cell) in row.iter().enumerate() {
+                                        cell_ui(ui, cell, align.get(c), false, style);
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
         }
         BlockKind::Rule => {
-            ui.add_space(4.0);
-            ui.separator();
-            ui.add_space(4.0);
+            ui.add(egui::Separator::default().horizontal());
         }
         BlockKind::Html(html) => {
             ui.label(RichText::new(html).monospace().weak());
@@ -176,26 +210,51 @@ fn cell_ui(
         _ => Layout::top_down(Align::Min),
     };
     ui.with_layout(layout, |ui| {
-        let mut job = inline_job(ui, cell, style.base, head, style);
+        let mut job = inline_job(ui, cell, style.body, head, style);
         job.wrap.max_width = f32::INFINITY;
         // 라벨 기본값은 가용 폭에 맞춰 줄바꿈하므로, 첫 프레임의 좁은 열 폭에 갇히지 않게 줄바꿈을 끈다.
         ui.add(egui::Label::new(job).extend());
     });
 }
 
+/// A와 같은 글머리: 공백 4칸 폭 안에 작은 원 (번호 목록은 번호, 작업 목록은 체크 표시)
 fn list(ui: &mut egui::Ui, start: Option<u64>, items: &[ListItem], style: &Style) {
+    let space = ui.fonts_mut(|f| f.glyph_width(&FontId::proportional(style.body), ' '));
     for (n, item) in items.iter().enumerate() {
         ui.horizontal_top(|ui| {
-            ui.add_space(style.base * 0.4);
-            let marker = match (item.task, start) {
-                (Some(true), _) => "☑".to_owned(),
-                (Some(false), _) => "☐".to_owned(),
-                (None, Some(s)) => format!("{}.", s + n as u64),
-                (None, None) => "•".to_owned(),
-            };
-            ui.label(RichText::new(marker).size(style.base));
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(space * 4.0, style.line), Sense::hover());
+            let color = ui.visuals().strong_text_color();
+            match (item.task, start) {
+                (Some(checked), _) => {
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        if checked { "☑" } else { "☐" },
+                        FontId::proportional(style.body),
+                        color,
+                    );
+                }
+                (None, Some(s)) => {
+                    ui.painter().text(
+                        rect.right_center() - egui::vec2(space, 0.0),
+                        egui::Align2::RIGHT_CENTER,
+                        format!("{}.", s + n as u64),
+                        FontId::proportional(style.body),
+                        color,
+                    );
+                }
+                (None, None) => {
+                    ui.painter()
+                        .circle_filled(rect.center(), rect.height() / 6.0, color);
+                }
+            }
             ui.vertical(|ui| {
-                for child in &item.blocks {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                for (i, child) in item.blocks.iter().enumerate() {
+                    if i > 0 {
+                        ui.add_space(style.line * 0.4);
+                    }
                     render_block(ui, child, style);
                 }
             });
@@ -203,12 +262,12 @@ fn list(ui: &mut egui::Ui, start: Option<u64>, items: &[ListItem], style: &Style
     }
 }
 
-/// 인라인 스팬 → LayoutJob. 굵게는 bold 패밀리(실제 굵은 폰트), 기울임은 egui의 italics.
+/// 인라인 스팬 → LayoutJob.
 fn inline_job(
     ui: &egui::Ui,
     spans: &Inlines,
     size: f32,
-    all_bold: bool,
+    all_strong: bool,
     style: &Style,
 ) -> LayoutJob {
     let visuals = ui.visuals();
@@ -216,19 +275,19 @@ fn inline_job(
     let mut job = LayoutJob::default();
     for span in spans {
         let s = span.style;
+        let strong = s.strong || all_strong;
         let family = if s.code {
             FontFamily::Monospace
-        } else if s.strong || all_bold {
+        } else if strong && style.options.bold_font {
             FontFamily::Name(BOLD_FAMILY.into())
         } else {
             FontFamily::Proportional
         };
-        let size = if s.code { size * 0.9 } else { size };
         let mut format = TextFormat {
-            font_id: FontId::new(size, family),
+            font_id: FontId::new(if s.code { style.body } else { size }, family),
             color: if s.link {
                 visuals.hyperlink_color
-            } else if s.strong || all_bold {
+            } else if strong && visuals.override_text_color.is_none() {
                 visuals.strong_text_color()
             } else {
                 text_color
@@ -237,7 +296,7 @@ fn inline_job(
             ..Default::default()
         };
         if s.code {
-            format.background = style.code_bg;
+            format.background = visuals.code_bg_color;
         }
         if s.strike {
             format.strikethrough = Stroke::new(1.0, text_color);

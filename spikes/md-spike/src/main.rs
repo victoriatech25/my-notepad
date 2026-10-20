@@ -77,7 +77,7 @@ fn block_map(file: &Path) -> i32 {
         };
         let _ = ctx.run_ui(raw, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                positions = render::show(ui, &doc);
+                positions = render::show(ui, &doc, render::Options::default());
             });
         });
     }
@@ -114,6 +114,7 @@ struct App {
     cache: CommonMarkCache,
     view: View,
     show_map: bool,
+    render_options: render::Options,
     positions: Vec<render::BlockPos>,
 }
 
@@ -127,6 +128,7 @@ impl App {
             cache: CommonMarkCache::default(),
             view: View::Both,
             show_map: false,
+            render_options: render::Options::default(),
             positions: Vec::new(),
         }
     }
@@ -165,7 +167,7 @@ impl App {
                 egui::Frame::new()
                     .inner_margin(egui::Margin::symmetric(8, 4))
                     .show(ui, |ui| {
-                        self.positions = render::show(ui, &self.doc);
+                        self.positions = render::show(ui, &self.doc, self.render_options);
                     });
             });
     }
@@ -184,6 +186,11 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.view, View::B, "B만");
                 ui.separator();
                 ui.toggle_value(&mut self.show_map, "B 블록 위치표");
+                ui.separator();
+                ui.checkbox(
+                    &mut self.render_options.bold_font,
+                    "B: 굵게·제목을 굵은 글꼴로 (끄면 A처럼 진한 색)",
+                );
             });
         });
 
