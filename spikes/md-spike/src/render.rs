@@ -348,3 +348,33 @@ pub fn check_positions(positions: &[BlockPos], block_count: usize) -> Result<(),
     }
     Ok(())
 }
+
+/// 위치표의 마지막 블록 아래 끝 (= 미리보기 내용 전체 높이)
+pub fn total_height(positions: &[BlockPos]) -> f32 {
+    positions.last().map_or(0.0, |p| p.top + p.height)
+}
+
+/// 가상 스크롤: 이미 잰 위치표를 써서 `viewport`와 겹치는 블록만 그리고, 나머지는 빈 공간으로 둔다.
+/// 위치표는 같은 폭에서 [`show`]로 한 번 전체를 그려 얻은 것이어야 한다.
+pub fn show_viewport(
+    ui: &mut egui::Ui,
+    doc: &Document,
+    options: Options,
+    positions: &[BlockPos],
+    viewport: egui::Rect,
+) {
+    let style = Style::new(ui, options);
+    let total = total_height(positions);
+    let first = positions.partition_point(|p| p.top + p.height < viewport.min.y);
+    let last = positions.partition_point(|p| p.top <= viewport.max.y);
+    let mut y = 0.0;
+    for p in &positions[first..last.max(first)] {
+        ui.add_space(p.top - y);
+        ui.scope(|ui| {
+            ui.set_width(ui.available_width());
+            render_block(ui, &doc.blocks[p.index], &style);
+        });
+        y = p.top + p.height;
+    }
+    ui.add_space((total - y).max(0.0));
+}
