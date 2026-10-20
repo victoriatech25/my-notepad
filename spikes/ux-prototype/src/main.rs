@@ -132,6 +132,13 @@ struct App {
     dialog: Option<Dialog>,
     toast: Option<(String, f64)>,
     many_tabs: bool,
+    // 탭 바 넘침 처리 (UX-002)
+    tabs_last_active: Option<usize>,
+    tabs_scroll_to: Option<f32>,
+    tabs_offset: f32,
+    tabs_max_offset: f32,
+    tabs_view_width: f32,
+    tab_filter: String,
     open_dirs: std::collections::HashSet<&'static str>,
     chord_k_pending: bool,
     allow_close: bool,
@@ -165,6 +172,12 @@ impl App {
             dialog: None,
             toast: None,
             many_tabs: false,
+            tabs_last_active: None,
+            tabs_scroll_to: None,
+            tabs_offset: 0.0,
+            tabs_max_offset: 0.0,
+            tabs_view_width: 0.0,
+            tab_filter: String::new(),
             open_dirs: data::initially_open_dirs(),
             chord_k_pending: false,
             allow_close: false,
@@ -762,73 +775,154 @@ impl App {
 
     // ---------------------------------------------------------------- 탭 바
 
+    /// 탭 바 (UX-002): 한 줄 유지 + 선택 탭 자동 스크롤 + 넘칠 때 ‹ › 버튼 + 휠 가로 스크롤
+    /// + 열린 탭 목록(⌄) 드롭다운.
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(ui.visuals());
         let is_md = self.doc().is_markdown;
-        let right_width = if is_md { 230.0 } else { 0.0 };
         let mut switch = None;
         let mut close = None;
+        let mut active_rect = None;
+
+        // 선택 탭이 바뀌었으면(단축키·사이드바·목록 등 어떤 경로든) 화면 안으로 스크롤한다.
+        let scroll_active = self.tabs_last_active != Some(self.active);
+        self.tabs_last_active = Some(self.active);
+
+        let overflow = self.tabs_max_offset > 1.0;
+        let step = (self.tabs_view_width * 0.6).max(120.0);
+        let icon_size = ui.text_style_height(&egui::TextStyle::Body);
+        let nav = |ui: &mut egui::Ui, glyph: &str, enabled: bool, tip: &str| {
+            ui.add_enabled(
+                enabled,
+                egui::Button::new(icons::glyph(glyph).size(icon_size)).frame(false),
+            )
+            .on_hover_text(tip)
+            .clicked()
+        };
 
         ui.horizontal(|ui| {
-            egui::ScrollArea::horizontal()
-                .max_width((ui.available_width() - right_width - 8.0).max(100.0))
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for (i, doc) in self.docs.iter().enumerate() {
-                            let selected = i == self.active;
-                            let frame = egui::Frame::new()
-                                .inner_margin(egui::Margin::symmetric(6, 3))
-                                .corner_radius(4.0)
-                                .fill(if selected {
-                                    ui.visuals().selection.bg_fill.gamma_multiply(0.35)
-                                } else {
-                                    Color32::TRANSPARENT
-                                })
-                                .stroke(if selected {
-                                    Stroke::new(1.0, ui.visuals().selection.stroke.color)
-                                } else {
-                                    Stroke::NONE
-                                });
-                            frame.show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                icons::show(ui, &doc.title, false, false, false);
-                                let title = RichText::new(&doc.title);
-                                let tab = ui.add(
-                                    egui::Label::new(if selected { title.strong() } else { title })
+            // 오른쪽 고정 영역: ›, ＋, ⌄, (Markdown 모드 토글)
+            let right_width =
+                34.0 * if overflow { 3.0 } else { 2.0 } + if is_md { 230.0 } else { 0.0 };
+
+            if overflow
+                && nav(
+                    ui,
+                    icons::ui::CARET_LEFT,
+                    self.tabs_offset > 0.5,
+                    "왼쪽 탭으로 이동",
+                )
+            {
+                self.tabs_scroll_to = Some((self.tabs_offset - step).max(0.0));
+            }
+
+            let mut area = egui::ScrollArea::horizontal()
+                .id_salt("tab-bar-scroll")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .max_width((ui.available_width() - right_width).max(100.0))
+                .auto_shrink([false, true]);
+            if let Some(offset) = self.tabs_scroll_to.take() {
+                area = area.horizontal_scroll_offset(offset);
+            }
+            let output = ui
+                .scope(|ui| {
+                    // 세로 휠도 가로 스크롤로 쓰게 한다 (Shift 없이).
+                    ui.style_mut().always_scroll_the_only_direction = true;
+                    area.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for (i, doc) in self.docs.iter().enumerate() {
+                                let selected = i == self.active;
+                                let frame = egui::Frame::new()
+                                    .inner_margin(egui::Margin::symmetric(6, 3))
+                                    .corner_radius(4.0)
+                                    .fill(if selected {
+                                        ui.visuals().selection.bg_fill.gamma_multiply(0.35)
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
+                                    .stroke(if selected {
+                                        Stroke::new(1.0, ui.visuals().selection.stroke.color)
+                                    } else {
+                                        Stroke::NONE
+                                    });
+                                let shown = frame.show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    icons::show(ui, &doc.title, false, false, false);
+                                    let title = RichText::new(&doc.title);
+                                    let tab = ui.add(
+                                        egui::Label::new(if selected {
+                                            title.strong()
+                                        } else {
+                                            title
+                                        })
                                         .sense(egui::Sense::click()),
-                                );
-                                let tab = tab.on_hover_text(
-                                    doc.path.as_deref().unwrap_or("저장되지 않은 새 문서"),
-                                );
-                                if tab.clicked() {
-                                    switch = Some(i);
+                                    );
+                                    let tab = tab.on_hover_text(
+                                        doc.path.as_deref().unwrap_or("저장되지 않은 새 문서"),
+                                    );
+                                    if tab.clicked() {
+                                        switch = Some(i);
+                                    }
+                                    if tab.middle_clicked() {
+                                        close = Some(i);
+                                    }
+                                    if doc.modified {
+                                        ui.label(RichText::new("●").color(palette.modified_marker))
+                                            .on_hover_text("저장되지 않은 변경 내용");
+                                    }
+                                    if ui
+                                        .add(egui::Button::new("×").small().frame(false))
+                                        .on_hover_text("탭 닫기")
+                                        .clicked()
+                                    {
+                                        close = Some(i);
+                                    }
+                                });
+                                if selected {
+                                    active_rect = Some(shown.response.rect);
+                                    if scroll_active {
+                                        ui.scroll_to_rect(shown.response.rect, None);
+                                    }
                                 }
-                                if tab.middle_clicked() {
-                                    close = Some(i);
-                                }
-                                if doc.modified {
-                                    ui.label(RichText::new("●").color(palette.modified_marker))
-                                        .on_hover_text("저장되지 않은 변경 내용");
-                                }
-                                if ui
-                                    .add(egui::Button::new("×").small().frame(false))
-                                    .on_hover_text("탭 닫기")
-                                    .clicked()
-                                {
-                                    close = Some(i);
-                                }
-                            });
-                        }
-                        if ui
-                            .add(egui::Button::new("＋").frame(false))
-                            .on_hover_text("새 탭")
-                            .clicked()
-                        {
-                            switch = Some(usize::MAX);
-                        }
-                    });
-                });
+                            }
+                        });
+                    })
+                })
+                .inner;
+            // 첫 프레임에는 스크롤 범위가 확정되지 않아 덜 스크롤될 수 있으므로, 선택 탭이 완전히 보일 때까지 다음 프레임에 다시 맞춘다.
+            if let Some(rect) = active_rect
+                && !output.inner_rect.expand(1.0).contains_rect(rect)
+                && rect.width() <= output.inner_rect.width()
+                && scroll_active
+            {
+                self.tabs_last_active = None;
+                ui.ctx().request_repaint();
+            }
+            self.tabs_offset = output.state.clamped_offset().x;
+            self.tabs_view_width = output.inner_rect.width();
+            self.tabs_max_offset = (output.content_size.x - output.inner_rect.width()).max(0.0);
+
+            if overflow
+                && nav(
+                    ui,
+                    icons::ui::CARET_RIGHT,
+                    self.tabs_offset < self.tabs_max_offset - 0.5,
+                    "오른쪽 탭으로 이동",
+                )
+            {
+                self.tabs_scroll_to = Some((self.tabs_offset + step).min(self.tabs_max_offset));
+            }
+            if nav(ui, icons::ui::PLUS, true, "새 탭") {
+                switch = Some(usize::MAX);
+            }
+            let list = ui.menu_button(icons::glyph(icons::ui::CARET_DOWN).size(icon_size), |ui| {
+                if let Some(i) = self.open_tabs_list(ui) {
+                    switch = Some(i);
+                    ui.close();
+                }
+            });
+            list.response
+                .on_hover_text(format!("열린 탭 목록 ({}개)", self.docs.len()));
 
             if is_md {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -873,6 +967,62 @@ impl App {
             (Some(i), _) => self.switch_to(i),
             _ => {}
         }
+    }
+
+    /// 열린 탭 목록 드롭다운: 검색어로 거르고, 고른 탭의 번호를 돌려준다.
+    fn open_tabs_list(&mut self, ui: &mut egui::Ui) -> Option<usize> {
+        let palette = theme::palette(ui.visuals());
+        ui.set_min_width(300.0);
+        ui.horizontal(|ui| {
+            ui.label(icons::glyph(icons::ui::MAGNIFYING_GLASS).weak());
+            let filter = ui.add(
+                egui::TextEdit::singleline(&mut self.tab_filter)
+                    .hint_text("탭 이름으로 찾기")
+                    .desired_width(240.0),
+            );
+            filter.request_focus();
+        });
+        ui.separator();
+        let needle = self.tab_filter.to_lowercase();
+        let mut picked = None;
+        let mut shown = 0;
+        egui::ScrollArea::vertical()
+            .max_height(360.0)
+            .show(ui, |ui| {
+                for (i, doc) in self.docs.iter().enumerate() {
+                    if !needle.is_empty() && !doc.title.to_lowercase().contains(&needle) {
+                        continue;
+                    }
+                    shown += 1;
+                    let row = ui
+                        .horizontal(|ui| {
+                            icons::show(ui, &doc.title, false, false, false);
+                            let mut text = RichText::new(&doc.title);
+                            if i == self.active {
+                                text = text.strong();
+                            }
+                            let r = ui.add(egui::Button::selectable(i == self.active, text));
+                            if doc.modified {
+                                ui.label(RichText::new("●").color(palette.modified_marker));
+                            }
+                            r
+                        })
+                        .inner;
+                    if row
+                        .on_hover_text(doc.path.as_deref().unwrap_or("저장되지 않은 새 문서"))
+                        .clicked()
+                    {
+                        picked = Some(i);
+                    }
+                }
+            });
+        if shown == 0 {
+            ui.label(RichText::new("일치하는 탭이 없습니다").weak());
+        }
+        if picked.is_some() {
+            self.tab_filter.clear();
+        }
+        picked
     }
 
     // ---------------------------------------------------------------- 사이드바

@@ -115,3 +115,17 @@ pub fn show(ui: &mut egui::Ui, name: &str, is_dir: bool, open: bool, dimmed: boo
             .color(color),
     );
 }
+
+/// UI 컨트롤용 아이콘 글리프 (Phosphor)
+pub mod ui {
+    pub const CARET_LEFT: &str = "\u{E138}";
+    pub const CARET_RIGHT: &str = "\u{E13A}";
+    pub const CARET_DOWN: &str = "\u{E136}";
+    pub const PLUS: &str = "\u{E3D4}";
+    pub const MAGNIFYING_GLASS: &str = "\u{E30C}";
+}
+
+/// 아이콘 폰트로 그린 글리프 텍스트
+pub fn glyph(glyph: &str) -> RichText {
+    RichText::new(glyph).family(FontFamily::Name(ICON_FAMILY.into()))
+}
