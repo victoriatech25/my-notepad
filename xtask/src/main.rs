@@ -6,6 +6,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
+mod samples;
+
 /// `cargo xtask try <시나리오>`로 실행할 수 있는 시나리오.
 struct Scenario {
     name: &'static str,
@@ -47,6 +49,20 @@ const SCENARIOS: &[Scenario] = &[
         wait: false,
     },
     Scenario {
+        name: "perf",
+        package: "editor-spike",
+        args: &["--screen=perf"],
+        description: "P0-06 대용량 텍스트 성능 화면 (샘플: cargo xtask gen-samples)",
+        wait: false,
+    },
+    Scenario {
+        name: "perf-bench",
+        package: "editor-spike",
+        args: &["--perf-bench"],
+        description: "P0-06 대용량 텍스트 자동 벤치 (창 없음, 수 분 소요)",
+        wait: true,
+    },
+    Scenario {
         name: "font-report",
         package: "editor-spike",
         args: &["--font-report"],
@@ -60,6 +76,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("try") => try_scenario(args.get(1).map(String::as_str)),
         Some("doctor") => doctor(),
+        Some("gen-samples") => samples::generate(&workspace_root()),
         None | Some("help" | "-h" | "--help") => {
             print_help();
             Ok(())
@@ -83,6 +100,7 @@ fn print_help() {
     println!("명령:");
     println!("  try <시나리오>   릴리스 빌드 후 실행 (사용자 검증용)");
     println!("  doctor           개발 환경 점검 (두 장비 준비 상태 확인)");
+    println!("  gen-samples      성능 측정용 샘플 생성 (spikes/samples, git 제외)");
     println!("  help             이 도움말\n");
     println!("시나리오:");
     for scenario in SCENARIOS {
