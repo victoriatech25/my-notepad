@@ -1,6 +1,6 @@
 # My-Notepad UI 명세 (초안)
 
-> 상태: **초안 — UX-1 검증 전** · 스크린샷: [screens/](screens/) · 기준: [PLAN.md](../PLAN.md) §3, [WORKPLAN.md](../WORKPLAN.md) P0-UX1
+> 상태: **초안 — UX-1 통과(전 항목 좋음), P0-UX2에서 아이콘 방식 결정 후 확정** · 스크린샷: [screens/](screens/) · 기준: [PLAN.md](../PLAN.md) §3, [WORKPLAN.md](../WORKPLAN.md) P0-UX1
 > 이 문서는 프로토타입(`spikes/ux-prototype`, 실행: `cargo xtask try prototype`)과 함께 갱신한다. UX-1 피드백을 반영해 P0-UX2에서 확정한다.
 
 ---
