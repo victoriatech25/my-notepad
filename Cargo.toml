@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["xtask", "spikes/editor-spike", "spikes/ux-prototype"]
+members = ["xtask", "spikes/editor-spike", "spikes/ux-prototype", "spikes/md-spike"]
 
 [workspace.package]
 edition = "2024"

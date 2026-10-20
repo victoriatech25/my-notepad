@@ -57,6 +57,20 @@ const SCENARIOS: &[Scenario] = &[
         wait: false,
     },
     Scenario {
+        name: "md",
+        package: "md-spike",
+        args: &[],
+        description: "P0-08 Markdown 렌더러 비교 (A egui_commonmark | B 자체 렌더러, docs/PLAN.md)",
+        wait: false,
+    },
+    Scenario {
+        name: "md-block-map",
+        package: "md-spike",
+        args: &["--block-map"],
+        description: "P0-08 B 렌더러 블록 위치표 출력·점검 (창 없음)",
+        wait: true,
+    },
+    Scenario {
         name: "perf-bench",
         package: "editor-spike",
         args: &["--perf-bench"],

@@ -1,0 +1,16 @@
+[package]
+name = "md-spike"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Phase 0 P0-08/P0-09: Markdown 렌더러 비교(egui_commonmark vs pulldown-cmark 자체 렌더러)"
+
+[dependencies]
+eframe = { version = "=0.37.0", features = ["glow"] }
+# A안: 기존 egui용 Markdown 뷰어 (egui 0.37 대응 버전)
+egui_commonmark = "=0.26.0"
+# B안: 파서만 쓰고 렌더링은 직접 한다 (소스 위치 → 블록 위치 대응을 위해)
+pulldown-cmark = { version = "0.13", default-features = false }
+memmap2 = "0.9.11"
+ttf-parser = "0.25.1"
