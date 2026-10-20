@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["xtask"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

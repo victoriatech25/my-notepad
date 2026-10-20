@@ -1,0 +1,18 @@
+# 소스·문서는 저장소에 LF로 저장하고, 체크아웃 시에도 LF를 유지한다 (Windows·macOS 공통).
+* text=auto eol=lf
+
+# 테스트 픽스처와 측정용 샘플은 바이트 그대로 보존한다.
+# 앱이 CRLF/LF와 인코딩을 바이트 단위로 검사하므로 Git이 줄바꿈을 바꾸면 안 된다.
+tests/fixtures/** -text
+spikes/samples/** -text
+
+# 바이너리 자산
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.ttc binary
+*.otf binary

@@ -1,0 +1,20 @@
+# Rust 빌드 결과
+/target/
+**/target/
+
+# 측정용 대용량 샘플 (cargo xtask gen-samples로 생성)
+/spikes/samples/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 편집기
+.idea/
+.vscode/
+*.swp
+*~
+
+# 로그
+*.log
