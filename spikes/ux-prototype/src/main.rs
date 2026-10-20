@@ -865,9 +865,20 @@ impl App {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        let toggle_tip = format!(
+            "사이드바 닫기 ({})",
+            ctx.format_shortcut(&self.shortcuts.sidebar)
+        );
         ui.horizontal(|ui| {
             ui.strong("탐색기");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::new("«").frame(false))
+                    .on_hover_text(toggle_tip)
+                    .clicked()
+                {
+                    self.sidebar_open = false;
+                }
                 if ui.small_button("⟳").on_hover_text("새로고침").clicked() {
                     self.toast(&ctx, "폴더 내용을 다시 읽었습니다 (프로토타입)");
                 }
@@ -1511,6 +1522,32 @@ impl eframe::App for App {
                 .default_size(220.0)
                 .size_range(140.0..=480.0)
                 .show(ui, |ui| self.sidebar(ui));
+        } else {
+            // 닫힌 상태에서도 화면에서 다시 열 수 있도록 좁은 세로 띠를 남긴다.
+            let tip = format!(
+                "사이드바 열기 ({})",
+                ctx.format_shortcut(&self.shortcuts.sidebar)
+            );
+            egui::Panel::left("sidebar-rail")
+                .resizable(false)
+                .exact_size(30.0)
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(4.0);
+                        if ui
+                            .add(egui::Button::new("»").frame(false))
+                            .on_hover_text(&tip)
+                            .clicked()
+                        {
+                            self.sidebar_open = true;
+                        }
+                        // 띠의 빈 곳을 클릭해도 열린다.
+                        let rest = ui.allocate_response(ui.available_size(), egui::Sense::click());
+                        if rest.on_hover_text(&tip).clicked() {
+                            self.sidebar_open = true;
+                        }
+                    });
+                });
         }
 
         egui::CentralPanel::default()
