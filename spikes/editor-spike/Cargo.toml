@@ -1,0 +1,11 @@
+[package]
+name = "editor-spike"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Phase 0 스파이크: egui 에디터 검증용 실험 앱"
+
+[dependencies]
+# egui는 마이너 버전마다 Breaking Change가 잦으므로 정확한 버전으로 고정한다 (PLAN.md §2.1).
+eframe = "=0.37.0"
