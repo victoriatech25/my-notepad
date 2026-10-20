@@ -93,6 +93,7 @@
   - Windows: `%WINDIR%\Fonts\consola.ttf`, `%WINDIR%\Fonts\malgun.ttf`
   - macOS: `/System/Library/Fonts/Menlo.ttc`, `/System/Library/Fonts/AppleSDGothicNeo.ttc` (`.ttc`는 컬렉션이므로 `FontData`의 face index 지정 필요)
 - **로드 실패 시**: egui 기본 폰트로 기동하고 상태 표시줄/로그에 경고 (한글이 □로 표시되는 상황을 사용자에게 알림).
+- **결정 (P0-02, 2026-10-20)**: 위 체인을 **직접 구성**하는 방식을 채택한다. 시스템 폰트 파일은 memory-map으로 읽고, `.ttc`는 이름 테이블로 face를 고른다. egui 0.37에 내장된 시스템 폰트 자동 대체(`NativeOptions::system_font_fallback`)는 체인에 없는 문자(일본어·이모지 등)를 위한 **보조 수단으로만** 켜 둔다.
 - **라이선스**: 맑은 고딕·Apple SD 산돌고딕은 **번들 재배포 불가** → 시스템 폰트를 런타임 로드만 한다. 일관된 렌더링이 필요하면 OFL 라이선스 폰트(예: D2Coding)를 선택적 번들(빌드 feature)로 제공한다.
 - **폭 처리**: 한글은 전각(2칸) 폭이므로 상태 표시줄의 `Col`은 **문자 단위**로 표시하고, 표시 폭 기반 정렬이 필요한 기능(탭 크기 등)은 `unicode-width` 기준으로 계산한다.
 - 한글 폰트 파일은 수 MB 이상이므로 Phase 0에서 **기동 시간·메모리 영향**을 측정한다.
