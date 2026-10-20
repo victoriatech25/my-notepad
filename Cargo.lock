@@ -3347,6 +3347,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ux-prototype"
+version = "0.0.0"
+dependencies = [
+ "eframe",
+ "memmap2",
+ "ttf-parser",
+]
+
+[[package]]
 name = "vello_common"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

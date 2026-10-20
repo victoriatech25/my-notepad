@@ -28,6 +28,12 @@ const SCENARIOS: &[Scenario] = &[
         description: "P0-02 폰트 Fallback 체인 확인 화면",
     },
     Scenario {
+        name: "prototype",
+        package: "ux-prototype",
+        args: &[],
+        description: "P0-UX1 전체 화면 UX 프로토타입 (가짜 데이터)",
+    },
+    Scenario {
         name: "font-report",
         package: "editor-spike",
         args: &["--font-report"],
