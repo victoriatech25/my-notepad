@@ -13,6 +13,8 @@
 mod fonts;
 mod model;
 mod render;
+mod split;
+mod sync;
 
 use std::path::{Path, PathBuf};
 
@@ -31,6 +33,14 @@ fn main() -> eframe::Result {
         .find(|a| !a.starts_with("--"))
         .map(PathBuf::from)
         .unwrap_or_else(default_file);
+
+    if args.iter().any(|a| a == "--scroll-bench") {
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let (defs, _) = fonts::explicit_chain();
+        println!("{}", file.display());
+        print!("{}", split::scroll_bench(&text, defs));
+        std::process::exit(0);
+    }
 
     if args.iter().any(|a| a == "--block-map") {
         std::process::exit(block_map(&file));
@@ -102,6 +112,8 @@ fn block_map(file: &Path) -> i32 {
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum View {
+    /// P0-09: 소스 + 미리보기 분할, 스크롤 동기화
+    Split,
     Both,
     A,
     B,
@@ -116,20 +128,23 @@ struct App {
     show_map: bool,
     render_options: render::Options,
     positions: Vec<render::BlockPos>,
+    split: split::Split,
 }
 
 impl App {
     fn new(file: PathBuf, text: String) -> Self {
         let doc = model::parse(&text);
+        let split = split::Split::new(text.clone());
         Self {
             file,
             text,
             doc,
             cache: CommonMarkCache::default(),
-            view: View::Both,
+            view: View::Split,
             show_map: false,
             render_options: render::Options::default(),
             positions: Vec::new(),
+            split,
         }
     }
 
@@ -181,6 +196,7 @@ impl eframe::App for App {
                 ui.separator();
                 ui.label(RichText::new(self.file.display().to_string()).small());
                 ui.separator();
+                ui.selectable_value(&mut self.view, View::Split, "분할 동기화 (P0-09)");
                 ui.selectable_value(&mut self.view, View::Both, "A | B 나란히");
                 ui.selectable_value(&mut self.view, View::A, "A만");
                 ui.selectable_value(&mut self.view, View::B, "B만");
@@ -191,6 +207,10 @@ impl eframe::App for App {
                     &mut self.render_options.bold_font,
                     "B: 굵게·제목을 굵은 글꼴로 (끄면 A처럼 진한 색)",
                 );
+                if self.view == View::Split {
+                    ui.separator();
+                    self.split.controls(ui);
+                }
             });
         });
 
@@ -218,6 +238,10 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| match self.view {
             View::A => self.pane_a(ui),
             View::B => self.pane_b(ui),
+            View::Split => {
+                self.split.options = self.render_options;
+                self.split.ui(ui);
+            }
             View::Both => {
                 let half = ui.available_width() / 2.0;
                 egui::Panel::left("left-a")
