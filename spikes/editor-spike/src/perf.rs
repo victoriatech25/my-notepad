@@ -113,7 +113,7 @@ pub struct PerfScreen {
 }
 
 impl PerfScreen {
-    fn load(&mut self, path: PathBuf) {
+    pub fn load(&mut self, path: PathBuf) {
         let t = Instant::now();
         match std::fs::read(&path).map(String::from_utf8) {
             Ok(Ok(text)) => {

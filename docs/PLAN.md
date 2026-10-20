@@ -545,7 +545,7 @@ my-notepad/
 | 리스크 | Markdown 분할 스크롤 동기화 품질 (표·이미지·긴 코드 블록에서 높이 불일치) | 높음 | 자체 렌더러(§2.5 B)로 블록 위치 직접 관리, 블록 내부 선형 보간, Phase 0 시제품 검증 |
 | 리스크 | 미리보기 이미지 디코딩으로 인한 메모리 증가 | 중간 | 화면 밖 이미지 텍스처 해제, 표시 크기로 축소 디코딩, 포맷 기능 최소화 |
 | 리스크 | 코드 서명·공증 비용 및 절차 | 중간 | Phase 5 이전에 인증서/Apple Developer 계정 준비 |
-| 미결정 | 렌더링 백엔드 `glow` vs `wgpu` | — | Phase 0 측정 후 결정 |
+| 미결정 → 권장 | 렌더링 백엔드 `glow` vs `wgpu` | — | P0-07 측정: 빈 문서 메모리 glow 112MB · wgpu 319MB, 기동 glow 362ms · wgpu 462ms → **glow 권장**. P0-10 ADR에서 확정 ([측정](measurements/phase0.md)) |
 | 미결정 | OFL 한글 고정폭 폰트 번들 여부 | — | Phase 0 측정 후 결정 |
 | 미결정 | UI 다국어(영어) 지원 여부 | — | Phase 2 이전 결정 |
 | 미결정 | Markdown 렌더러 `egui_commonmark` vs 자체 렌더러 | — | Phase 0 시제품 후 ADR 0002로 결정 (권장: 자체 렌더러) |

@@ -6,6 +6,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
+mod measure;
 mod samples;
 
 /// `cargo xtask try <시나리오>`로 실행할 수 있는 시나리오.
@@ -77,6 +78,15 @@ fn main() -> ExitCode {
         Some("try") => try_scenario(args.get(1).map(String::as_str)),
         Some("doctor") => doctor(),
         Some("gen-samples") => samples::generate(&workspace_root()),
+        Some("measure") => {
+            let runs = args
+                .iter()
+                .position(|a| a == "--runs")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10);
+            measure::run(&workspace_root(), runs)
+        }
         None | Some("help" | "-h" | "--help") => {
             print_help();
             Ok(())
@@ -101,6 +111,7 @@ fn print_help() {
     println!("  try <시나리오>   릴리스 빌드 후 실행 (사용자 검증용)");
     println!("  doctor           개발 환경 점검 (두 장비 준비 상태 확인)");
     println!("  gen-samples      성능 측정용 샘플 생성 (spikes/samples, git 제외)");
+    println!("  measure [--runs N]  메모리·기동 시간 측정 (렌더러 × 한글 폰트 × 문서, 기본 10회)");
     println!("  help             이 도움말\n");
     println!("시나리오:");
     for scenario in SCENARIOS {

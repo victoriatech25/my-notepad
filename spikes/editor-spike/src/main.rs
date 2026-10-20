@@ -10,6 +10,7 @@
 
 mod fonts;
 mod input_check;
+mod measure;
 mod perf;
 
 use std::time::{Duration, Instant};
@@ -53,17 +54,21 @@ fn main() -> eframe::Result {
         std::process::exit(if report.failures.is_empty() { 0 } else { 1 });
     }
 
+    let args = measure::Args::parse();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("My-Notepad Spike (P0-03~05 입력 검증)")
+            .with_title("My-Notepad Spike (Phase 0)")
             .with_inner_size([1200.0, 780.0])
             .with_min_inner_size([480.0, 320.0]),
+        renderer: args.renderer(),
+        // 한글 폰트 없이 잴 때는 시스템 폰트 자동 대체도 꺼서 순수 기준선을 만든다.
+        system_font_fallback: !args.no_ko_fonts,
         ..Default::default()
     };
     eframe::run_native(
         "my-notepad-editor-spike",
         options,
-        Box::new(move |cc| Ok(Box::new(SpikeApp::new(cc, started)))),
+        Box::new(move |cc| Ok(Box::new(SpikeApp::new(cc, started, args)))),
     )
 }
 
@@ -95,14 +100,27 @@ struct SpikeApp {
     perf: perf::PerfScreen,
     started: Instant,
     first_frame: Option<Duration>,
+    args: measure::Args,
+    frames: u64,
 }
 
 impl SpikeApp {
-    fn new(cc: &eframe::CreationContext<'_>, started: Instant) -> Self {
-        let (explicit_defs, report) = fonts::explicit_chain();
+    fn new(cc: &eframe::CreationContext<'_>, started: Instant, args: measure::Args) -> Self {
+        let (explicit_defs, report) = if args.no_ko_fonts {
+            (
+                egui::FontDefinitions::default(),
+                fonts::FontReport::default(),
+            )
+        } else {
+            fonts::explicit_chain()
+        };
         cc.egui_ctx.set_fonts(explicit_defs.clone());
+        let mut perf = perf::PerfScreen::default();
+        if let Some(path) = &args.open {
+            perf.load(path.clone());
+        }
         Self {
-            screen: if std::env::args().any(|a| a == "--screen=perf") {
+            screen: if args.open.is_some() || std::env::args().any(|a| a == "--screen=perf") {
                 Screen::Perf
             } else {
                 Screen::Input
@@ -112,9 +130,11 @@ impl SpikeApp {
             explicit_defs,
             report,
             input: input_check::InputCheck::default(),
-            perf: perf::PerfScreen::default(),
+            perf,
             started,
             first_frame: None,
+            args,
+            frames: 0,
         }
     }
 
@@ -206,6 +226,10 @@ impl SpikeApp {
 
 impl eframe::App for SpikeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.frames += 1;
+        if self.frames == 2 {
+            self.args.report_first_frame(self.started);
+        }
         if self.first_frame.is_none() {
             self.first_frame = Some(self.started.elapsed());
         }
