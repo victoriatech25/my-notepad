@@ -8,7 +8,8 @@ description = "Phase 0 스파이크: egui 에디터 검증용 실험 앱"
 
 [dependencies]
 # egui는 마이너 버전마다 Breaking Change가 잦으므로 정확한 버전으로 고정한다 (PLAN.md §2.1).
-eframe = "=0.37.0"
+# P0-07: glow(OpenGL)와 wgpu(기본)를 함께 넣어 실행 인자로 고른다.
+eframe = { version = "=0.37.0", features = ["glow"] }
 # 아래 두 크레이트는 eframe 의존성 트리에 이미 있는 버전을 쓴다.
 memmap2 = "0.9.11"
 ttf-parser = "0.25.1"
