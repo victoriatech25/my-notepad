@@ -13,6 +13,7 @@ mod highlight;
 mod icons;
 mod markdown;
 mod theme;
+mod window_menu;
 
 use std::ops::Range;
 
@@ -60,6 +61,7 @@ enum Dialog {
     Shortcuts,
     RegexHelp,
     About,
+    WindowList,
 }
 
 struct Shortcuts {
@@ -78,7 +80,6 @@ struct Shortcuts {
     zoom_in: KeyboardShortcut,
     zoom_out: KeyboardShortcut,
     zoom_reset: KeyboardShortcut,
-    next_tab: KeyboardShortcut,
 }
 
 impl Shortcuts {
@@ -113,7 +114,6 @@ impl Shortcuts {
             zoom_in: KeyboardShortcut::new(cmd, Key::Equals),
             zoom_out: KeyboardShortcut::new(cmd, Key::Minus),
             zoom_reset: KeyboardShortcut::new(cmd, Key::Num0),
-            next_tab: KeyboardShortcut::new(Modifiers::CTRL, Key::Tab),
         }
     }
 }
@@ -132,6 +132,10 @@ struct App {
     dialog: Option<Dialog>,
     toast: Option<(String, f64)>,
     many_tabs: bool,
+    // 창 메뉴 (UX-003)
+    tab_shortcuts: window_menu::TabShortcuts,
+    close_queue: Vec<String>,
+    window_list_selected: std::collections::HashSet<String>,
     // 탭 바 넘침 처리 (UX-002)
     tabs_last_active: Option<usize>,
     tabs_scroll_to: Option<f32>,
@@ -172,6 +176,9 @@ impl App {
             dialog: None,
             toast: None,
             many_tabs: false,
+            tab_shortcuts: window_menu::TabShortcuts::for_os(),
+            close_queue: Vec::new(),
+            window_list_selected: std::collections::HashSet::new(),
             tabs_last_active: None,
             tabs_scroll_to: None,
             tabs_offset: 0.0,
@@ -344,7 +351,6 @@ impl App {
             zoom_in,
             zoom_out,
             zoom_reset,
-            next_tab,
         ) = ctx.input_mut(|i| {
             (
                 i.consume_shortcut(&s.new_tab),
@@ -363,7 +369,6 @@ impl App {
                     || i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus)),
                 i.consume_shortcut(&s.zoom_out),
                 i.consume_shortcut(&s.zoom_reset),
-                i.consume_shortcut(&s.next_tab),
             )
         });
 
@@ -446,9 +451,6 @@ impl App {
         }
         if zoom_reset {
             self.zoom = 1.0;
-        }
-        if next_tab {
-            self.switch_to((self.active + 1) % self.docs.len());
         }
         if self.find.open && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.find.open = false;
@@ -652,6 +654,8 @@ impl App {
                 self.line_ending_menu(ui);
             });
 
+            ui.menu_button("창", |ui| self.window_menu(ui, &ctx));
+
             ui.menu_button("도움말", |ui| {
                 if ui.button("단축키 목록").clicked() {
                     self.dialog = Some(Dialog::Shortcuts);
@@ -783,6 +787,7 @@ impl App {
         let mut switch = None;
         let mut close = None;
         let mut active_rect = None;
+        let mut tab_cmd = None;
 
         // 선택 탭이 바뀌었으면(단축키·사이드바·목록 등 어떤 경로든) 화면 안으로 스크롤한다.
         let scroll_active = self.tabs_last_active != Some(self.active);
@@ -860,6 +865,13 @@ impl App {
                                     let tab = tab.on_hover_text(
                                         doc.path.as_deref().unwrap_or("저장되지 않은 새 문서"),
                                     );
+                                    tab.context_menu(|ui| {
+                                        if let Some(cmd) =
+                                            App::tab_context_menu(ui, i, doc.path.is_some())
+                                        {
+                                            tab_cmd = Some(cmd);
+                                        }
+                                    });
                                     if tab.clicked() {
                                         switch = Some(i);
                                     }
@@ -966,6 +978,10 @@ impl App {
             (Some(usize::MAX), _) => self.new_tab(),
             (Some(i), _) => self.switch_to(i),
             _ => {}
+        }
+        if let Some(cmd) = tab_cmd {
+            let ctx = ui.ctx().clone();
+            self.run_tab_command(&ctx, cmd);
         }
     }
 
@@ -1475,6 +1491,13 @@ impl App {
                     let title = self.docs[doc].title.clone();
                     ui.heading("변경 내용을 저장할까요?");
                     ui.label(format!("\"{title}\"의 변경 내용이 저장되지 않았습니다."));
+                    if !self.close_queue.is_empty() {
+                        ui.label(
+                            RichText::new(format!("이어서 닫을 탭 {}개가 더 있습니다. 취소하면 모두 멈춥니다.", self.close_queue.len()))
+                                .small()
+                                .weak(),
+                        );
+                    }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.add(primary("저장")).clicked() {
@@ -1488,6 +1511,8 @@ impl App {
                             close = true;
                         }
                         if ui.button("취소").clicked() {
+                            // 일괄 닫기 중이었다면 남은 대기열도 취소한다.
+                            self.close_queue.clear();
                             close = true;
                         }
                     });
@@ -1598,6 +1623,25 @@ impl App {
                         ui.label("Markdown 분할 보기");
                         ui.monospace(format!("{} 다음 V", ctx.format_shortcut(&s.chord_k)));
                         ui.end_row();
+                        let t = &self.tab_shortcuts;
+                        let join = |list: &[KeyboardShortcut]| {
+                            list.iter()
+                                .map(|s| ctx.format_shortcut(s))
+                                .collect::<Vec<_>>()
+                                .join(" / ")
+                        };
+                        for (label, keys) in [
+                            ("다음 탭", join(&t.next)),
+                            ("이전 탭", join(&t.prev)),
+                            ("탭을 왼쪽 / 오른쪽으로 이동", format!("{} / {}", join(&t.move_left), join(&t.move_right))),
+                            ("1~8번째 탭으로", format!("{} ~ {}", ctx.format_shortcut(&t.goto[0]), ctx.format_shortcut(&t.goto[7]))),
+                            ("마지막 탭으로", ctx.format_shortcut(&t.last)),
+                            ("모든 탭 닫기", ctx.format_shortcut(&t.close_all)),
+                        ] {
+                            ui.label(label);
+                            ui.monospace(keys);
+                            ui.end_row();
+                        }
                     });
                     ui.add_space(8.0);
                     if ui.add(primary("닫기")).clicked() {
@@ -1627,6 +1671,11 @@ impl App {
                         close = true;
                     }
                 }
+                Dialog::WindowList => {
+                    if self.window_list_ui(ui, ctx) {
+                        close = true;
+                    }
+                }
                 Dialog::About => {
                     ui.heading("My-Notepad");
                     ui.label("UX 프로토타입 (P0-UX1) · egui 0.37");
@@ -1639,6 +1688,8 @@ impl App {
             }
         });
         if modal.should_close() {
+            // Esc·바깥 클릭은 취소와 같다.
+            self.close_queue.clear();
             close = true;
         }
         if close && matches!(self.dialog, Some(d) if same_dialog(d, dialog)) {
@@ -1680,7 +1731,9 @@ impl eframe::App for App {
             });
         }
 
+        self.handle_tab_shortcuts(&ctx);
         self.handle_shortcuts(&ctx);
+        self.process_close_queue();
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui));
