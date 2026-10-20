@@ -10,5 +10,3 @@ description = "Phase 0 P0-UX1: 가짜 데이터로 클릭해 보는 전체 화�
 eframe = "=0.37.0"
 memmap2 = "0.9.11"
 ttf-parser = "0.25.1"
-# P0-UX2 아이콘 B안(다색 SVG) 비교용
-egui_extras = { version = "=0.37.0", features = ["svg"] }

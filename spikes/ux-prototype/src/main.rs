@@ -132,7 +132,6 @@ struct App {
     dialog: Option<Dialog>,
     toast: Option<(String, f64)>,
     many_tabs: bool,
-    icon_style: icons::IconStyle,
     open_dirs: std::collections::HashSet<&'static str>,
     chord_k_pending: bool,
     allow_close: bool,
@@ -152,8 +151,7 @@ impl App {
         let (mut defs, _report) = fonts::explicit_chain();
         icons::add_icon_font(&mut defs);
         cc.egui_ctx.set_fonts(defs);
-        egui_extras::install_image_loaders(&cc.egui_ctx);
-        Self {
+        let mut app = Self {
             docs: data::sample_docs(),
             active: 0,
             untitled_counter: 1,
@@ -167,15 +165,6 @@ impl App {
             dialog: None,
             toast: None,
             many_tabs: false,
-            // 비교·스크린샷용: --icons=font | svg | none
-            icon_style: match std::env::args()
-                .find_map(|a| a.strip_prefix("--icons=").map(str::to_owned))
-                .as_deref()
-            {
-                Some("font") => icons::IconStyle::Font,
-                Some("none") => icons::IconStyle::None,
-                _ => icons::IconStyle::Svg,
-            },
             open_dirs: data::initially_open_dirs(),
             chord_k_pending: false,
             allow_close: false,
@@ -185,7 +174,16 @@ impl App {
             smart_word: None,
             pending_select: None,
             source_scroll_fraction: 0.0,
+        };
+        // 스크린샷·검증용: --many-tabs (탭 18개), --active-last (마지막 탭 선택)
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--many-tabs") {
+            app.set_many_tabs(true);
         }
+        if args.iter().any(|a| a == "--active-last") {
+            app.active = app.docs.len() - 1;
+        }
+        app
     }
 
     fn doc(&self) -> &Doc {
@@ -676,15 +674,6 @@ impl App {
                         }
                     }
                 });
-                ui.menu_button("아이콘 방식 (P0-UX2 비교)", |ui| {
-                    for style in [
-                        icons::IconStyle::Font,
-                        icons::IconStyle::Svg,
-                        icons::IconStyle::None,
-                    ] {
-                        ui.radio_value(&mut self.icon_style, style, style.label());
-                    }
-                });
                 let mut many = self.many_tabs;
                 if ui.checkbox(&mut many, "탭 많이 열기 (18개)").changed() {
                     self.set_many_tabs(many);
@@ -775,7 +764,6 @@ impl App {
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(ui.visuals());
-        let icon_style = self.icon_style;
         let is_md = self.doc().is_markdown;
         let right_width = if is_md { 230.0 } else { 0.0 };
         let mut switch = None;
@@ -804,7 +792,7 @@ impl App {
                                 });
                             frame.show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
-                                icons::show(ui, icon_style, &doc.title, false, false, false);
+                                icons::show(ui, &doc.title, false, false, false);
                                 let title = RichText::new(&doc.title);
                                 let tab = ui.add(
                                     egui::Label::new(if selected { title.strong() } else { title })
@@ -927,7 +915,6 @@ impl App {
         let current = self.doc().title.clone();
         let mut cx = TreeCtx {
             current: &current,
-            style: self.icon_style,
             open_dirs: &mut self.open_dirs,
             open_file: None,
         };
@@ -1639,7 +1626,6 @@ fn same_dialog(a: Dialog, b: Dialog) -> bool {
 
 struct TreeCtx<'a> {
     current: &'a str,
-    style: icons::IconStyle,
     open_dirs: &'a mut std::collections::HashSet<&'static str>,
     open_file: Option<(&'static str, &'static str)>,
 }
@@ -1663,7 +1649,7 @@ fn tree_ui(ui: &mut egui::Ui, node: &TreeNode, depth: usize, ignored: bool, cx: 
                 "▸"
             };
             ui.label(RichText::new(arrow).weak());
-            icons::show(ui, cx.style, node.name, is_dir, is_open, ignored);
+            icons::show(ui, node.name, is_dir, is_open, ignored);
             let mut text = RichText::new(node.name);
             if ignored {
                 text = text.weak();

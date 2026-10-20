@@ -67,7 +67,7 @@ PLAN.md §3.5 표를 따른다. 메뉴에는 실행 중인 OS 표기(`Ctrl` / `�
 - 사이드바 파일 열기: 한 번 클릭(현재) vs 더블클릭
 - `.md` 기본 보기 모드: 분할(현재) vs 소스
 
-## 6. 파일·폴더 아이콘 (P0-UX2에서 결정)
+## 6. 파일·폴더 아이콘 (P0-UX2 결정)
 
 PLAN.md §3.1-3 기준. 사이드바와 탭 바에 같은 아이콘을 쓴다.
 
@@ -76,6 +76,6 @@ PLAN.md §3.1-3 기준. 사이드바와 탭 바에 같은 아이콘을 쓴다.
 | 결정 순서 | 파일 이름 정확히 일치 → 확장자 → 기본 아이콘 |
 | 폴더 | 이름별 아이콘 + 열림/닫힘 구분 |
 | `.gitignore` 대상 | 숨기지 않고 흐리게 표시 |
-| 방식 | **미결정 (UX-1b에서 선택)** — A: 단색 아이콘 폰트 Phosphor(종류별 색), 시안 [p0-ux2-icons-a-font.png](screens/p0-ux2-icons-a-font.png) / B: 다색 SVG Material Icon Theme, 시안 [p0-ux2-icons-b-svg.png](screens/p0-ux2-icons-b-svg.png) |
-| 용량 | A ≈ +0.47MB (폰트 내장) · B ≈ +1.06MB (SVG 렌더러 + 아이콘 36개) |
+| 방식 | **A. 단색 아이콘 폰트 Phosphor + 파일 종류별 색 (채택, 2026-10-20)** — 시안 [p0-ux2-icons-a-font.png](screens/p0-ux2-icons-a-font.png). B안(Material 다색 SVG)은 비교 후 제외, 설정 전환 없음 |
+| 용량 | 실행 파일 약 +0.47MB (폰트 내장) |
 | 첫 시안 대상 | `.rs`, `.md`, `.toml`, `.json`, `.txt`, `.log`, `.exe`, `Cargo.toml`, `Cargo.lock`, `.gitignore`, `README.md`, 폴더 `src`·`docs`·`tests`·`target`·`.cargo` |
