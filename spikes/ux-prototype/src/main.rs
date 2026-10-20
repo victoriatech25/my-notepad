@@ -10,8 +10,10 @@ mod data;
 #[path = "../../editor-spike/src/fonts.rs"]
 mod fonts;
 mod highlight;
+mod icons;
 mod markdown;
 mod theme;
+mod window_menu;
 
 use std::ops::Range;
 
@@ -59,6 +61,7 @@ enum Dialog {
     Shortcuts,
     RegexHelp,
     About,
+    WindowList,
 }
 
 struct Shortcuts {
@@ -77,7 +80,6 @@ struct Shortcuts {
     zoom_in: KeyboardShortcut,
     zoom_out: KeyboardShortcut,
     zoom_reset: KeyboardShortcut,
-    next_tab: KeyboardShortcut,
 }
 
 impl Shortcuts {
@@ -112,7 +114,6 @@ impl Shortcuts {
             zoom_in: KeyboardShortcut::new(cmd, Key::Equals),
             zoom_out: KeyboardShortcut::new(cmd, Key::Minus),
             zoom_reset: KeyboardShortcut::new(cmd, Key::Num0),
-            next_tab: KeyboardShortcut::new(Modifiers::CTRL, Key::Tab),
         }
     }
 }
@@ -131,6 +132,18 @@ struct App {
     dialog: Option<Dialog>,
     toast: Option<(String, f64)>,
     many_tabs: bool,
+    // 창 메뉴 (UX-003)
+    tab_shortcuts: window_menu::TabShortcuts,
+    close_queue: Vec<String>,
+    window_list_selected: std::collections::HashSet<String>,
+    // 탭 바 넘침 처리 (UX-002)
+    tabs_last_active: Option<usize>,
+    tabs_scroll_to: Option<f32>,
+    tabs_offset: f32,
+    tabs_max_offset: f32,
+    tabs_view_width: f32,
+    tab_filter: String,
+    open_dirs: std::collections::HashSet<&'static str>,
     chord_k_pending: bool,
     allow_close: bool,
     shortcuts: Shortcuts,
@@ -146,9 +159,10 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let (defs, _report) = fonts::explicit_chain();
+        let (mut defs, _report) = fonts::explicit_chain();
+        icons::add_icon_font(&mut defs);
         cc.egui_ctx.set_fonts(defs);
-        Self {
+        let mut app = Self {
             docs: data::sample_docs(),
             active: 0,
             untitled_counter: 1,
@@ -162,6 +176,16 @@ impl App {
             dialog: None,
             toast: None,
             many_tabs: false,
+            tab_shortcuts: window_menu::TabShortcuts::for_os(),
+            close_queue: Vec::new(),
+            window_list_selected: std::collections::HashSet::new(),
+            tabs_last_active: None,
+            tabs_scroll_to: None,
+            tabs_offset: 0.0,
+            tabs_max_offset: 0.0,
+            tabs_view_width: 0.0,
+            tab_filter: String::new(),
+            open_dirs: data::initially_open_dirs(),
             chord_k_pending: false,
             allow_close: false,
             shortcuts: Shortcuts::for_os(),
@@ -170,7 +194,16 @@ impl App {
             smart_word: None,
             pending_select: None,
             source_scroll_fraction: 0.0,
+        };
+        // 스크린샷·검증용: --many-tabs (탭 18개), --active-last (마지막 탭 선택)
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--many-tabs") {
+            app.set_many_tabs(true);
         }
+        if args.iter().any(|a| a == "--active-last") {
+            app.active = app.docs.len() - 1;
+        }
+        app
     }
 
     fn doc(&self) -> &Doc {
@@ -318,7 +351,6 @@ impl App {
             zoom_in,
             zoom_out,
             zoom_reset,
-            next_tab,
         ) = ctx.input_mut(|i| {
             (
                 i.consume_shortcut(&s.new_tab),
@@ -337,7 +369,6 @@ impl App {
                     || i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus)),
                 i.consume_shortcut(&s.zoom_out),
                 i.consume_shortcut(&s.zoom_reset),
-                i.consume_shortcut(&s.next_tab),
             )
         });
 
@@ -420,9 +451,6 @@ impl App {
         }
         if zoom_reset {
             self.zoom = 1.0;
-        }
-        if next_tab {
-            self.switch_to((self.active + 1) % self.docs.len());
         }
         if self.find.open && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.find.open = false;
@@ -626,6 +654,8 @@ impl App {
                 self.line_ending_menu(ui);
             });
 
+            ui.menu_button("창", |ui| self.window_menu(ui, &ctx));
+
             ui.menu_button("도움말", |ui| {
                 if ui.button("단축키 목록").clicked() {
                     self.dialog = Some(Dialog::Shortcuts);
@@ -749,72 +779,162 @@ impl App {
 
     // ---------------------------------------------------------------- 탭 바
 
+    /// 탭 바 (UX-002): 한 줄 유지 + 선택 탭 자동 스크롤 + 넘칠 때 ‹ › 버튼 + 휠 가로 스크롤
+    /// + 열린 탭 목록(⌄) 드롭다운.
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(ui.visuals());
         let is_md = self.doc().is_markdown;
-        let right_width = if is_md { 230.0 } else { 0.0 };
         let mut switch = None;
         let mut close = None;
+        let mut active_rect = None;
+        let mut tab_cmd = None;
+
+        // 선택 탭이 바뀌었으면(단축키·사이드바·목록 등 어떤 경로든) 화면 안으로 스크롤한다.
+        let scroll_active = self.tabs_last_active != Some(self.active);
+        self.tabs_last_active = Some(self.active);
+
+        let overflow = self.tabs_max_offset > 1.0;
+        let step = (self.tabs_view_width * 0.6).max(120.0);
+        let icon_size = ui.text_style_height(&egui::TextStyle::Body);
+        let nav = |ui: &mut egui::Ui, glyph: &str, enabled: bool, tip: &str| {
+            ui.add_enabled(
+                enabled,
+                egui::Button::new(icons::glyph(glyph).size(icon_size)).frame(false),
+            )
+            .on_hover_text(tip)
+            .clicked()
+        };
 
         ui.horizontal(|ui| {
-            egui::ScrollArea::horizontal()
-                .max_width((ui.available_width() - right_width - 8.0).max(100.0))
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for (i, doc) in self.docs.iter().enumerate() {
-                            let selected = i == self.active;
-                            let frame = egui::Frame::new()
-                                .inner_margin(egui::Margin::symmetric(6, 3))
-                                .corner_radius(4.0)
-                                .fill(if selected {
-                                    ui.visuals().selection.bg_fill.gamma_multiply(0.35)
-                                } else {
-                                    Color32::TRANSPARENT
-                                })
-                                .stroke(if selected {
-                                    Stroke::new(1.0, ui.visuals().selection.stroke.color)
-                                } else {
-                                    Stroke::NONE
-                                });
-                            frame.show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                let title = RichText::new(&doc.title);
-                                let tab = ui.add(
-                                    egui::Label::new(if selected { title.strong() } else { title })
+            // 오른쪽 고정 영역: ›, ＋, ⌄, (Markdown 모드 토글)
+            let right_width =
+                34.0 * if overflow { 3.0 } else { 2.0 } + if is_md { 230.0 } else { 0.0 };
+
+            if overflow
+                && nav(
+                    ui,
+                    icons::ui::CARET_LEFT,
+                    self.tabs_offset > 0.5,
+                    "왼쪽 탭으로 이동",
+                )
+            {
+                self.tabs_scroll_to = Some((self.tabs_offset - step).max(0.0));
+            }
+
+            let mut area = egui::ScrollArea::horizontal()
+                .id_salt("tab-bar-scroll")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .max_width((ui.available_width() - right_width).max(100.0))
+                .auto_shrink([false, true]);
+            if let Some(offset) = self.tabs_scroll_to.take() {
+                area = area.horizontal_scroll_offset(offset);
+            }
+            let output = ui
+                .scope(|ui| {
+                    // 세로 휠도 가로 스크롤로 쓰게 한다 (Shift 없이).
+                    ui.style_mut().always_scroll_the_only_direction = true;
+                    area.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for (i, doc) in self.docs.iter().enumerate() {
+                                let selected = i == self.active;
+                                let frame = egui::Frame::new()
+                                    .inner_margin(egui::Margin::symmetric(6, 3))
+                                    .corner_radius(4.0)
+                                    .fill(if selected {
+                                        ui.visuals().selection.bg_fill.gamma_multiply(0.35)
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
+                                    .stroke(if selected {
+                                        Stroke::new(1.0, ui.visuals().selection.stroke.color)
+                                    } else {
+                                        Stroke::NONE
+                                    });
+                                let shown = frame.show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    icons::show(ui, &doc.title, false, false, false);
+                                    let title = RichText::new(&doc.title);
+                                    let tab = ui.add(
+                                        egui::Label::new(if selected {
+                                            title.strong()
+                                        } else {
+                                            title
+                                        })
                                         .sense(egui::Sense::click()),
-                                );
-                                let tab = tab.on_hover_text(
-                                    doc.path.as_deref().unwrap_or("저장되지 않은 새 문서"),
-                                );
-                                if tab.clicked() {
-                                    switch = Some(i);
+                                    );
+                                    let tab = tab.on_hover_text(
+                                        doc.path.as_deref().unwrap_or("저장되지 않은 새 문서"),
+                                    );
+                                    tab.context_menu(|ui| {
+                                        if let Some(cmd) =
+                                            App::tab_context_menu(ui, i, doc.path.is_some())
+                                        {
+                                            tab_cmd = Some(cmd);
+                                        }
+                                    });
+                                    if tab.clicked() {
+                                        switch = Some(i);
+                                    }
+                                    if tab.middle_clicked() {
+                                        close = Some(i);
+                                    }
+                                    if doc.modified {
+                                        ui.label(RichText::new("●").color(palette.modified_marker))
+                                            .on_hover_text("저장되지 않은 변경 내용");
+                                    }
+                                    if ui
+                                        .add(egui::Button::new("×").small().frame(false))
+                                        .on_hover_text("탭 닫기")
+                                        .clicked()
+                                    {
+                                        close = Some(i);
+                                    }
+                                });
+                                if selected {
+                                    active_rect = Some(shown.response.rect);
+                                    if scroll_active {
+                                        ui.scroll_to_rect(shown.response.rect, None);
+                                    }
                                 }
-                                if tab.middle_clicked() {
-                                    close = Some(i);
-                                }
-                                if doc.modified {
-                                    ui.label(RichText::new("●").color(palette.modified_marker))
-                                        .on_hover_text("저장되지 않은 변경 내용");
-                                }
-                                if ui
-                                    .add(egui::Button::new("×").small().frame(false))
-                                    .on_hover_text("탭 닫기")
-                                    .clicked()
-                                {
-                                    close = Some(i);
-                                }
-                            });
-                        }
-                        if ui
-                            .add(egui::Button::new("＋").frame(false))
-                            .on_hover_text("새 탭")
-                            .clicked()
-                        {
-                            switch = Some(usize::MAX);
-                        }
-                    });
-                });
+                            }
+                        });
+                    })
+                })
+                .inner;
+            // 첫 프레임에는 스크롤 범위가 확정되지 않아 덜 스크롤될 수 있으므로, 선택 탭이 완전히 보일 때까지 다음 프레임에 다시 맞춘다.
+            if let Some(rect) = active_rect
+                && !output.inner_rect.expand(1.0).contains_rect(rect)
+                && rect.width() <= output.inner_rect.width()
+                && scroll_active
+            {
+                self.tabs_last_active = None;
+                ui.ctx().request_repaint();
+            }
+            self.tabs_offset = output.state.clamped_offset().x;
+            self.tabs_view_width = output.inner_rect.width();
+            self.tabs_max_offset = (output.content_size.x - output.inner_rect.width()).max(0.0);
+
+            if overflow
+                && nav(
+                    ui,
+                    icons::ui::CARET_RIGHT,
+                    self.tabs_offset < self.tabs_max_offset - 0.5,
+                    "오른쪽 탭으로 이동",
+                )
+            {
+                self.tabs_scroll_to = Some((self.tabs_offset + step).min(self.tabs_max_offset));
+            }
+            if nav(ui, icons::ui::PLUS, true, "새 탭") {
+                switch = Some(usize::MAX);
+            }
+            let list = ui.menu_button(icons::glyph(icons::ui::CARET_DOWN).size(icon_size), |ui| {
+                if let Some(i) = self.open_tabs_list(ui) {
+                    switch = Some(i);
+                    ui.close();
+                }
+            });
+            list.response
+                .on_hover_text(format!("열린 탭 목록 ({}개)", self.docs.len()));
 
             if is_md {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -859,6 +979,66 @@ impl App {
             (Some(i), _) => self.switch_to(i),
             _ => {}
         }
+        if let Some(cmd) = tab_cmd {
+            let ctx = ui.ctx().clone();
+            self.run_tab_command(&ctx, cmd);
+        }
+    }
+
+    /// 열린 탭 목록 드롭다운: 검색어로 거르고, 고른 탭의 번호를 돌려준다.
+    fn open_tabs_list(&mut self, ui: &mut egui::Ui) -> Option<usize> {
+        let palette = theme::palette(ui.visuals());
+        ui.set_min_width(300.0);
+        ui.horizontal(|ui| {
+            ui.label(icons::glyph(icons::ui::MAGNIFYING_GLASS).weak());
+            let filter = ui.add(
+                egui::TextEdit::singleline(&mut self.tab_filter)
+                    .hint_text("탭 이름으로 찾기")
+                    .desired_width(240.0),
+            );
+            filter.request_focus();
+        });
+        ui.separator();
+        let needle = self.tab_filter.to_lowercase();
+        let mut picked = None;
+        let mut shown = 0;
+        egui::ScrollArea::vertical()
+            .max_height(360.0)
+            .show(ui, |ui| {
+                for (i, doc) in self.docs.iter().enumerate() {
+                    if !needle.is_empty() && !doc.title.to_lowercase().contains(&needle) {
+                        continue;
+                    }
+                    shown += 1;
+                    let row = ui
+                        .horizontal(|ui| {
+                            icons::show(ui, &doc.title, false, false, false);
+                            let mut text = RichText::new(&doc.title);
+                            if i == self.active {
+                                text = text.strong();
+                            }
+                            let r = ui.add(egui::Button::selectable(i == self.active, text));
+                            if doc.modified {
+                                ui.label(RichText::new("●").color(palette.modified_marker));
+                            }
+                            r
+                        })
+                        .inner;
+                    if row
+                        .on_hover_text(doc.path.as_deref().unwrap_or("저장되지 않은 새 문서"))
+                        .clicked()
+                    {
+                        picked = Some(i);
+                    }
+                }
+            });
+        if shown == 0 {
+            ui.label(RichText::new("일치하는 탭이 없습니다").weak());
+        }
+        if picked.is_some() {
+            self.tab_filter.clear();
+        }
+        picked
     }
 
     // ---------------------------------------------------------------- 사이드바
@@ -892,20 +1072,25 @@ impl App {
             });
         });
         ui.label(
-            RichText::new("숨김: .git, target, node_modules")
+            RichText::new("숨김: .git, node_modules · 흐림: .gitignore 대상")
                 .small()
                 .weak(),
         );
         ui.separator();
 
         let current = self.doc().title.clone();
-        let mut open = None;
+        let mut cx = TreeCtx {
+            current: &current,
+            open_dirs: &mut self.open_dirs,
+            open_file: None,
+        };
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                tree_ui(ui, &self.tree, 0, &current, &mut open);
+                ui.spacing_mut().item_spacing.y = 1.0;
+                tree_ui(ui, &self.tree, 0, false, &mut cx);
             });
-        if let Some((name, path)) = open {
+        if let Some((name, path)) = cx.open_file {
             self.open_from_tree(name, path);
         }
     }
@@ -1306,6 +1491,13 @@ impl App {
                     let title = self.docs[doc].title.clone();
                     ui.heading("변경 내용을 저장할까요?");
                     ui.label(format!("\"{title}\"의 변경 내용이 저장되지 않았습니다."));
+                    if !self.close_queue.is_empty() {
+                        ui.label(
+                            RichText::new(format!("이어서 닫을 탭 {}개가 더 있습니다. 취소하면 모두 멈춥니다.", self.close_queue.len()))
+                                .small()
+                                .weak(),
+                        );
+                    }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.add(primary("저장")).clicked() {
@@ -1319,6 +1511,8 @@ impl App {
                             close = true;
                         }
                         if ui.button("취소").clicked() {
+                            // 일괄 닫기 중이었다면 남은 대기열도 취소한다.
+                            self.close_queue.clear();
                             close = true;
                         }
                     });
@@ -1429,6 +1623,25 @@ impl App {
                         ui.label("Markdown 분할 보기");
                         ui.monospace(format!("{} 다음 V", ctx.format_shortcut(&s.chord_k)));
                         ui.end_row();
+                        let t = &self.tab_shortcuts;
+                        let join = |list: &[KeyboardShortcut]| {
+                            list.iter()
+                                .map(|s| ctx.format_shortcut(s))
+                                .collect::<Vec<_>>()
+                                .join(" / ")
+                        };
+                        for (label, keys) in [
+                            ("다음 탭", join(&t.next)),
+                            ("이전 탭", join(&t.prev)),
+                            ("탭을 왼쪽 / 오른쪽으로 이동", format!("{} / {}", join(&t.move_left), join(&t.move_right))),
+                            ("1~8번째 탭으로", format!("{} ~ {}", ctx.format_shortcut(&t.goto[0]), ctx.format_shortcut(&t.goto[7]))),
+                            ("마지막 탭으로", ctx.format_shortcut(&t.last)),
+                            ("모든 탭 닫기", ctx.format_shortcut(&t.close_all)),
+                        ] {
+                            ui.label(label);
+                            ui.monospace(keys);
+                            ui.end_row();
+                        }
                     });
                     ui.add_space(8.0);
                     if ui.add(primary("닫기")).clicked() {
@@ -1458,6 +1671,11 @@ impl App {
                         close = true;
                     }
                 }
+                Dialog::WindowList => {
+                    if self.window_list_ui(ui, ctx) {
+                        close = true;
+                    }
+                }
                 Dialog::About => {
                     ui.heading("My-Notepad");
                     ui.label("UX 프로토타입 (P0-UX1) · egui 0.37");
@@ -1470,6 +1688,8 @@ impl App {
             }
         });
         if modal.should_close() {
+            // Esc·바깥 클릭은 취소와 같다.
+            self.close_queue.clear();
             close = true;
         }
         if close && matches!(self.dialog, Some(d) if same_dialog(d, dialog)) {
@@ -1511,7 +1731,9 @@ impl eframe::App for App {
             });
         }
 
+        self.handle_tab_shortcuts(&ctx);
         self.handle_shortcuts(&ctx);
+        self.process_close_queue();
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui));
@@ -1605,28 +1827,60 @@ fn same_dialog(a: Dialog, b: Dialog) -> bool {
     std::mem::discriminant(&a) == std::mem::discriminant(&b)
 }
 
-fn tree_ui(
-    ui: &mut egui::Ui,
-    node: &TreeNode,
-    depth: usize,
-    current: &str,
-    open: &mut Option<(&'static str, &'static str)>,
-) {
-    if node.is_dir() {
-        egui::CollapsingHeader::new(node.name)
-            .id_salt(node.path)
-            .default_open(depth < 2)
-            .show(ui, |ui| {
-                for child in &node.children {
-                    tree_ui(ui, child, depth + 1, current, open);
-                }
-            });
-    } else if ui
-        .add(egui::Button::selectable(node.name == current, node.name))
-        .on_hover_text(node.path)
-        .clicked()
-    {
-        *open = Some((node.name, node.path));
+struct TreeCtx<'a> {
+    current: &'a str,
+    open_dirs: &'a mut std::collections::HashSet<&'static str>,
+    open_file: Option<(&'static str, &'static str)>,
+}
+
+/// 폴더 트리 한 줄씩: 들여쓰기 · 펼침 화살표 · 아이콘 · 이름. `.gitignore` 대상은 흐리게.
+fn tree_ui(ui: &mut egui::Ui, node: &TreeNode, depth: usize, ignored: bool, cx: &mut TreeCtx<'_>) {
+    let ignored = ignored || data::is_ignored(node);
+    let is_dir = node.is_dir();
+    let is_open = is_dir && cx.open_dirs.contains(node.path);
+    let selected = !is_dir && node.name == cx.current;
+
+    let row = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.add_space(depth as f32 * 14.0);
+            let arrow = if !is_dir {
+                " "
+            } else if is_open {
+                "▾"
+            } else {
+                "▸"
+            };
+            ui.label(RichText::new(arrow).weak());
+            icons::show(ui, node.name, is_dir, is_open, ignored);
+            let mut text = RichText::new(node.name);
+            if ignored {
+                text = text.weak();
+            }
+            ui.add(egui::Button::selectable(selected, text).frame_when_inactive(false))
+        })
+        .inner;
+    let row = row.on_hover_text(if ignored {
+        format!("{} (.gitignore 대상)", node.path)
+    } else {
+        node.path.to_owned()
+    });
+
+    if row.clicked() {
+        if is_dir {
+            if is_open {
+                cx.open_dirs.remove(node.path);
+            } else {
+                cx.open_dirs.insert(node.path);
+            }
+        } else {
+            cx.open_file = Some((node.name, node.path));
+        }
+    }
+    if is_open {
+        for child in &node.children {
+            tree_ui(ui, child, depth + 1, ignored, cx);
+        }
     }
 }
 
