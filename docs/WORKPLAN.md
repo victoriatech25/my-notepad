@@ -364,7 +364,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 - **Phase 0 결정 반영 (G0, 2026-10-20)**: 렌더러 glow만 사용(wgpu 제외), 폰트 직접 구성·Phosphor 아이콘·UI 명세 v1·창 메뉴·탭 넘침은 스파이크(`spikes/`) 코드를 이식, 파일 크기 정책은 ADR 0001(1MB 편집 · 1~5MB 안내 · 5MB 초과 뷰어 = P1-14).
 
 #### P1-01 프로젝트 골격 및 CI · M
-- **상태**: 검증 대기(👤) (🤖 통과, 2026-10-21)
+- **상태**: ✅ 완료 (Windows 검증 통과, 2026-10-21)
 - **목표**: §4.3 디렉토리 구조 생성, `Cargo.toml`(버전 고정, eframe `glow`만 사용·wgpu 제외, 릴리스 프로필 LTO/strip), 로깅, panic hook, GitHub Actions(Windows/macOS: fmt·clippy·test)
 - **산출물**: `Cargo.toml`, `Cargo.lock`, `src/` 모듈 골격, `.github/workflows/ci.yml`, `xtask/`(`cargo xtask try`·`measure` 등 개발 보조 명령), `docs/ux/ui-spec.md` 기반 테마·색상 토큰 모듈(`src/ui/theme.rs`)
 - **선행**: G0
@@ -373,7 +373,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [x] `cargo xtask try empty`로 빌드 후 앱이 실행된다
   - [x] 의도적으로 panic을 일으키는 테스트 플래그 실행 시 로그 파일에 panic 정보 기록
 - 👤 **사용자 화면 검증**
-  - [ ] `cargo run --release`로 빈 앱 창이 뜬다 (메뉴바·상태바 자리 표시)
+  - [x] `cargo run --release`로 빈 앱 창이 뜬다 (메뉴바·상태바 자리 표시)
 
 #### P1-02 폰트 모듈 본 구현 · S
 - **목표**: 스파이크 폰트 로더를 `fonts.rs`로 이식(Windows는 `%WINDIR%\Fonts` 환경 변수 기반 경로 탐색, Phosphor 아이콘 폰트 등록 포함), 로드 실패 시 기본 폰트로 기동 + 경고
@@ -1037,6 +1037,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-20 | **G0** | 게이트 | **통과** | Windows 전 항목 통과, 10MB 편집 조건은 ADR 0001로 대체, macOS IME 미검증 리스크 사용자 수용 | |
 | 2026-10-20 | P0-00~P0-05 | 🍎 | 보류 | MacBook Pro 검증은 사용자 요청으로 추후 수행. **G0 전에 macOS IME(P0-03)와 함께 일괄 수행** | |
 | 2026-10-21 | P1-01 | 🤖 | 통과 | `src/` 모듈 골격, `glow` 단독 설정(릴리스 바이너리 7.06MB), 파일 로깅·panic hook(`tests/panic_hook.rs`), `.github/workflows/ci.yml`, `cargo xtask try empty` 통과 | |
+| 2026-10-21 | P1-01 | 👤 | 통과 | Windows: 빈 앱 창 표시, 메뉴바·탭바·중앙 에디터·상태 표시줄 자리 및 라이트/다크 테마 전환 확인 (커밋 `fd7ed55`) | |
 
 ### 9.3 측정 결과 기록표
 
