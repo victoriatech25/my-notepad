@@ -5,13 +5,15 @@
 //! 2. 이모지·미지원 문자 포함 텍스트를 EUC-KR로 저장 시도 → 표현 불가 문자 목록(`UnmappableChar`) 반환,
 //!    손실 저장 바이트(`lossy_bytes` / `encode_text_lossy`)에 HTML 숫자 참조(`&#`)가 절대 포함되지 않고 `?`로만 대체됨
 //! 3. UTF-16 LE / UTF-16 BE 저장 결과의 BOM(`FF FE` / `FE FF`) 및 엔디언(리틀/빅, 서로게이트 쌍 포함) 검증
+//! 4. BOM은 인코딩이 결정하고 UTF-16만 원본 BOM 유무를 보존하며, 인코딩 변환 시 표준 BOM 정책으로 초기화
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use my_notepad::core::encoding::{
-    DecodeOutcome, TextEncoding, UTF8_BOM, UTF16BE_BOM, UTF16LE_BOM, UnmappableChar, decode_bytes,
-    encode_text, encode_text_lossy, find_unmappable_chars,
+    DecodeOutcome, DecodedDocument, TextEncoding, UTF8_BOM, UTF16BE_BOM, UTF16LE_BOM,
+    UnmappableChar, decode_bytes, decode_bytes_with_default, decode_with_encoding, encode_text,
+    encode_text_lossy, encode_text_with_bom, find_unmappable_chars,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -204,4 +206,104 @@ fn utf8_bom_and_utf16_le_be_bom_and_endianness_are_verified() {
         assert!(!doc.damaged);
         assert_eq!(doc.text, sample);
     }
+}
+
+fn decode_text(bytes: &[u8], default_encoding: TextEncoding) -> DecodedDocument {
+    match decode_bytes_with_default(bytes, default_encoding) {
+        DecodeOutcome::Text(doc) => doc,
+        DecodeOutcome::Binary => panic!("텍스트가 바이너리로 판정됨: {bytes:02X?}"),
+    }
+}
+
+#[test]
+fn empty_file_with_utf8_bom_default_saves_bom() {
+    // 기본 인코딩이 UTF-8 with BOM이면 빈 파일도 BOM을 기록해 다시 열었을 때 같은 인코딩으로 감지되어야 한다.
+    let doc = decode_text(b"", TextEncoding::Utf8Bom);
+    assert_eq!(doc.encoding, TextEncoding::Utf8Bom);
+    let saved = doc.encode_preserving_bom().unwrap();
+    assert_eq!(saved, UTF8_BOM);
+    assert_eq!(
+        decode_text(&saved, TextEncoding::Utf8).encoding,
+        TextEncoding::Utf8Bom
+    );
+}
+
+#[test]
+fn converting_encoding_resets_bom_to_standard_policy() {
+    let text = "한글 abc\n";
+
+    // UTF-8 → UTF-16 LE / BE: BOM 포함 저장 (PLAN.md §3.3-1)
+    for (target, bom) in [
+        (TextEncoding::Utf16Le, UTF16LE_BOM),
+        (TextEncoding::Utf16Be, UTF16BE_BOM),
+    ] {
+        let mut doc = decode_text(text.as_bytes(), TextEncoding::Utf8);
+        doc.set_encoding(target);
+        let saved = doc.encode_preserving_bom().unwrap();
+        assert!(
+            saved.starts_with(bom),
+            "{target:?} 변환 저장에 BOM이 없습니다"
+        );
+        assert_eq!(decode_text(&saved, TextEncoding::Utf8).text, text);
+    }
+
+    // UTF-8 with BOM → UTF-8: BOM 제거
+    let mut bom_bytes = UTF8_BOM.to_vec();
+    bom_bytes.extend_from_slice(text.as_bytes());
+    let mut doc = decode_text(&bom_bytes, TextEncoding::Utf8);
+    assert!(doc.has_bom);
+    doc.set_encoding(TextEncoding::Utf8);
+    assert_eq!(doc.encode_preserving_bom().unwrap(), text.as_bytes());
+
+    // UTF-8 → UTF-8 with BOM: BOM 추가
+    let mut doc = decode_text(text.as_bytes(), TextEncoding::Utf8);
+    doc.set_encoding(TextEncoding::Utf8Bom);
+    assert_eq!(doc.encode_preserving_bom().unwrap(), bom_bytes);
+
+    // BOM 없는 UTF-16 LE → UTF-16 BE: 인코딩이 바뀌었으므로 BOM 포함
+    let original = fs::read(fixture_path("utf16le_no_bom.txt")).unwrap();
+    let mut doc = decode_text(&original, TextEncoding::Utf8);
+    doc.set_encoding(TextEncoding::Utf16Be);
+    assert!(
+        doc.encode_preserving_bom()
+            .unwrap()
+            .starts_with(UTF16BE_BOM)
+    );
+
+    // 같은 인코딩으로 다시 지정하면 원본(BOM 없음)을 그대로 보존
+    let mut doc = decode_text(&original, TextEncoding::Utf8);
+    doc.set_encoding(TextEncoding::Utf16Le);
+    assert_eq!(doc.encode_preserving_bom().unwrap(), original);
+}
+
+#[test]
+fn bom_is_decided_by_encoding_except_utf16() {
+    let text = "abc";
+
+    // UTF-8 / EUC-KR: BOM 플래그와 무관하게 인코딩이 결정
+    assert_eq!(
+        encode_text_with_bom(text, TextEncoding::Utf8, true).unwrap(),
+        b"abc"
+    );
+    assert_eq!(
+        encode_text_with_bom(text, TextEncoding::EucKr, true).unwrap(),
+        b"abc"
+    );
+    let mut with_bom = UTF8_BOM.to_vec();
+    with_bom.extend_from_slice(b"abc");
+    assert_eq!(
+        encode_text_with_bom(text, TextEncoding::Utf8Bom, false).unwrap(),
+        with_bom
+    );
+
+    // UTF-16만 BOM 생략 가능
+    assert_eq!(
+        encode_text_with_bom(text, TextEncoding::Utf16Le, false).unwrap(),
+        [0x61, 0x00, 0x62, 0x00, 0x63, 0x00]
+    );
+
+    // BOM 있는 파일을 "UTF-8로 다시 읽기"하면 has_bom은 원본 사실(true)을 남기지만 저장은 UTF-8(BOM 없음)
+    let doc = decode_with_encoding(&with_bom, TextEncoding::Utf8);
+    assert!(doc.has_bom);
+    assert_eq!(doc.encode_preserving_bom().unwrap(), b"abc");
 }

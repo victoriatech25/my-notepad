@@ -15,7 +15,9 @@
 //!
 //! P1-05 구현 범위:
 //! - 인코딩 직렬화 ([`encode_text`], [`encode_text_with_bom`], [`encode_text_lossy`]):
-//!   - `UTF-8` / `UTF-8 with BOM`: BOM(`EF BB BF`) 직접 기록
+//!   - BOM은 인코딩이 결정한다 (`UTF-8` 없음, `UTF-8 with BOM` 있음, `EUC-KR` 없음, UTF-16 기본 있음).
+//!     원본 BOM 유무 보존은 UTF-16에만 적용하고, 인코딩을 바꾸면 [`DecodedDocument::set_encoding`]이 표준 정책으로 되돌린다.
+//!   - `UTF-8 with BOM`: BOM(`EF BB BF`) 직접 기록
 //!   - `UTF-16 LE` / `UTF-16 BE`: `encoding_rs`는 UTF-16 출력 인코딩을 지원하지 않으므로
 //!     `str::encode_utf16()`으로 엔디언별 바이트 직렬화 및 BOM(`FF FE` / `FE FF`) 직접 기록
 //!   - `EUC-KR (CP949)`: `encoding_rs`의 기본 `encode()`가 표현 불가 문자를 HTML 숫자 참조(`&#128512;`)로
@@ -71,6 +73,11 @@ impl TextEncoding {
             Self::Utf16Be => UTF16BE_BOM,
         }
     }
+
+    /// `UTF-16 LE` / `UTF-16 BE`인지 여부. 저장 시 BOM 생략(원본 보존)은 UTF-16에만 허용한다.
+    pub const fn is_utf16(self) -> bool {
+        matches!(self, Self::Utf16Le | Self::Utf16Be)
+    }
 }
 
 /// 텍스트 파일로 판정되었을 때의 인코딩 감지 결과 (PLAN.md §3.3-2).
@@ -124,6 +131,9 @@ pub struct DecodedDocument {
     /// 적용된 인코딩.
     pub encoding: TextEncoding,
     /// 원본 바이트 앞부분에 해당 인코딩의 BOM이 존재했는지 여부.
+    ///
+    /// 저장 시에는 UTF-16에만 쓰인다 (BOM 없던 UTF-16 파일 보존). UTF-8은 `Utf8`/`Utf8Bom`, EUC-KR은 BOM 없음으로
+    /// 인코딩이 BOM을 결정한다 ([`DecodedDocument::encode_preserving_bom`]).
     pub has_bom: bool,
     /// 휴리스틱 또는 `chardetng`로 추정된 인코딩인지 여부.
     pub estimated: bool,
@@ -143,9 +153,20 @@ pub enum DecodeOutcome {
 }
 
 impl DecodedDocument {
-    /// 원본 문서의 인코딩과 BOM 유무(`has_bom`)를 그대로 보존하여 바이트로 직렬화한다.
+    /// 문서 인코딩으로 직렬화한다. BOM은 인코딩이 결정하고, UTF-16만 원본 BOM 유무(`has_bom`)를 보존한다.
     pub fn encode_preserving_bom(&self) -> Result<Vec<u8>, UnmappableError> {
         encode_text_with_bom(&self.text, self.encoding, self.has_bom)
+    }
+
+    /// 저장할 인코딩을 바꾼다 ("인코딩 변환 저장", PLAN.md §3.3-5).
+    ///
+    /// 인코딩이 바뀌면 원본 BOM 유무는 더 이상 의미가 없으므로 `has_bom`을 새 인코딩의 표준 BOM 정책으로 되돌린다
+    /// (UTF-16 → BOM 포함 저장, PLAN.md §3.3-1). 같은 인코딩이면 아무것도 바꾸지 않는다.
+    pub fn set_encoding(&mut self, encoding: TextEncoding) {
+        if self.encoding != encoding {
+            self.encoding = encoding;
+            self.has_bom = !encoding.bom_bytes().is_empty();
+        }
     }
 }
 
@@ -521,23 +542,19 @@ fn decode_utf16_bytes(bytes: &[u8], little_endian: bool) -> (String, bool) {
 /// - `UTF-16 BE`: `FE FF` 기록 후 빅 엔디언 직렬화
 /// - 표현 불가 문자가 있으면 `Err(UnmappableError)`를 반환하며, 결과 바이트에 HTML 숫자 참조(`&#...;`)를 절대 넣지 않는다.
 pub fn encode_text(text: &str, encoding: TextEncoding) -> Result<Vec<u8>, UnmappableError> {
-    let default_bom = matches!(
-        encoding,
-        TextEncoding::Utf8Bom | TextEncoding::Utf16Le | TextEncoding::Utf16Be
-    );
-    encode_text_with_bom(text, encoding, default_bom)
+    encode_text_with_bom(text, encoding, true)
 }
 
-/// BOM 기록 여부를 명시적으로 지정하여 텍스트를 바이트로 인코딩한다.
+/// UTF-16 BOM 기록 여부를 지정하여 텍스트를 바이트로 인코딩한다.
 ///
-/// BOM이 없던 UTF-16 픽스처(`utf16le_no_bom.txt`, `utf16be_no_bom.txt`)를 원본 그대로 라운드트립하거나
-/// 표준 BOM 정책으로 저장할 때 모두 사용할 수 있다.
+/// `include_utf16_bom`은 UTF-16에만 적용된다. BOM이 없던 UTF-16 파일(`utf16le_no_bom.txt` 등)을 원본 그대로
+/// 저장할 때 `false`를 넘긴다. UTF-8은 `Utf8`/`Utf8Bom`, EUC-KR은 BOM 없음으로 인코딩이 BOM을 결정한다.
 pub fn encode_text_with_bom(
     text: &str,
     encoding: TextEncoding,
-    include_bom: bool,
+    include_utf16_bom: bool,
 ) -> Result<Vec<u8>, UnmappableError> {
-    let (bytes, unmappable) = encode_text_lossy_with_bom(text, encoding, include_bom);
+    let (bytes, unmappable) = encode_text_lossy_with_bom(text, encoding, include_utf16_bom);
     if unmappable.is_empty() {
         Ok(bytes)
     } else {
@@ -553,44 +570,38 @@ pub fn encode_text_with_bom(
 ///
 /// `encoding_rs::Encoding::encode`와 달리 HTML 숫자 참조(`&#128512;`)를 절대 생성하지 않는다.
 pub fn encode_text_lossy(text: &str, encoding: TextEncoding) -> (Vec<u8>, Vec<UnmappableChar>) {
-    let default_bom = matches!(
-        encoding,
-        TextEncoding::Utf8Bom | TextEncoding::Utf16Le | TextEncoding::Utf16Be
-    );
-    encode_text_lossy_with_bom(text, encoding, default_bom)
+    encode_text_lossy_with_bom(text, encoding, true)
 }
 
-/// BOM 기록 여부를 지정해 표현 불가 문자를 `?`(`0x3F`)로 대체하며 인코딩한다.
+/// UTF-16 BOM 기록 여부를 지정해 표현 불가 문자를 `?`(`0x3F`)로 대체하며 인코딩한다 ([`encode_text_with_bom`] 참고).
 pub fn encode_text_lossy_with_bom(
     text: &str,
     encoding: TextEncoding,
-    include_bom: bool,
+    include_utf16_bom: bool,
 ) -> (Vec<u8>, Vec<UnmappableChar>) {
-    match encoding {
-        TextEncoding::Utf8 => {
-            if include_bom {
-                let mut out = Vec::with_capacity(UTF8_BOM.len() + text.len());
-                out.extend_from_slice(UTF8_BOM);
-                out.extend_from_slice(text.as_bytes());
-                (out, Vec::new())
-            } else {
-                (text.as_bytes().to_vec(), Vec::new())
-            }
-        }
-        TextEncoding::Utf8Bom => {
-            if include_bom {
-                let mut out = Vec::with_capacity(UTF8_BOM.len() + text.len());
-                out.extend_from_slice(UTF8_BOM);
-                out.extend_from_slice(text.as_bytes());
-                (out, Vec::new())
-            } else {
-                (text.as_bytes().to_vec(), Vec::new())
-            }
-        }
-        TextEncoding::Utf16Le => (encode_utf16_bytes(text, true, include_bom), Vec::new()),
-        TextEncoding::Utf16Be => (encode_utf16_bytes(text, false, include_bom), Vec::new()),
-        TextEncoding::EucKr => encode_euc_kr_without_ncr(text),
+    if encoding == TextEncoding::EucKr {
+        return encode_euc_kr_without_ncr(text);
     }
+
+    let bom = if encoding.is_utf16() && !include_utf16_bom {
+        &[][..]
+    } else {
+        encoding.bom_bytes()
+    };
+    let body_len = if encoding.is_utf16() {
+        text.len().saturating_mul(2)
+    } else {
+        text.len()
+    };
+    let mut out = Vec::with_capacity(bom.len() + body_len);
+    out.extend_from_slice(bom);
+    match encoding {
+        TextEncoding::Utf8 | TextEncoding::Utf8Bom => out.extend_from_slice(text.as_bytes()),
+        TextEncoding::Utf16Le => push_utf16_units(&mut out, text, true),
+        TextEncoding::Utf16Be => push_utf16_units(&mut out, text, false),
+        TextEncoding::EucKr => unreachable!("EUC-KR은 위에서 처리"),
+    }
+    (out, Vec::new())
 }
 
 /// 대상 인코딩으로 표현할 수 없는 문자를 최대 `limit`개까지 찾아 반환한다.
@@ -607,19 +618,8 @@ pub fn find_unmappable_chars(
     unmappable
 }
 
-/// `str::encode_utf16()`을 사용해 엔디언 및 BOM 여부에 맞게 UTF-16 바이트를 직접 직렬화한다 (PLAN.md §3.3-5).
-fn encode_utf16_bytes(text: &str, little_endian: bool, include_bom: bool) -> Vec<u8> {
-    let bom = if include_bom {
-        if little_endian {
-            UTF16LE_BOM
-        } else {
-            UTF16BE_BOM
-        }
-    } else {
-        &[]
-    };
-    let mut out = Vec::with_capacity(bom.len() + text.len().saturating_mul(2));
-    out.extend_from_slice(bom);
+/// `str::encode_utf16()`을 사용해 엔디언에 맞게 UTF-16 코드 유닛을 직접 직렬화한다 (PLAN.md §3.3-5).
+fn push_utf16_units(out: &mut Vec<u8>, text: &str, little_endian: bool) {
     for unit in text.encode_utf16() {
         let pair = if little_endian {
             unit.to_le_bytes()
@@ -628,7 +628,6 @@ fn encode_utf16_bytes(text: &str, little_endian: bool, include_bom: bool) -> Vec
         };
         out.extend_from_slice(&pair);
     }
-    out
 }
 
 /// `encoding_rs::EUC_KR`의 `encode_from_utf8_to_vec_without_replacement`를 사용하여
