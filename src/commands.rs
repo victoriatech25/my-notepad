@@ -75,35 +75,8 @@ fn consume_exact(
     }
 }
 
-/// 문서 인코딩 선택지 (PLAN.md §3.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EncodingChoice {
-    Utf8,
-    Utf8Bom,
-    EucKr,
-    Utf16Le,
-    Utf16Be,
-}
-
-impl EncodingChoice {
-    pub const ALL: [Self; 5] = [
-        Self::Utf8,
-        Self::Utf8Bom,
-        Self::EucKr,
-        Self::Utf16Le,
-        Self::Utf16Be,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Utf8 => "UTF-8",
-            Self::Utf8Bom => "UTF-8 with BOM",
-            Self::EucKr => "EUC-KR (CP949)",
-            Self::Utf16Le => "UTF-16 LE",
-            Self::Utf16Be => "UTF-16 BE",
-        }
-    }
-}
+/// 문서 인코딩 선택지 (PLAN.md §3.3 — `core::encoding::TextEncoding` 재노출).
+pub use crate::core::encoding::TextEncoding as EncodingChoice;
 
 /// 줄바꿈 방식 선택지 (PLAN.md §3.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

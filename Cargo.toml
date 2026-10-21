@@ -7,6 +7,7 @@ publish = false
 description = "Notepad++ 스타일의 경량 크로스 플랫폼 로컬 텍스트 에디터"
 
 [dependencies]
+chardetng = "1.0.0"
 # egui/eframe은 마이너 버전마다 Breaking Change가 잦으므로 정확한 버전으로 고정한다 (PLAN.md §2.1).
 # Phase 0 결정(P0-07, P0-10): 본 앱은 glow 렌더러만 사용하고 wgpu는 제외해 메모리와 실행 파일 크기를 줄인다.
 eframe = { version = "=0.37.0", default-features = false, features = [
@@ -19,6 +20,7 @@ eframe = { version = "=0.37.0", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+encoding_rs = "0.8.42"
 log = "0.4.34"
 memmap2 = "0.9.11"
 ttf-parser = "0.25.1"

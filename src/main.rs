@@ -8,17 +8,10 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod app;
-mod commands;
-mod config;
-mod core;
-mod fonts;
-mod logging;
-mod ui;
-
 use std::path::PathBuf;
 
 use eframe::egui;
+use my_notepad::{app, fonts, logging};
 
 struct CliArgs {
     log_file: Option<PathBuf>,
