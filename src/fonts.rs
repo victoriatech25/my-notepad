@@ -332,10 +332,17 @@ fn load_file(path: &Path, bold: bool) -> Result<(FontData, u32, String, u64), St
     Ok((data, face_index, face_name, size_bytes))
 }
 
-/// 파일 안의 face 중 굵기 조건에 맞는 첫 face를 고른다. 단일 폰트 파일이면 0번.
+/// 파일 안의 face 중 굵기 조건에 맞는 face를 고른다. 단일 폰트 파일이면 0번.
+///
+/// - 보통: 굵기 400인 첫 face
+/// - 굵게: 굵은 face(`is_bold` 또는 굵기 700 이상) 중 굵기가 700에 가장 가까운 face
+///   (`.ttc`에 Bold·ExtraBold·Heavy가 함께 있을 때 파일 순서와 관계없이 Bold를 고른다)
+///
+/// 조건에 맞는 face가 없으면 첫 face를 돌려준다.
 pub fn pick_face(bytes: &[u8], bold: bool) -> Result<(u32, String), String> {
     let count = ttf_parser::fonts_in_collection(bytes).unwrap_or(1);
     let mut first: Option<(u32, String)> = None;
+    let mut best_bold: Option<(u16, u32, String)> = None;
     for index in 0..count {
         let Ok(face) = ttf_parser::Face::parse(bytes, index) else {
             continue;
@@ -344,13 +351,25 @@ pub fn pick_face(bytes: &[u8], bold: bool) -> Result<(u32, String), String> {
         if first.is_none() {
             first = Some((index, name.clone()));
         }
-        let is_bold = face.is_bold() || face.weight().to_number() >= 700;
-        let is_regular = !face.is_italic() && face.weight().to_number() == 400;
-        if (bold && is_bold && !face.is_italic()) || (!bold && is_regular) {
+        if face.is_italic() {
+            continue;
+        }
+        let weight = face.weight().to_number();
+        if bold {
+            if face.is_bold() || weight >= 700 {
+                let distance = weight.abs_diff(700);
+                if best_bold.as_ref().is_none_or(|(d, _, _)| distance < *d) {
+                    best_bold = Some((distance, index, name));
+                }
+            }
+        } else if weight == 400 {
             return Ok((index, name));
         }
     }
-    first.ok_or_else(|| "폰트 face를 읽을 수 없음".to_owned())
+    best_bold
+        .map(|(_, index, name)| (index, name))
+        .or(first)
+        .ok_or_else(|| "폰트 face를 읽을 수 없음".to_owned())
 }
 
 fn face_name(face: &ttf_parser::Face<'_>) -> String {
@@ -370,14 +389,10 @@ mod tests {
         let custom = Path::new(r"D:\CustomWin");
         let slots = windows_font_slots(Some(custom));
         assert_eq!(slots.len(), 5);
-        assert_eq!(
-            slots[0].candidates[0],
-            PathBuf::from(r"D:\CustomWin\Fonts\consola.ttf")
-        );
-        assert_eq!(
-            slots[3].candidates[0],
-            PathBuf::from(r"D:\CustomWin\Fonts\malgun.ttf")
-        );
+        // 기대 경로도 `join`으로 만들어 macOS(구분자 `/`)에서도 같은 결과를 비교한다.
+        let fonts_dir = custom.join("Fonts");
+        assert_eq!(slots[0].candidates[0], fonts_dir.join("consola.ttf"));
+        assert_eq!(slots[3].candidates[0], fonts_dir.join("malgun.ttf"));
 
         let mac_slots = macos_font_slots();
         assert_eq!(mac_slots.len(), 5);
