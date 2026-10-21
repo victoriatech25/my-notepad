@@ -1,6 +1,36 @@
+[package]
+name = "my-notepad"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Notepad++ 스타일의 경량 크로스 플랫폼 로컬 텍스트 에디터"
+
+[dependencies]
+# egui/eframe은 마이너 버전마다 Breaking Change가 잦으므로 정확한 버전으로 고정한다 (PLAN.md §2.1).
+# Phase 0 결정(P0-07, P0-10): 본 앱은 glow 렌더러만 사용하고 wgpu는 제외해 메모리와 실행 파일 크기를 줄인다.
+eframe = { version = "=0.37.0", default-features = false, features = [
+    "accesskit",
+    "clipboard",
+    "default_fonts",
+    "glow",
+    "links",
+    "system_fonts",
+    "wayland",
+    "x11",
+] }
+log = "0.4.34"
+
 [workspace]
 resolver = "3"
-members = ["xtask", "spikes/editor-spike", "spikes/ux-prototype", "spikes/md-spike"]
+members = [
+    ".",
+    "xtask",
+    "spikes/editor-spike",
+    "spikes/ux-prototype",
+    "spikes/md-spike",
+]
+default-members = ["."]
 
 [workspace.package]
 edition = "2024"

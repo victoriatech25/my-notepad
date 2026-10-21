@@ -4,7 +4,7 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode};
 
 mod measure;
 mod samples;
@@ -21,6 +21,13 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "empty",
+        package: "my-notepad",
+        args: &[],
+        description: "P1-01 본 앱 빈 창 실행 (메뉴바·상태 표시줄 자리 표시)",
+        wait: false,
+    },
     Scenario {
         name: "spike",
         package: "editor-spike",
@@ -89,7 +96,15 @@ const SCENARIOS: &[Scenario] = &[
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        Some("try") => try_scenario(args.get(1).map(String::as_str)),
+        Some("try") => {
+            let wait_flag = args.iter().skip(1).any(|a| a == "--wait");
+            let name = args
+                .iter()
+                .skip(1)
+                .find(|a| !a.starts_with('-'))
+                .map(String::as_str);
+            try_scenario(name, wait_flag)
+        }
         Some("doctor") => doctor(),
         Some("gen-samples") => samples::generate(&workspace_root()),
         Some("measure") => {
@@ -122,7 +137,9 @@ fn print_help() {
     println!("My-Notepad 개발 보조 명령\n");
     println!("사용법: cargo xtask <명령> [인자]\n");
     println!("명령:");
-    println!("  try <시나리오>   릴리스 빌드 후 실행 (사용자 검증용)");
+    println!(
+        "  try <시나리오> [--wait]  릴리스 빌드 후 실행 (사용자 검증용, --wait는 창 종료까지 대기)"
+    );
     println!("  doctor           개발 환경 점검 (두 장비 준비 상태 확인)");
     println!("  gen-samples      성능 측정용 샘플 생성 (spikes/samples, git 제외)");
     println!("  measure [--runs N]  메모리·기동 시간 측정 (렌더러 × 한글 폰트 × 문서, 기본 10회)");
@@ -133,7 +150,7 @@ fn print_help() {
     }
 }
 
-fn try_scenario(name: Option<&str>) -> Result<(), String> {
+fn try_scenario(name: Option<&str>, wait_flag: bool) -> Result<(), String> {
     let name = name.ok_or("시나리오 이름이 필요합니다. 예: cargo xtask try spike")?;
     let scenario = SCENARIOS.iter().find(|s| s.name == name).ok_or_else(|| {
         format!("알 수 없는 시나리오: {name}\n`cargo xtask help`로 목록을 확인하세요.")
@@ -154,9 +171,9 @@ fn try_scenario(name: Option<&str>) -> Result<(), String> {
     let exe = root
         .join("target/release")
         .join(format!("{package}{}", env::consts::EXE_SUFFIX));
-    let mut command = Command::new(&exe);
-    command.current_dir(&root).args(scenario.args);
     if scenario.wait {
+        let mut command = Command::new(&exe);
+        command.current_dir(&root).args(scenario.args);
         let status = command
             .status()
             .map_err(|e| format!("{} 실행 실패: {e}", exe.display()))?;
@@ -164,14 +181,164 @@ fn try_scenario(name: Option<&str>) -> Result<(), String> {
             return Err(format!("{package} 실행이 실패했습니다 ({status})"));
         }
     } else {
-        // 출력을 떼어 내야 `cargo xtask try ... | tail` 같은 파이프가 앱 종료까지 기다리지 않는다.
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("{} 실행 실패: {e}", exe.display()))?;
-        println!("  실행됨 (pid {}) — 창을 닫으면 종료됩니다", child.id());
+        spawn_gui(&exe, scenario.args, &root, wait_flag)?;
+    }
+    Ok(())
+}
+
+/// GUI 앱을 실행한다.
+/// Windows에서는 에이전트의 격리 데스크톱(`WinSta0\exebox-...`)에서 호출되더라도
+/// 실제 사용자 화면(`WinSta0\Default`)에 창이 뜨도록 `STARTUPINFOW.lpDesktop`을 명시한다.
+#[cfg(windows)]
+fn spawn_gui(exe: &Path, args: &[&str], current_dir: &Path, wait_flag: bool) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    #[repr(C)]
+    struct StartupInfoW {
+        cb: u32,
+        lp_reserved: *mut u16,
+        lp_desktop: *mut u16,
+        lp_title: *mut u16,
+        dw_x: u32,
+        dw_y: u32,
+        dw_x_size: u32,
+        dw_y_size: u32,
+        dw_x_count_chars: u32,
+        dw_y_count_chars: u32,
+        dw_fill_attribute: u32,
+        dw_flags: u32,
+        w_show_window: u16,
+        cb_reserved2: u16,
+        lp_reserved2: *mut u8,
+        h_std_input: usize,
+        h_std_output: usize,
+        h_std_error: usize,
+    }
+
+    #[repr(C)]
+    struct ProcessInformation {
+        h_process: usize,
+        h_thread: usize,
+        dw_process_id: u32,
+        dw_thread_id: u32,
+    }
+
+    unsafe extern "system" {
+        fn CreateProcessW(
+            lp_application_name: *const u16,
+            lp_command_line: *mut u16,
+            lp_process_attributes: *const core::ffi::c_void,
+            lp_thread_attributes: *const core::ffi::c_void,
+            b_inherit_handles: i32,
+            dw_creation_flags: u32,
+            lp_environment: *const core::ffi::c_void,
+            lp_current_directory: *const u16,
+            lp_startup_info: *const StartupInfoW,
+            lp_process_information: *mut ProcessInformation,
+        ) -> i32;
+        fn WaitForSingleObject(h_handle: usize, dw_milliseconds: u32) -> u32;
+        fn CloseHandle(h_object: usize) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    fn to_wide(s: &OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let mut cmd_str = format!("\"{}\"", exe.display());
+    for arg in args {
+        cmd_str.push(' ');
+        if arg.contains(' ') {
+            cmd_str.push('"');
+            cmd_str.push_str(arg);
+            cmd_str.push('"');
+        } else {
+            cmd_str.push_str(arg);
+        }
+    }
+
+    let app_wide = to_wide(exe.as_os_str());
+    let mut cmd_wide = to_wide(OsStr::new(&cmd_str));
+    let dir_wide = to_wide(current_dir.as_os_str());
+    let mut desktop_wide = to_wide(OsStr::new(r"WinSta0\Default"));
+
+    let si = StartupInfoW {
+        cb: std::mem::size_of::<StartupInfoW>() as u32,
+        lp_reserved: ptr::null_mut(),
+        lp_desktop: desktop_wide.as_mut_ptr(),
+        lp_title: ptr::null_mut(),
+        dw_x: 0,
+        dw_y: 0,
+        dw_x_size: 0,
+        dw_y_size: 0,
+        dw_x_count_chars: 0,
+        dw_y_count_chars: 0,
+        dw_fill_attribute: 0,
+        dw_flags: 0x0000_0001, // STARTF_USESHOWWINDOW
+        w_show_window: 1,      // SW_SHOWNORMAL
+        cb_reserved2: 0,
+        lp_reserved2: ptr::null_mut(),
+        h_std_input: 0,
+        h_std_output: 0,
+        h_std_error: 0,
+    };
+    let mut pi = ProcessInformation {
+        h_process: 0,
+        h_thread: 0,
+        dw_process_id: 0,
+        dw_thread_id: 0,
+    };
+
+    // SAFETY: 모든 포인터는 널 종료 UTF-16 버퍼를 가리키며 호출 동안 유효하다.
+    let ok = unsafe {
+        CreateProcessW(
+            app_wide.as_ptr(),
+            cmd_wide.as_mut_ptr(),
+            ptr::null(),
+            ptr::null(),
+            0,
+            0,
+            ptr::null(),
+            dir_wide.as_ptr(),
+            &si,
+            &mut pi,
+        )
+    };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        return Err(format!("{} 실행 실패 (Win32 error {err})", exe.display()));
+    }
+
+    println!(
+        "  실행됨 (pid {}, WinSta0\\Default) — 창을 닫으면 종료됩니다",
+        pi.dw_process_id
+    );
+    unsafe {
+        CloseHandle(pi.h_thread);
+        if wait_flag {
+            WaitForSingleObject(pi.h_process, 0xFFFF_FFFF);
+        }
+        CloseHandle(pi.h_process);
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn spawn_gui(exe: &Path, args: &[&str], current_dir: &Path, wait_flag: bool) -> Result<(), String> {
+    use std::process::Stdio;
+    let mut child = Command::new(exe)
+        .current_dir(current_dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{} 실행 실패: {e}", exe.display()))?;
+    println!("  실행됨 (pid {}) — 창을 닫으면 종료됩니다", child.id());
+    if wait_flag {
+        let _ = child.wait();
     }
     Ok(())
 }

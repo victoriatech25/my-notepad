@@ -3,7 +3,7 @@
 Windows 기본 메모장보다 강력하고, Electron 기반 에디터보다 가벼운 **Notepad++ 스타일의 로컬 텍스트 에디터**입니다.
 웹뷰 없이 순수 Rust 네이티브 GUI(`eframe`/`egui`)로 Windows와 macOS에서 동작하는 것을 목표로 합니다.
 
-> **현재 상태**: Phase 0 — 기술 검증 스파이크 진행 중. 아직 사용 가능한 에디터는 없습니다.
+> **현재 상태**: Phase 0(기술 검증 스파이크, G0 통과) 완료 — Phase 1(MVP 기본 편집기 및 파일 입출력) 진행 중.
 
 ## 주요 목표 기능
 
@@ -66,7 +66,8 @@ cargo xtask doctor
 
 ```text
 my-notepad/
-├── docs/          기획·작업계획 문서
+├── src/           본 앱 소스 코드 (core 도메인 로직 + ui 계층)
+├── docs/          기획·작업계획·ADR·UI 명세 문서
 ├── spikes/        Phase 0 실험 프로젝트
 ├── xtask/         개발 보조 명령 (cargo xtask)
 └── tests/fixtures 테스트용 원본 파일 (바이트 그대로 보존)

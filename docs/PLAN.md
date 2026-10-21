@@ -340,13 +340,15 @@ flowchart TD
     UI --> TabBar["tab_bar.rs"]
     UI --> SearchBar["search_bar.rs"]
     UI --> EditorView["editor.rs (Gutter + 하이라이트 레이아웃)"]
+    UI --> Viewer["viewer.rs (대용량 읽기 전용 뷰어, 가상 스크롤)"]
     UI --> StatusBar["status_bar.rs"]
     UI --> Dialogs["dialogs.rs (저장 확인, 오류, 인코딩 경고)"]
+    UI --> Theme["theme.rs (색상 토큰 팔레트)"]
     UI --> MdView["markdown_view.rs (미리보기 렌더러, 가상 스크롤)"]
     UI --> DocView["doc_view.rs (소스/미리보기/분할 모드 + 스크롤 동기화)"]
 
-    Core --> Doc["document.rs (문서 모델)"]
-    Doc --> Buffer["buffer.rs (TextBuffer 추상화)"]
+    Core --> Doc["document.rs (문서 모델 + 탭별 Undo/Redo)"]
+    Doc --> Buffer["buffer.rs (TextBuffer 추상화 + 줄 색인 LineIndex)"]
     Doc --> Encoding["encoding.rs (감지/디코딩/인코딩)"]
     Doc --> LineEnding["line_ending.rs (감지/정규화/변환)"]
     Core --> FileIO["file_io.rs (원자적 저장, 외부 변경 감지)"]
@@ -355,6 +357,7 @@ flowchart TD
     Core --> FsTree["fs_tree.rs (지연 로딩 폴더 트리)"]
     Core --> Markdown["markdown.rs (파싱 → 블록 모델 + 소스 위치)"]
     DocView --> EditorView
+    DocView --> Viewer
     DocView --> MdView
     MdView --> Markdown
 ```
@@ -391,8 +394,8 @@ my-notepad/
 │   ├── fonts.rs             # OS별 폰트 경로 탐색 및 Fallback 체인 구성
 │   ├── core/
 │   │   ├── mod.rs
-│   │   ├── document.rs      # 문서 상태 (경로, 버퍼, 인코딩, 줄바꿈, 수정/손상/읽기전용 플래그, 디스크 메타데이터)
-│   │   ├── buffer.rs        # TextBuffer 트레이트 및 String 구현체
+│   │   ├── document.rs      # 문서 상태 (경로, 버퍼, 인코딩, 줄바꿈, 수정/손상/읽기전용 플래그, 탭별 Undo/Redo, 디스크 메타데이터)
+│   │   ├── buffer.rs        # TextBuffer 트레이트, String 구현체, 줄 시작 위치 색인(LineIndex)
 │   │   ├── encoding.rs      # 인코딩 감지, 디코딩, 인코딩(UTF-16/BOM 직접 처리, 표현 불가 문자 검출)
 │   │   ├── line_ending.rs   # 줄바꿈 감지(Mixed 포함), LF 정규화, 저장용 변환
 │   │   ├── file_io.rs       # 원자적 저장, 외부 변경 감지, 대용량/바이너리 판정
@@ -403,13 +406,15 @@ my-notepad/
 │   │   └── markdown.rs      # pulldown-cmark 파싱 → 블록 모델(종류, 소스 줄 범위, 인라인 스팬), 제목 앵커 슬러그, 소스 구문 색상 구간
 │   └── ui/
 │       ├── mod.rs
-│       ├── menu_bar.rs      # 파일/편집/검색/보기/인코딩 상단 메뉴
+│       ├── theme.rs         # docs/ux/ui-spec.md 색상 토큰 팔레트 (라이트/다크)
+│       ├── menu_bar.rs      # 파일/편집/검색/보기/인코딩/창/도움말 상단 메뉴
 │       ├── sidebar.rs       # 폴더 트리 뷰
-│       ├── tab_bar.rs       # 멀티 탭 전환 및 닫기 UI
+│       ├── tab_bar.rs       # 멀티 탭 전환 및 닫기 UI (넘침 스크롤·목록 포함)
 │       ├── search_bar.rs    # 찾기/바꾸기 패널 UI
 │       ├── editor.rs        # 줄 번호 Gutter + LayoutJob 기반 텍스트/하이라이트 에디터
+│       ├── viewer.rs        # 5MB 초과 대용량 읽기 전용 뷰어 (보이는 줄만 렌더링, 선택·복사, ADR 0001)
 │       ├── status_bar.rs    # 하단 상태 표시줄 및 인코딩/줄바꿈 빠른 변경 메뉴
-│       ├── dialogs.rs       # 모달 대화상자 모음
+│       ├── dialogs.rs       # 모달 대화상자 모음 (저장 확인, 창 목록, 인코딩/대용량 경고 등)
 │       ├── doc_view.rs      # 탭 본문 컨테이너: 보기 모드(소스/미리보기/분할), 분할 비율, 양방향 스크롤 동기화
 │       └── markdown_view.rs # 블록 모델 렌더링(제목, 목록, 표, 코드, 이미지, 링크), 블록 높이 캐시, 가상 스크롤
 └── tests/
@@ -452,12 +457,13 @@ my-notepad/
 **Go/No-Go**: 한글 IME가 불합격이고 우회 불가하면 UI 프레임워크를 재선정한다.
 
 ### Phase 1: MVP — 기본 편집기와 파일 입출력
-- `Cargo.toml` 세팅(버전 고정, 릴리스 프로필 LTO/strip), 로깅, panic hook
-- OS별 폰트 Fallback 체인 로드 (`fonts.rs`)
-- 기본 에디터 뷰(방식 A): 편집, Undo/Redo(탭별), 클립보드, 모두 선택
+- `Cargo.toml` 세팅(버전 고정, eframe `glow` 단독 활성화·`wgpu` 제외, 릴리스 프로필 LTO/strip), 로깅, panic hook, 색상 토큰(`ui/theme.rs`)
+- OS별 폰트 Fallback 체인 로드 (`fonts.rs`, `%WINDIR%\Fonts` 환경 변수 기반 탐색 포함)
+- 기본 에디터 뷰(방식 A): 편집, Undo/Redo(탭별 독립 이력), 클립보드, 모두 선택
+- 대용량 파일 읽기 전용 뷰어(`ui/viewer.rs`, ADR 0001): 5MB 초과 가상 스크롤 열람, 1~5MB 상단 안내 배너, 줄 시작 위치 색인(`LineIndex`)
 - `core/encoding.rs`, `core/line_ending.rs`: §3.3/§3.4 정책 전체 구현 + 라운드트립 테스트
 - `core/document.rs`, `core/file_io.rs`: 열기/저장/다른 이름으로 저장, 원자적 저장, 대용량·바이너리 가드
-- 멀티 탭(`tab_bar.rs`), 중복 열기 방지, 탭 닫기/앱 종료 시 저장 확인
+- 멀티 탭(`tab_bar.rs`, 넘침 스크롤·열린 탭 목록·`창` 메뉴), 중복 열기 방지, 탭 닫기/앱 종료 시 저장 확인
 - 명령줄 인자 및 드래그 앤 드롭으로 파일 열기
 - 상태 표시줄: 커서 위치, 인코딩, 줄바꿈 표시 및 변환, 인코딩으로 다시 읽기/변환 저장
 - `commands.rs`: OS별 단축키 매핑 (§3.5 표)
