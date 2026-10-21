@@ -12,8 +12,18 @@
 //!   6. 레거시 추정 (`chardetng`, `allow_utf8 = false`, 지원 목록 밖이면 `EUC-KR (CP949)`로 대체 + `fallback_from`에 원래 추정 결과)
 //! - 디코딩 및 오류 처리 ([`decode_bytes`], [`decode_with_encoding`]):
 //!   잘못된 바이트 시퀀스를 `U+FFFD`(`\u{FFFD}`)로 치환하고 `damaged = true` 플래그를 기록한다.
+//!
+//! P1-05 구현 범위:
+//! - 인코딩 직렬화 ([`encode_text`], [`encode_text_with_bom`], [`encode_text_lossy`]):
+//!   - `UTF-8` / `UTF-8 with BOM`: BOM(`EF BB BF`) 직접 기록
+//!   - `UTF-16 LE` / `UTF-16 BE`: `encoding_rs`는 UTF-16 출력 인코딩을 지원하지 않으므로
+//!     `str::encode_utf16()`으로 엔디언별 바이트 직렬화 및 BOM(`FF FE` / `FE FF`) 직접 기록
+//!   - `EUC-KR (CP949)`: `encoding_rs`의 기본 `encode()`가 표현 불가 문자를 HTML 숫자 참조(`&#128512;`)로
+//!     몰래 치환하는 문제를 방지하기 위해 `encode_from_utf8_to_vec_without_replacement`를 사용하여
+//!     표현 불가 문자 목록([`UnmappableChar`])을 검출하고, 손실 저장 승인 시에만 `?`(`0x3F`)로 대체한다.
 
 use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
+use encoding_rs::EncoderResult;
 
 /// UTF-8 BOM 바이트 시퀀스 (`EF BB BF`).
 pub const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -130,6 +140,39 @@ pub enum DecodeOutcome {
     Text(DecodedDocument),
     /// 바이너리 파일로 판정됨.
     Binary,
+}
+
+impl DecodedDocument {
+    /// 원본 문서의 인코딩과 BOM 유무(`has_bom`)를 그대로 보존하여 바이트로 직렬화한다.
+    pub fn encode_preserving_bom(&self) -> Result<Vec<u8>, UnmappableError> {
+        encode_text_with_bom(&self.text, self.encoding, self.has_bom)
+    }
+}
+
+/// 대상 인코딩으로 표현할 수 없는 단일 문자와 문서 내 위치 정보 (PLAN.md §3.3-5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnmappableChar {
+    /// 표현할 수 없는 유니코드 문자 (예: 이모지 `😀`, 미지원 한자 등).
+    pub ch: char,
+    /// 1-기반 줄 번호 (`Ln`).
+    pub line: usize,
+    /// 해당 줄 안에서의 1-기반 문자 열 번호 (`Col`).
+    pub column: usize,
+    /// 문서 전체에서의 0-기반 문자 인덱스.
+    pub char_index: usize,
+    /// UTF-8 문자열(`&str`)에서의 0-기반 바이트 오프셋.
+    pub byte_offset: usize,
+}
+
+/// 대상 인코딩으로 저장할 때 표현 불가 문자가 발견되었음을 나타내는 오류 (PLAN.md §3.3-5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmappableError {
+    /// 시도한 대상 인코딩.
+    pub encoding: TextEncoding,
+    /// 발견된 표현 불가 문자 목록 (문서 등장 순서).
+    pub unmappable: Vec<UnmappableChar>,
+    /// 표현 불가 문자를 `?`(`0x3F`)로 대체하여 인코딩한 바이트 결과 (HTML 숫자 참조 `&#...;` 미포함).
+    pub lossy_bytes: Vec<u8>,
 }
 
 /// 기본 인코딩을 `UTF-8`로 두어 바이트 슬라이스의 인코딩을 감지한다 (PLAN.md §3.3-2).
@@ -468,6 +511,200 @@ fn decode_utf16_bytes(bytes: &[u8], little_endian: bool) -> (String, bool) {
     }
 
     (out, damaged)
+}
+
+/// 텍스트를 지정한 [`TextEncoding`]의 표준 BOM 규칙(PLAN.md §3.3-1)에 따라 바이트로 인코딩한다.
+///
+/// - `UTF-8`, `EUC-KR (CP949)`: BOM 없음
+/// - `UTF-8 with BOM`: `EF BB BF` 기록
+/// - `UTF-16 LE`: `FF FE` 기록 후 리틀 엔디언 직렬화
+/// - `UTF-16 BE`: `FE FF` 기록 후 빅 엔디언 직렬화
+/// - 표현 불가 문자가 있으면 `Err(UnmappableError)`를 반환하며, 결과 바이트에 HTML 숫자 참조(`&#...;`)를 절대 넣지 않는다.
+pub fn encode_text(text: &str, encoding: TextEncoding) -> Result<Vec<u8>, UnmappableError> {
+    let default_bom = matches!(
+        encoding,
+        TextEncoding::Utf8Bom | TextEncoding::Utf16Le | TextEncoding::Utf16Be
+    );
+    encode_text_with_bom(text, encoding, default_bom)
+}
+
+/// BOM 기록 여부를 명시적으로 지정하여 텍스트를 바이트로 인코딩한다.
+///
+/// BOM이 없던 UTF-16 픽스처(`utf16le_no_bom.txt`, `utf16be_no_bom.txt`)를 원본 그대로 라운드트립하거나
+/// 표준 BOM 정책으로 저장할 때 모두 사용할 수 있다.
+pub fn encode_text_with_bom(
+    text: &str,
+    encoding: TextEncoding,
+    include_bom: bool,
+) -> Result<Vec<u8>, UnmappableError> {
+    let (bytes, unmappable) = encode_text_lossy_with_bom(text, encoding, include_bom);
+    if unmappable.is_empty() {
+        Ok(bytes)
+    } else {
+        Err(UnmappableError {
+            encoding,
+            unmappable,
+            lossy_bytes: bytes,
+        })
+    }
+}
+
+/// 표현 불가 문자를 `?`(`0x3F`)로 대체하여 인코딩하고, 대체된 문자 목록을 함께 반환한다.
+///
+/// `encoding_rs::Encoding::encode`와 달리 HTML 숫자 참조(`&#128512;`)를 절대 생성하지 않는다.
+pub fn encode_text_lossy(text: &str, encoding: TextEncoding) -> (Vec<u8>, Vec<UnmappableChar>) {
+    let default_bom = matches!(
+        encoding,
+        TextEncoding::Utf8Bom | TextEncoding::Utf16Le | TextEncoding::Utf16Be
+    );
+    encode_text_lossy_with_bom(text, encoding, default_bom)
+}
+
+/// BOM 기록 여부를 지정해 표현 불가 문자를 `?`(`0x3F`)로 대체하며 인코딩한다.
+pub fn encode_text_lossy_with_bom(
+    text: &str,
+    encoding: TextEncoding,
+    include_bom: bool,
+) -> (Vec<u8>, Vec<UnmappableChar>) {
+    match encoding {
+        TextEncoding::Utf8 => {
+            if include_bom {
+                let mut out = Vec::with_capacity(UTF8_BOM.len() + text.len());
+                out.extend_from_slice(UTF8_BOM);
+                out.extend_from_slice(text.as_bytes());
+                (out, Vec::new())
+            } else {
+                (text.as_bytes().to_vec(), Vec::new())
+            }
+        }
+        TextEncoding::Utf8Bom => {
+            if include_bom {
+                let mut out = Vec::with_capacity(UTF8_BOM.len() + text.len());
+                out.extend_from_slice(UTF8_BOM);
+                out.extend_from_slice(text.as_bytes());
+                (out, Vec::new())
+            } else {
+                (text.as_bytes().to_vec(), Vec::new())
+            }
+        }
+        TextEncoding::Utf16Le => (encode_utf16_bytes(text, true, include_bom), Vec::new()),
+        TextEncoding::Utf16Be => (encode_utf16_bytes(text, false, include_bom), Vec::new()),
+        TextEncoding::EucKr => encode_euc_kr_without_ncr(text),
+    }
+}
+
+/// 대상 인코딩으로 표현할 수 없는 문자를 최대 `limit`개까지 찾아 반환한다.
+pub fn find_unmappable_chars(
+    text: &str,
+    encoding: TextEncoding,
+    limit: usize,
+) -> Vec<UnmappableChar> {
+    if limit == 0 || encoding != TextEncoding::EucKr {
+        return Vec::new();
+    }
+    let (_, mut unmappable) = encode_euc_kr_without_ncr(text);
+    unmappable.truncate(limit);
+    unmappable
+}
+
+/// `str::encode_utf16()`을 사용해 엔디언 및 BOM 여부에 맞게 UTF-16 바이트를 직접 직렬화한다 (PLAN.md §3.3-5).
+fn encode_utf16_bytes(text: &str, little_endian: bool, include_bom: bool) -> Vec<u8> {
+    let bom = if include_bom {
+        if little_endian {
+            UTF16LE_BOM
+        } else {
+            UTF16BE_BOM
+        }
+    } else {
+        &[]
+    };
+    let mut out = Vec::with_capacity(bom.len() + text.len().saturating_mul(2));
+    out.extend_from_slice(bom);
+    for unit in text.encode_utf16() {
+        let pair = if little_endian {
+            unit.to_le_bytes()
+        } else {
+            unit.to_be_bytes()
+        };
+        out.extend_from_slice(&pair);
+    }
+    out
+}
+
+/// `encoding_rs::EUC_KR`의 `encode_from_utf8_to_vec_without_replacement`를 사용하여
+/// HTML 숫자 참조(`&#...;`) 치환 없이 표현 불가 문자를 검출하고 `?`(`0x3F`)로 대체한다.
+fn encode_euc_kr_without_ncr(text: &str) -> (Vec<u8>, Vec<UnmappableChar>) {
+    let mut encoder = encoding_rs::EUC_KR.new_encoder();
+    let initial_cap = encoder
+        .max_buffer_length_from_utf8_without_replacement(text.len())
+        .unwrap_or(text.len().saturating_mul(2))
+        .max(16);
+    let mut out = Vec::with_capacity(initial_cap);
+    let mut unmappable_offsets: Vec<(usize, char)> = Vec::new();
+
+    let mut total_read = 0usize;
+    while total_read < text.len() {
+        let remaining = &text[total_read..];
+        let needed = encoder
+            .max_buffer_length_from_utf8_without_replacement(remaining.len())
+            .unwrap_or(remaining.len().saturating_mul(2))
+            .max(16);
+        if out.capacity() - out.len() < needed {
+            out.reserve(needed);
+        }
+
+        let (result, read) =
+            encoder.encode_from_utf8_to_vec_without_replacement(remaining, &mut out, true);
+        total_read += read;
+
+        match result {
+            EncoderResult::InputEmpty => break,
+            EncoderResult::OutputFull => {
+                out.reserve(needed.max(64));
+            }
+            EncoderResult::Unmappable(ch) => {
+                let char_byte_offset = total_read.saturating_sub(ch.len_utf8());
+                unmappable_offsets.push((char_byte_offset, ch));
+                out.push(b'?');
+            }
+        }
+    }
+
+    if unmappable_offsets.is_empty() {
+        return (out, Vec::new());
+    }
+
+    // 표현 불가 문자가 있을 때만 1회 스캔하여 (줄 번호, 열 번호, 문자 인덱스)를 채운다.
+    let mut unmappable = Vec::with_capacity(unmappable_offsets.len());
+    let mut target_idx = 0usize;
+    let mut line = 1usize;
+    let mut column = 1usize;
+
+    for (char_index, (byte_offset, ch)) in text.char_indices().enumerate() {
+        if target_idx < unmappable_offsets.len() && unmappable_offsets[target_idx].0 == byte_offset
+        {
+            unmappable.push(UnmappableChar {
+                ch,
+                line,
+                column,
+                char_index,
+                byte_offset,
+            });
+            target_idx += 1;
+            if target_idx == unmappable_offsets.len() {
+                break;
+            }
+        }
+
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+
+    (out, unmappable)
 }
 
 #[cfg(test)]
