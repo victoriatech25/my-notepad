@@ -78,34 +78,8 @@ fn consume_exact(
 /// 문서 인코딩 선택지 (PLAN.md §3.3 — `core::encoding::TextEncoding` 재노출).
 pub use crate::core::encoding::TextEncoding as EncodingChoice;
 
-/// 줄바꿈 방식 선택지 (PLAN.md §3.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LineEndingChoice {
-    CrLf,
-    Lf,
-}
-
-impl LineEndingChoice {
-    pub const ALL: [Self; 2] = [Self::CrLf, Self::Lf];
-
-    pub const fn default_for_os() -> Self {
-        if cfg!(windows) { Self::CrLf } else { Self::Lf }
-    }
-
-    pub const fn short_label(self) -> &'static str {
-        match self {
-            Self::CrLf => "CRLF",
-            Self::Lf => "LF",
-        }
-    }
-
-    pub const fn menu_label(self) -> &'static str {
-        match self {
-            Self::CrLf => "CRLF (Windows)",
-            Self::Lf => "LF (macOS / Linux)",
-        }
-    }
-}
+/// 줄바꿈 방식 선택지 (PLAN.md §3.4 — `core::line_ending::LineEnding` 재노출).
+pub use crate::core::line_ending::LineEnding as LineEndingChoice;
 
 /// Markdown 문서 보기 모드 (PLAN.md §3.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
