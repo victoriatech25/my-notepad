@@ -20,6 +20,8 @@ eframe = { version = "=0.37.0", default-features = false, features = [
     "x11",
 ] }
 log = "0.4.34"
+memmap2 = "0.9.11"
+ttf-parser = "0.25.1"
 
 [workspace]
 resolver = "3"
