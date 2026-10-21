@@ -5,10 +5,11 @@
 //! - 열기 시 6단계 인코딩 감지 ([`detect_encoding`], [`detect_encoding_with_default`]):
 //!   1. BOM 확인 (`EF BB BF` → UTF-8 BOM, `FF FE` → UTF-16 LE, `FE FF` → UTF-16 BE)
 //!   2. 빈 파일 → 설정의 기본 인코딩(기본값 `UTF-8`)
-//!   3. UTF-8 유효성 검사 (`0x00` 바이트가 없고 전체가 유효한 UTF-8이면 `UTF-8`, ASCII 전용 포함)
-//!   4. BOM 없는 UTF-16 휴리스틱 (짝수/홀수 위치 `0x00` 비율 및 유효 코드 유닛 판정)
+//!   3. UTF-8 유효성 검사 (`0x00` 바이트가 없고 전체가 유효한 UTF-8이면 `UTF-8`, ASCII 전용 포함.
+//!      잘못된 구간이 적거나 끝에서 잘린 UTF-8은 `UTF-8` 추정 + 디코딩 손상)
+//!   4. BOM 없는 UTF-16 휴리스틱 (`0x00`이 있을 때만: 짝수/홀수 위치 `0x00` 비율, 한글 위주면 두 엔디언 디코딩 비교)
 //!   5. 바이너리 판정 (위에 해당하지 않으면서 `0x00` 바이트가 포함되면 [`DetectionOutcome::Binary`])
-//!   6. 레거시 추정 (`chardetng`, `allow_utf8 = false`, 지원 목록 밖이면 `EUC-KR (CP949)`로 대체 + `estimated = true`)
+//!   6. 레거시 추정 (`chardetng`, `allow_utf8 = false`, 지원 목록 밖이면 `EUC-KR (CP949)`로 대체 + `fallback_from`에 원래 추정 결과)
 //! - 디코딩 및 오류 처리 ([`decode_bytes`], [`decode_with_encoding`]):
 //!   잘못된 바이트 시퀀스를 `U+FFFD`(`\u{FFFD}`)로 치환하고 `damaged = true` 플래그를 기록한다.
 
@@ -71,6 +72,29 @@ pub struct DetectedEncoding {
     pub has_bom: bool,
     /// BOM이나 유효한 UTF-8로 확정되지 않고 휴리스틱 또는 `chardetng`로 추정되었는지 여부.
     pub estimated: bool,
+    /// `chardetng` 추정 결과가 지원 목록 밖이라 `EUC-KR (CP949)`로 대체했을 때, 원래 추정된 인코딩 이름
+    /// (`encoding_rs` 표기, 예: `windows-1252`). 대체하지 않았으면 `None`.
+    pub fallback_from: Option<&'static str>,
+}
+
+impl DetectedEncoding {
+    const fn certain(encoding: TextEncoding, has_bom: bool) -> Self {
+        Self {
+            encoding,
+            has_bom,
+            estimated: false,
+            fallback_from: None,
+        }
+    }
+
+    const fn estimated(encoding: TextEncoding) -> Self {
+        Self {
+            encoding,
+            has_bom: false,
+            estimated: true,
+            fallback_from: None,
+        }
+    }
 }
 
 /// 바이트 슬라이스에 대한 인코딩 감지 결과 (PLAN.md §3.3-2).
@@ -93,6 +117,8 @@ pub struct DecodedDocument {
     pub has_bom: bool,
     /// 휴리스틱 또는 `chardetng`로 추정된 인코딩인지 여부.
     pub estimated: bool,
+    /// 지원 목록 밖 추정 결과를 `EUC-KR (CP949)`로 대체했을 때 원래 추정된 인코딩 이름 ([`DetectedEncoding::fallback_from`]).
+    pub fallback_from: Option<&'static str>,
     /// 디코딩 중 잘못된 바이트가 발견되어 `U+FFFD`로 대체되었는지 여부 ("디코딩 손상" 상태).
     pub damaged: bool,
 }
@@ -116,63 +142,53 @@ pub fn detect_encoding(bytes: &[u8]) -> DetectionOutcome {
 /// 감지 순서 (PLAN.md §3.3-2):
 /// 1. BOM 확인 (`EF BB BF` → UTF-8 BOM, `FF FE` → UTF-16 LE, `FE FF` → UTF-16 BE)
 /// 2. 빈 파일 → `default_encoding`
-/// 3. UTF-8 유효성 검사 (`0x00` 바이트가 없고 전체가 유효한 UTF-8이면 `UTF-8`)
-/// 4. BOM 없는 UTF-16 휴리스틱 (짝수/홀수 바이트 위치의 `0x00` 비율로 판정)
+/// 3. UTF-8 유효성 검사 (`0x00` 바이트가 없고 전체가 유효한 UTF-8이면 `UTF-8`,
+///    잘못된 구간이 적거나 끝에서 잘렸으면 `UTF-8` 추정)
+/// 4. BOM 없는 UTF-16 휴리스틱 (`0x00`이 있을 때만, [`detect_utf16_without_bom`] 참고)
 /// 5. 바이너리 판정 (위에 해당하지 않으면서 `0x00` 바이트가 포함되면 `Binary`)
-/// 6. 레거시 추정 (`chardetng`, `allow_utf8 = false`, 지원 목록 밖이면 `EUC-KR (CP949)`로 대체)
+/// 6. 레거시 추정 (`chardetng`, `allow_utf8 = false`, 지원 목록 밖이면 `EUC-KR (CP949)`로 대체하고 `fallback_from` 기록)
 pub fn detect_encoding_with_default(
     bytes: &[u8],
     default_encoding: TextEncoding,
 ) -> DetectionOutcome {
     // 1. BOM 확인
     if bytes.starts_with(UTF8_BOM) {
-        return DetectionOutcome::Text(DetectedEncoding {
-            encoding: TextEncoding::Utf8Bom,
-            has_bom: true,
-            estimated: false,
-        });
+        return DetectionOutcome::Text(DetectedEncoding::certain(TextEncoding::Utf8Bom, true));
     }
     if bytes.starts_with(UTF16LE_BOM) {
-        return DetectionOutcome::Text(DetectedEncoding {
-            encoding: TextEncoding::Utf16Le,
-            has_bom: true,
-            estimated: false,
-        });
+        return DetectionOutcome::Text(DetectedEncoding::certain(TextEncoding::Utf16Le, true));
     }
     if bytes.starts_with(UTF16BE_BOM) {
-        return DetectionOutcome::Text(DetectedEncoding {
-            encoding: TextEncoding::Utf16Be,
-            has_bom: true,
-            estimated: false,
-        });
+        return DetectionOutcome::Text(DetectedEncoding::certain(TextEncoding::Utf16Be, true));
     }
 
     // 2. 빈 파일
     if bytes.is_empty() {
-        return DetectionOutcome::Text(DetectedEncoding {
-            encoding: default_encoding,
-            has_bom: false,
-            estimated: false,
-        });
+        return DetectionOutcome::Text(DetectedEncoding::certain(default_encoding, false));
     }
 
     // 3. UTF-8 유효성 검사 (ASCII 전용 파일 포함, 단 NUL(0x00)이 포함된 경우 UTF-16/바이너리 판정으로 넘김)
     let has_nul = bytes.contains(&0);
-    if !has_nul && std::str::from_utf8(bytes).is_ok() {
-        return DetectionOutcome::Text(DetectedEncoding {
-            encoding: TextEncoding::Utf8,
-            has_bom: false,
-            estimated: false,
-        });
+    if !has_nul {
+        match utf8_validity(bytes) {
+            Utf8Validity::Valid => {
+                return DetectionOutcome::Text(DetectedEncoding::certain(
+                    TextEncoding::Utf8,
+                    false,
+                ));
+            }
+            // 끝이 잘렸거나 잘못된 바이트가 조금 섞인 UTF-8은 레거시로 추정하면 전체가 깨지므로
+            // UTF-8로 추정하고 디코딩 손상으로 표시한다.
+            Utf8Validity::MostlyValid => {
+                return DetectionOutcome::Text(DetectedEncoding::estimated(TextEncoding::Utf8));
+            }
+            Utf8Validity::Invalid => {}
+        }
     }
 
-    // 4. BOM 없는 UTF-16 휴리스틱
-    if let Some(utf16_enc) = detect_utf16_without_bom(bytes) {
-        return DetectionOutcome::Text(DetectedEncoding {
-            encoding: utf16_enc,
-            has_bom: false,
-            estimated: true,
-        });
+    // 4. BOM 없는 UTF-16 휴리스틱 (ASCII·공백·줄바꿈이 있으면 0x00 바이트가 생기므로 NUL이 있을 때만 시도)
+    if has_nul && let Some(utf16_enc) = detect_utf16_without_bom(bytes) {
+        return DetectionOutcome::Text(DetectedEncoding::estimated(utf16_enc));
     }
 
     // 5. 바이너리 판정
@@ -180,26 +196,59 @@ pub fn detect_encoding_with_default(
         return DetectionOutcome::Binary;
     }
 
-    // 6. 레거시 추정 (chardetng, allow_utf8 = false)
+    // 6. 레거시 추정 (chardetng, allow_utf8 = false).
+    // chardetng는 UTF-16을 추정하지 않으므로 결과는 EUC-KR이거나 지원 목록 밖 인코딩이다.
     let mut detector = EncodingDetector::new(Iso2022JpDetection::Deny);
     detector.feed(bytes, true);
     let guessed = detector.guess(None, Utf8Detection::Deny);
-    let encoding = if guessed == encoding_rs::EUC_KR {
-        TextEncoding::EucKr
-    } else if guessed == encoding_rs::UTF_16LE {
-        TextEncoding::Utf16Le
-    } else if guessed == encoding_rs::UTF_16BE {
-        TextEncoding::Utf16Be
-    } else {
-        // 지원 목록 밖이면 EUC-KR (CP949)로 대체 (PLAN.md §3.3-2 #6)
-        TextEncoding::EucKr
-    };
+    let mut detected = DetectedEncoding::estimated(TextEncoding::EucKr);
+    if guessed != encoding_rs::EUC_KR {
+        // 지원 목록 밖이면 EUC-KR (CP949)로 대체하고 원래 추정 결과를 남긴다 (PLAN.md §3.3-2 #6)
+        detected.fallback_from = Some(guessed.name());
+    }
+    DetectionOutcome::Text(detected)
+}
 
-    DetectionOutcome::Text(DetectedEncoding {
-        encoding,
-        has_bom: false,
-        estimated: true,
-    })
+/// UTF-8 유효성 검사 결과.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Utf8Validity {
+    /// 전체가 유효한 UTF-8.
+    Valid,
+    /// 유효한 멀티바이트 문자가 대부분이고 잘못된 구간이 적거나 끝에서 잘린 경우만 있음.
+    MostlyValid,
+    /// UTF-8로 보기 어려움.
+    Invalid,
+}
+
+/// 잘못된 구간 1개당 요구하는 유효한 멀티바이트 문자 수.
+const UTF8_VALID_PER_INVALID: usize = 8;
+
+fn utf8_validity(bytes: &[u8]) -> Utf8Validity {
+    let mut multibyte_chars = 0usize;
+    let mut invalid_runs = 0usize;
+    let mut truncated_tail = false;
+    let mut chunks = bytes.utf8_chunks().peekable();
+    while let Some(chunk) = chunks.next() {
+        multibyte_chars += chunk.valid().chars().filter(|c| !c.is_ascii()).count();
+        if !chunk.invalid().is_empty() {
+            invalid_runs += 1;
+            // 마지막 청크의 잘못된 바이트가 3바이트 이하면 끝에서 잘린 멀티바이트 문자일 수 있다.
+            truncated_tail = chunks.peek().is_none() && chunk.invalid().len() < 4;
+        }
+    }
+
+    if invalid_runs == 0 {
+        return Utf8Validity::Valid;
+    }
+    if multibyte_chars == 0 {
+        return Utf8Validity::Invalid;
+    }
+    let tail_only = invalid_runs == 1 && truncated_tail;
+    if tail_only || multibyte_chars >= invalid_runs.saturating_mul(UTF8_VALID_PER_INVALID) {
+        Utf8Validity::MostlyValid
+    } else {
+        Utf8Validity::Invalid
+    }
 }
 
 /// 바이트 슬라이스의 인코딩을 자동 감지하고 디코딩한다.
@@ -215,6 +264,7 @@ pub fn decode_bytes_with_default(bytes: &[u8], default_encoding: TextEncoding) -
             let mut doc = decode_with_encoding(bytes, detected.encoding);
             doc.has_bom = detected.has_bom;
             doc.estimated = detected.estimated;
+            doc.fallback_from = detected.fallback_from;
             DecodeOutcome::Text(doc)
         }
     }
@@ -225,84 +275,62 @@ pub fn decode_bytes_with_default(bytes: &[u8], default_encoding: TextEncoding) -
 /// - "인코딩으로 다시 읽기"(`Command::ReopenWithEncoding`)나 바이너리 파일을 읽기 전용으로 열 때 사용한다.
 /// - 잘못된 바이트 시퀀스는 `U+FFFD`로 대체되고 반환값의 `damaged` 필드가 `true`로 설정된다.
 pub fn decode_with_encoding(bytes: &[u8], encoding: TextEncoding) -> DecodedDocument {
-    match encoding {
-        TextEncoding::Utf8 => {
-            let (has_bom, payload) = match bytes.strip_prefix(UTF8_BOM) {
-                Some(rest) => (true, rest),
-                None => (false, bytes),
-            };
+    let (has_bom, payload) = match encoding {
+        // EUC-KR에는 BOM이 없으므로 앞부분 바이트를 그대로 디코딩한다.
+        TextEncoding::EucKr => (false, bytes),
+        TextEncoding::Utf8 | TextEncoding::Utf8Bom => strip_bom(bytes, UTF8_BOM),
+        TextEncoding::Utf16Le => strip_bom(bytes, UTF16LE_BOM),
+        TextEncoding::Utf16Be => strip_bom(bytes, UTF16BE_BOM),
+    };
+    let (text, damaged) = match encoding {
+        TextEncoding::Utf8 | TextEncoding::Utf8Bom => {
             let (cow, had_errors) = encoding_rs::UTF_8.decode_without_bom_handling(payload);
-            DecodedDocument {
-                text: cow.into_owned(),
-                encoding: TextEncoding::Utf8,
-                has_bom,
-                estimated: false,
-                damaged: had_errors,
-            }
-        }
-        TextEncoding::Utf8Bom => {
-            let (has_bom, payload) = match bytes.strip_prefix(UTF8_BOM) {
-                Some(rest) => (true, rest),
-                None => (false, bytes),
-            };
-            let (cow, had_errors) = encoding_rs::UTF_8.decode_without_bom_handling(payload);
-            DecodedDocument {
-                text: cow.into_owned(),
-                encoding: TextEncoding::Utf8Bom,
-                has_bom,
-                estimated: false,
-                damaged: had_errors,
-            }
+            (cow.into_owned(), had_errors)
         }
         TextEncoding::EucKr => {
-            let (cow, had_errors) = encoding_rs::EUC_KR.decode_without_bom_handling(bytes);
-            DecodedDocument {
-                text: cow.into_owned(),
-                encoding: TextEncoding::EucKr,
-                has_bom: false,
-                estimated: false,
-                damaged: had_errors,
-            }
+            let (cow, had_errors) = encoding_rs::EUC_KR.decode_without_bom_handling(payload);
+            (cow.into_owned(), had_errors)
         }
-        TextEncoding::Utf16Le => {
-            let (has_bom, payload) = match bytes.strip_prefix(UTF16LE_BOM) {
-                Some(rest) => (true, rest),
-                None => (false, bytes),
-            };
-            let (text, damaged) = decode_utf16_bytes(payload, true);
-            DecodedDocument {
-                text,
-                encoding: TextEncoding::Utf16Le,
-                has_bom,
-                estimated: false,
-                damaged,
-            }
-        }
-        TextEncoding::Utf16Be => {
-            let (has_bom, payload) = match bytes.strip_prefix(UTF16BE_BOM) {
-                Some(rest) => (true, rest),
-                None => (false, bytes),
-            };
-            let (text, damaged) = decode_utf16_bytes(payload, false);
-            DecodedDocument {
-                text,
-                encoding: TextEncoding::Utf16Be,
-                has_bom,
-                estimated: false,
-                damaged,
-            }
-        }
+        TextEncoding::Utf16Le => decode_utf16_bytes(payload, true),
+        TextEncoding::Utf16Be => decode_utf16_bytes(payload, false),
+    };
+    DecodedDocument {
+        text,
+        encoding,
+        has_bom,
+        estimated: false,
+        fallback_from: None,
+        damaged,
     }
 }
 
+fn strip_bom<'a>(bytes: &'a [u8], bom: &[u8]) -> (bool, &'a [u8]) {
+    match bytes.strip_prefix(bom) {
+        Some(rest) => (true, rest),
+        None => (false, bytes),
+    }
+}
+
+/// BOM 없는 UTF-16 휴리스틱이 검사하는 앞부분 바이트 수.
+const UTF16_SAMPLE_LEN: usize = 8192;
+
+/// 0x00 위치가 치우치지 않은 텍스트(한글 위주)를 UTF-16으로 인정할 텍스트 문자 비율(%).
+const UTF16_TEXT_RATIO_PERCENT: usize = 90;
+
 /// BOM이 없는 바이트 슬라이스가 UTF-16 LE 또는 UTF-16 BE 텍스트인지 휴리스틱으로 판정한다.
+///
+/// - ASCII 위주 텍스트: 짝수/홀수 위치 중 한쪽에 `0x00`이 뚜렷하게 몰린다.
+/// - 한글 위주 텍스트: `가`(U+AC00)처럼 아래 바이트가 `0x00`인 음절 때문에 `0x00`이 양쪽에 섞이므로,
+///   두 엔디언으로 디코딩해 유효하고 대부분이 텍스트 문자([`is_common_text_char`])인 쪽을 고른다.
+///
+/// `0x00`이 없는 바이트에는 호출하지 않는다 (CP949 한글 바이트는 UTF-16 BE 한글 음절 범위와 겹친다).
 fn detect_utf16_without_bom(bytes: &[u8]) -> Option<TextEncoding> {
     if bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
         return None;
     }
 
-    let sample_len = bytes.len().min(8192);
-    let sample = &bytes[..sample_len];
+    let truncated = bytes.len() > UTF16_SAMPLE_LEN;
+    let sample = &bytes[..bytes.len().min(UTF16_SAMPLE_LEN)];
     let total_pairs = sample.len() / 2;
 
     let mut even_zeros = 0usize;
@@ -323,38 +351,95 @@ fn detect_utf16_without_bom(bytes: &[u8]) -> Option<TextEncoding> {
         return None;
     }
 
-    // 짝수/홀수 위치의 0x00 비율이 최소 10% 이상이고 한쪽으로 뚜렷하게 치우쳐야 한다.
-    let (candidate, little_endian) = if odd_zeros > 0
+    // 짝수/홀수 위치의 0x00 비율이 최소 10% 이상이고 한쪽으로 뚜렷하게 치우친 경우
+    let skewed = if odd_zeros > 0
         && odd_zeros >= even_zeros.saturating_mul(4)
         && odd_zeros * 10 >= total_pairs
     {
-        (TextEncoding::Utf16Le, true)
+        Some(TextEncoding::Utf16Le)
     } else if even_zeros > 0
         && even_zeros >= odd_zeros.saturating_mul(4)
         && even_zeros * 10 >= total_pairs
     {
-        (TextEncoding::Utf16Be, false)
+        Some(TextEncoding::Utf16Be)
     } else {
-        return None;
+        None
     };
+    if let Some(candidate) = skewed {
+        let little_endian = candidate == TextEncoding::Utf16Le;
+        return utf16_text_stats(sample, little_endian, truncated).map(|_| candidate);
+    }
 
-    // 샘플 구간이 유효한 UTF-16 시퀀스이고 비인쇄 제어 문자가 없는지 확인한다.
-    let units = sample.as_chunks::<2>().0.iter().map(|&pair| {
-        if little_endian {
-            u16::from_le_bytes(pair)
-        } else {
-            u16::from_be_bytes(pair)
+    // 0x00이 양쪽 위치에 섞인 경우 (한글 위주 텍스트)
+    let is_mostly_text = |&(text_chars, total_chars): &(usize, usize)| {
+        text_chars * 100 >= total_chars * UTF16_TEXT_RATIO_PERCENT
+    };
+    let le = utf16_text_stats(sample, true, truncated).filter(is_mostly_text);
+    let be = utf16_text_stats(sample, false, truncated).filter(is_mostly_text);
+    match (le, be) {
+        (Some(_), None) => Some(TextEncoding::Utf16Le),
+        (None, Some(_)) => Some(TextEncoding::Utf16Be),
+        (Some((le_text, _)), Some((be_text, _))) if le_text > be_text => {
+            Some(TextEncoding::Utf16Le)
         }
-    });
+        (Some((le_text, _)), Some((be_text, _))) if be_text > le_text => {
+            Some(TextEncoding::Utf16Be)
+        }
+        _ => None,
+    }
+}
 
+/// 샘플을 UTF-16으로 디코딩해 `(텍스트 문자 수, 전체 문자 수)`를 센다.
+///
+/// 짝 없는 서로게이트나 비인쇄 제어 문자(탭·줄바꿈 제외)가 있으면 `None`.
+/// `truncated`이면 샘플 끝에서 잘린 서로게이트 쌍의 앞쪽 유닛은 무시한다.
+fn utf16_text_stats(sample: &[u8], little_endian: bool, truncated: bool) -> Option<(usize, usize)> {
+    let mut units: Vec<u16> = sample
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| {
+            if little_endian {
+                u16::from_le_bytes(pair)
+            } else {
+                u16::from_be_bytes(pair)
+            }
+        })
+        .collect();
+    if truncated && units.last().is_some_and(|u| (0xD800..=0xDBFF).contains(u)) {
+        units.pop();
+    }
+
+    let mut text_chars = 0usize;
+    let mut total_chars = 0usize;
     for decoded in char::decode_utf16(units) {
         let ch = decoded.ok()?;
         if ch.is_control() && !matches!(ch, '\t' | '\n' | '\r') {
             return None;
         }
+        total_chars += 1;
+        if is_common_text_char(ch) {
+            text_chars += 1;
+        }
     }
+    Some((text_chars, total_chars))
+}
 
-    Some(candidate)
+/// 한국어·영어 문서에 흔한 문자인지 (UTF-16 엔디언 판정용).
+fn is_common_text_char(ch: char) -> bool {
+    ch.is_ascii_graphic()
+        || ch.is_ascii_whitespace()
+        || matches!(
+            ch,
+            '\u{00A0}'..='\u{00FF}' // Latin-1 보충
+                | '\u{1100}'..='\u{11FF}' // 한글 자모
+                | '\u{2000}'..='\u{206F}' // 일반 문장 부호
+                | '\u{3000}'..='\u{303F}' // CJK 기호·문장 부호
+                | '\u{3130}'..='\u{318F}' // 한글 호환 자모
+                | '\u{4E00}'..='\u{9FFF}' // CJK 통합 한자
+                | '\u{AC00}'..='\u{D7A3}' // 한글 음절
+                | '\u{FF00}'..='\u{FFEF}' // 전각·반각
+        )
 }
 
 fn decode_utf16_bytes(bytes: &[u8], little_endian: bool) -> (String, bool) {
@@ -563,5 +648,126 @@ The quick brown fox jumps over the lazy dog 0123456789.\r\n";
         assert!(doc.damaged);
         assert!(doc.text.contains(char::REPLACEMENT_CHARACTER));
         assert!(doc.text.starts_with('A'));
+    }
+
+    fn decode_text(bytes: &[u8]) -> DecodedDocument {
+        match decode_bytes(bytes) {
+            DecodeOutcome::Text(doc) => doc,
+            DecodeOutcome::Binary => panic!("텍스트가 바이너리로 판정됨: {bytes:02X?}"),
+        }
+    }
+
+    fn utf16_bytes(text: &str, little_endian: bool) -> Vec<u8> {
+        text.encode_utf16()
+            .flat_map(|u| {
+                if little_endian {
+                    u.to_le_bytes()
+                } else {
+                    u.to_be_bytes()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn utf8_truncated_at_end_is_detected_as_damaged_utf8() {
+        // 멀티바이트 문자 중간에서 잘린 로그 파일
+        let mut bytes = "한글 로그 첫 줄\n둘째 줄 끝".as_bytes().to_vec();
+        bytes.pop();
+        let doc = decode_text(&bytes);
+        assert_eq!(doc.encoding, TextEncoding::Utf8);
+        assert!(doc.estimated);
+        assert!(doc.damaged);
+        assert_eq!(doc.fallback_from, None);
+        assert!(doc.text.starts_with("한글 로그 첫 줄\n둘째 줄 "));
+        assert!(doc.text.ends_with(char::REPLACEMENT_CHARACTER));
+    }
+
+    #[test]
+    fn utf8_with_few_invalid_bytes_is_detected_as_damaged_utf8() {
+        let mut bytes = "한글 문서 앞부분입니다. ".as_bytes().to_vec();
+        bytes.push(0xFF);
+        bytes.extend_from_slice("한글 문서 뒷부분입니다.".as_bytes());
+        let doc = decode_text(&bytes);
+        assert_eq!(doc.encoding, TextEncoding::Utf8);
+        assert!(doc.estimated);
+        assert!(doc.damaged);
+        assert_eq!(
+            doc.text,
+            "한글 문서 앞부분입니다. \u{FFFD}한글 문서 뒷부분입니다."
+        );
+    }
+
+    #[test]
+    fn cp949_is_not_mistaken_for_damaged_utf8_or_utf16() {
+        // 짝수 길이의 순수 한글 CP949 (바이트 쌍이 UTF-16 BE 한글 음절 범위와 겹침)
+        let (bytes, _, unmappable) = encoding_rs::EUC_KR.encode("가나다라마바사아자차카타파하");
+        assert!(!unmappable);
+        assert!(bytes.len().is_multiple_of(2));
+        let doc = decode_text(&bytes);
+        assert_eq!(doc.encoding, TextEncoding::EucKr);
+        assert_eq!(doc.fallback_from, None);
+        assert!(!doc.damaged);
+
+        let doc = decode_text(&read_fixture("cp949.txt"));
+        assert_eq!(doc.encoding, TextEncoding::EucKr);
+        assert_eq!(doc.fallback_from, None);
+    }
+
+    #[test]
+    fn hangul_only_utf16_without_bom_is_detected() {
+        // '가'(U+AC00)·'간'(U+AC04)… 아래 바이트가 0x00인 음절이 섞여 0x00이 짝수/홀수 위치에 모두 나타남
+        let texts = [
+            "가나다라마바사아자차카타파하가나다라마바사",
+            "가각간갇갈감갑값갓갔강갖갗같",
+            "가나다 한글 문서\r\n두 번째 줄입니다\r\n",
+        ];
+        for text in texts {
+            for little_endian in [true, false] {
+                let doc = decode_text(&utf16_bytes(text, little_endian));
+                let expected = if little_endian {
+                    TextEncoding::Utf16Le
+                } else {
+                    TextEncoding::Utf16Be
+                };
+                assert_eq!(doc.encoding, expected, "{text:?}");
+                assert!(doc.estimated);
+                assert!(!doc.damaged);
+                assert_eq!(doc.text, text);
+            }
+        }
+    }
+
+    #[test]
+    fn utf16_sample_boundary_inside_surrogate_pair_is_still_utf16() {
+        // 샘플 끝(8192바이트)이 서로게이트 쌍 가운데에 걸리는 경우
+        let mut text = "a".repeat(UTF16_SAMPLE_LEN / 2 - 1);
+        text.push('😀');
+        text.push_str("bcd");
+        let doc = decode_text(&utf16_bytes(&text, true));
+        assert_eq!(doc.encoding, TextEncoding::Utf16Le);
+        assert!(!doc.damaged);
+        assert_eq!(doc.text, text);
+    }
+
+    #[test]
+    fn unsupported_legacy_guess_falls_back_to_euc_kr_with_source_name() {
+        // Windows-1252(라틴) 문서: 지원 목록 밖 → EUC-KR (CP949)로 대체하고 원래 추정 결과를 남김
+        let bytes = b"Caf\xE9 cr\xE8me br\xFBl\xE9e, na\xEFve r\xE9sum\xE9 \xE0 la fran\xE7aise.";
+        let doc = decode_text(bytes);
+        assert_eq!(doc.encoding, TextEncoding::EucKr);
+        assert!(doc.estimated);
+        let source = doc
+            .fallback_from
+            .expect("대체 전 추정 인코딩이 기록되어야 함");
+        assert_ne!(source, encoding_rs::EUC_KR.name());
+    }
+
+    #[test]
+    fn binary_with_nul_is_still_binary() {
+        assert_eq!(detect_encoding(b"hello\0world"), DetectionOutcome::Binary);
+        let mut bytes = vec![0u8; 64];
+        bytes.extend((0..=255u8).cycle().take(512));
+        assert_eq!(detect_encoding(&bytes), DetectionOutcome::Binary);
     }
 }
