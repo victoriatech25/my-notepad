@@ -5,22 +5,32 @@
 //! - 각 탭은 독립된 [`Document`] 인스턴스를 소유하며, 커서 위치·스크롤 오프셋·Undo/Redo 이력을 탭별로 유지한다.
 //! - 문서 내용이 변경될 때마다 단조 증가하는 `revision`(수정 카운터)을 갱신하여,
 //!   하이라이트·검색·Markdown 파싱 캐시가 매 프레임 재계산 없이 변경 여부를 즉시 판별하게 한다 (PLAN.md §4.1).
+//! - Undo/Redo 이력은 문서 전체가 아니라 **바뀐 구간(지운 문자열·넣은 문자열)만** 기록하고,
+//!   단계 수와 바이트 합계 상한을 함께 둔다 (5MB 편집 문서에서도 이력 메모리가 문서 크기에 비례해 늘지 않게).
+//! - 줄바꿈 없는 연속 입력·삭제·IME 조합은 하나의 Undo 단계로 묶는다. 공백으로 시작하는 입력, 줄바꿈,
+//!   [`Document::break_undo_group`], 저장·인코딩/줄바꿈 변경·Undo/Redo에서 묶음이 끊긴다.
 //! - `apply_batch_replacements` 등 원자적 편집 메서드는 전체 변경을 단일 Undo 항목으로 기록하여
 //!   향후 `Replace All`(전체 바꾸기)을 한 번의 `Undo`로 되돌릴 수 있게 한다 (PLAN.md §3.2).
 
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::core::buffer::{LineIndex, StringBuffer, TextBuffer};
+use crate::core::buffer::{LineIndex, StringBuffer, TextBuffer, byte_to_char_offset};
 use crate::core::encoding::{
     DecodeOutcome, DecodedDocument, TextEncoding, UnmappableChar, UnmappableError,
     decode_bytes_with_default, encode_text_lossy_with_bom, encode_text_with_bom,
 };
-use crate::core::line_ending::{LineEnding, analyze_and_normalize_with_default, apply_line_ending};
+use crate::core::line_ending::{
+    LineEnding, analyze_and_normalize_with_default, apply_line_ending, normalize_to_lf,
+};
 
 /// 탭별 Undo/Redo 스택의 기본 최대 보관 단계 수.
 pub const DEFAULT_MAX_UNDO_HISTORY: usize = 200;
+
+/// 탭별 Undo 스택이 보관하는 변경 구간 문자열의 기본 최대 바이트 합계 (16 MiB).
+pub const DEFAULT_MAX_UNDO_BYTES: usize = 16 * 1024 * 1024;
 
 /// 외부 변경 감지를 위해 파일 열기·저장 시점에 기록해 두는 디스크 메타데이터 (PLAN.md §3.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,11 +54,63 @@ impl DiskMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BinaryDocumentError;
 
-/// Undo/Redo 스택에 저장되는 단일 스냅샷.
+/// Undo/Redo 스택에 저장되는 단일 변경 구간.
+///
+/// 편집 후 텍스트의 `start..start + inserted.len()` 구간이 편집 전에는 `removed`였다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HistoryEntry {
-    text: String,
-    cursor_char_range: Range<usize>,
+    /// 변경 구간의 시작 바이트 오프셋.
+    start: usize,
+    /// 편집 전 구간 문자열 (Undo 시 복원).
+    removed: String,
+    /// 편집 후 구간 문자열 (Redo 시 복원).
+    inserted: String,
+    /// 편집 전 커서/선택 범위.
+    cursor_before: Range<usize>,
+    /// 편집 후 커서/선택 범위.
+    cursor_after: Range<usize>,
+}
+
+impl HistoryEntry {
+    fn bytes(&self) -> usize {
+        self.removed.len() + self.inserted.len()
+    }
+
+    /// 연속 입력 묶음 대상인지 여부 (줄바꿈이 없는 입력·삭제·치환).
+    fn is_typing(&self) -> bool {
+        !self.removed.contains('\n') && !self.inserted.contains('\n')
+    }
+
+    /// 바로 이어지는 입력 `next`를 이 항목에 합친다. 합칠 수 없으면 `false`.
+    fn merge_typing(&mut self, next: &Self) -> bool {
+        // 글자 뒤에 공백으로 시작하는 입력이 오면 단어 경계로 보고 새 단계를 시작한다.
+        if next.removed.is_empty()
+            && next.inserted.starts_with(char::is_whitespace)
+            && self.inserted.ends_with(|c: char| !c.is_whitespace())
+        {
+            return false;
+        }
+
+        let end = self.start + self.inserted.len();
+        if next.start + next.removed.len() == end && next.start >= self.start {
+            // 이어서 입력하거나, 방금 넣은 끝부분을 고침 (IME 조합 갱신, Backspace)
+            self.inserted.truncate(next.start - self.start);
+            self.inserted.push_str(&next.inserted);
+        } else if next.start + next.removed.len() == end {
+            // Backspace가 묶음 시작보다 앞까지 지움: next.removed = (앞부분) + self.inserted
+            let before = &next.removed[..self.start - next.start];
+            self.removed.insert_str(0, before);
+            self.start = next.start;
+            self.inserted.clone_from(&next.inserted);
+        } else if next.inserted.is_empty() && self.inserted.is_empty() && next.start == self.start {
+            // Delete 키 연속 삭제
+            self.removed.push_str(&next.removed);
+        } else {
+            return false;
+        }
+        self.cursor_after.clone_from(&next.cursor_after);
+        true
+    }
 }
 
 /// 마지막 저장 시점(또는 최초 로드 시점)의 문서 기준 상태.
@@ -60,7 +122,8 @@ struct SavedBaseline {
     encoding: TextEncoding,
     has_bom: bool,
     line_ending: LineEnding,
-    had_mixed_line_endings: bool,
+    /// 기준 시점에 저장하면 줄바꿈 바이트가 바뀌는 상태였는지 (`Mixed` 또는 단독 `CR`).
+    line_ending_converts_on_save: bool,
 }
 
 /// 단일 탭에 대응하는 문서 상태 모델.
@@ -86,8 +149,10 @@ pub struct Document {
     line_ending: LineEnding,
     /// 파일 로드 시 줄바꿈 방식이 둘 이상 섞여 있었는지 여부 (`Mixed`).
     mixed_line_endings: bool,
-    /// `Mixed` 줄바꿈 통일 안내를 첫 저장 때 이미 표시했는지 여부.
-    mixed_line_ending_notified: bool,
+    /// 파일 로드 시 단독 `CR`(구형 Mac)이 있었는지 여부 (저장 시 `line_ending`으로 변환됨).
+    legacy_cr_line_endings: bool,
+    /// 줄바꿈 통일 안내(`Mixed`·단독 `CR`)를 첫 저장 때 이미 표시했는지 여부.
+    line_ending_conversion_notified: bool,
     /// 읽기 전용 여부 (파일 권한 또는 대용량/바이너리 읽기 전용 열람).
     readonly: bool,
     /// 마지막 저장(또는 최초 생성/로드) 이후 수정되었는지 여부 (`●` 마커).
@@ -102,12 +167,18 @@ pub struct Document {
     disk_metadata: Option<DiskMetadata>,
     /// 마지막 저장(또는 로드/생성) 기준 상태.
     saved_baseline: Option<SavedBaseline>,
-    /// 탭별 독립 Undo 스택.
-    undo_stack: Vec<HistoryEntry>,
+    /// 탭별 독립 Undo 스택 (앞쪽이 오래된 단계).
+    undo_stack: VecDeque<HistoryEntry>,
+    /// Undo 스택 항목들의 바이트 합계.
+    undo_bytes: usize,
     /// 탭별 독립 Redo 스택.
     redo_stack: Vec<HistoryEntry>,
     /// Undo 스택 최대 깊이.
     max_undo_history: usize,
+    /// Undo 스택 최대 바이트 합계.
+    max_undo_bytes: usize,
+    /// 마지막 Undo 단계에 다음 연속 입력을 합칠 수 있는지 여부.
+    typing_group_open: bool,
 }
 
 impl Document {
@@ -132,7 +203,7 @@ impl Document {
             encoding: default_encoding,
             has_bom,
             line_ending: default_line_ending,
-            had_mixed_line_endings: false,
+            line_ending_converts_on_save: false,
         };
 
         Self {
@@ -146,7 +217,8 @@ impl Document {
             damaged: false,
             line_ending: default_line_ending,
             mixed_line_endings: false,
-            mixed_line_ending_notified: false,
+            legacy_cr_line_endings: false,
+            line_ending_conversion_notified: false,
             readonly: false,
             modified: false,
             revision: 0,
@@ -154,9 +226,12 @@ impl Document {
             scroll_offset_y: 0.0,
             disk_metadata: None,
             saved_baseline: Some(baseline),
-            undo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
+            undo_bytes: 0,
             redo_stack: Vec::new(),
             max_undo_history: DEFAULT_MAX_UNDO_HISTORY,
+            max_undo_bytes: DEFAULT_MAX_UNDO_BYTES,
+            typing_group_open: false,
         }
     }
 
@@ -174,7 +249,7 @@ impl Document {
             encoding: decoded.encoding,
             has_bom: decoded.has_bom,
             line_ending: norm.detection.line_ending,
-            had_mixed_line_endings: norm.detection.mixed,
+            line_ending_converts_on_save: norm.detection.converts_on_save(),
         };
 
         Self {
@@ -188,7 +263,8 @@ impl Document {
             damaged: decoded.damaged,
             line_ending: norm.detection.line_ending,
             mixed_line_endings: norm.detection.mixed,
-            mixed_line_ending_notified: false,
+            legacy_cr_line_endings: norm.detection.has_legacy_cr,
+            line_ending_conversion_notified: false,
             readonly,
             modified: false,
             revision: 0,
@@ -196,9 +272,12 @@ impl Document {
             scroll_offset_y: 0.0,
             disk_metadata,
             saved_baseline: Some(baseline),
-            undo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
+            undo_bytes: 0,
             redo_stack: Vec::new(),
             max_undo_history: DEFAULT_MAX_UNDO_HISTORY,
+            max_undo_bytes: DEFAULT_MAX_UNDO_BYTES,
+            typing_group_open: false,
         }
     }
 
@@ -314,19 +393,29 @@ impl Document {
         self.mixed_line_endings
     }
 
+    /// 단독 `CR`(구형 Mac) 줄바꿈이 남아 있는지 여부.
+    pub fn has_legacy_cr_line_endings(&self) -> bool {
+        self.legacy_cr_line_endings
+    }
+
+    /// 지금 저장하면 원본 줄바꿈 바이트가 바뀌는지 여부 (`Mixed` 또는 단독 `CR`, PLAN.md §3.4).
+    pub fn line_ending_converts_on_save(&self) -> bool {
+        self.mixed_line_endings || self.legacy_cr_line_endings
+    }
+
     /// 상태 표시줄에 표시할 줄바꿈 라벨 (`"CRLF"`, `"LF"`, `"Mixed (CRLF)"`, `"Mixed (LF)"`).
     pub fn line_ending_status_label(&self) -> &'static str {
         self.line_ending.status_label(self.mixed_line_endings)
     }
 
-    /// 첫 저장 시 `Mixed` 줄바꿈 통일 안내가 필요한지 여부.
-    pub fn needs_mixed_line_ending_notice(&self) -> bool {
-        self.mixed_line_endings && !self.mixed_line_ending_notified
+    /// 첫 저장 시 줄바꿈 통일 안내(`Mixed` 또는 단독 `CR` 변환)가 필요한지 여부.
+    pub fn needs_line_ending_conversion_notice(&self) -> bool {
+        self.line_ending_converts_on_save() && !self.line_ending_conversion_notified
     }
 
-    /// `Mixed` 줄바꿈 통일 안내를 표시 완료로 기록한다.
-    pub fn mark_mixed_line_ending_notified(&mut self) {
-        self.mixed_line_ending_notified = true;
+    /// 줄바꿈 통일 안내를 표시 완료로 기록한다.
+    pub fn mark_line_ending_conversion_notified(&mut self) {
+        self.line_ending_conversion_notified = true;
     }
 
     /// 읽기 전용 여부.
@@ -407,6 +496,27 @@ impl Document {
         self.redo_stack.len()
     }
 
+    /// Undo 스택이 보관 중인 변경 구간 문자열의 바이트 합계.
+    pub fn undo_bytes(&self) -> usize {
+        self.undo_bytes
+    }
+
+    /// Undo 스택의 최대 단계 수와 최대 바이트 합계를 바꾸고, 넘치는 오래된 단계는 즉시 버린다.
+    ///
+    /// 바이트 상한을 넘더라도 가장 최근 1단계는 남긴다 (큰 일괄 편집도 한 번은 되돌릴 수 있게).
+    pub fn set_undo_limits(&mut self, max_steps: usize, max_bytes: usize) {
+        self.max_undo_history = max_steps;
+        self.max_undo_bytes = max_bytes;
+        self.enforce_undo_limits();
+    }
+
+    /// 연속 입력 묶음을 끊어 다음 입력이 새 Undo 단계가 되게 한다.
+    ///
+    /// 커서 이동·포커스 이탈·입력 공백 시간 등 UI가 판단하는 경계에서 호출한다.
+    pub fn break_undo_group(&mut self) {
+        self.typing_group_open = false;
+    }
+
     /// 전체 텍스트를 새 문자열로 교체하고(내부 `LF` 정규화 적용), 변경이 있으면 Undo 이력·수정 플래그·수정 카운터를 갱신한다.
     ///
     /// 읽기 전용(`readonly == true`)이거나 정규화 후 텍스트가 기존과 동일하면 아무것도 하지 않고 `false`를 반환한다.
@@ -415,7 +525,10 @@ impl Document {
         self.apply_edit_with_cursor(new_text, cursor)
     }
 
-    /// 편집 후 커서 위치까지 함께 지정하여 텍스트를 변경한다.
+    /// 편집 후 커서 위치까지 함께 지정하여 텍스트를 변경한다 (에디터 위젯의 입력 경로).
+    ///
+    /// 이전 텍스트와 비교해 바뀐 구간만 Undo 이력에 기록하고, 줄바꿈 없는 연속 입력·삭제·IME 조합은
+    /// 하나의 Undo 단계로 묶는다.
     pub fn apply_edit_with_cursor(
         &mut self,
         new_text: impl Into<String>,
@@ -427,48 +540,44 @@ impl Document {
 
         let raw: String = new_text.into();
         let normalized = if raw.as_bytes().contains(&b'\r') {
-            crate::core::line_ending::normalize_to_lf(&raw)
+            normalize_to_lf(&raw)
         } else {
             raw
         };
 
-        if normalized == self.buffer.as_str() {
+        let Some((start, old_end, new_end)) = diff_range(self.buffer.as_str(), &normalized) else {
             self.cursor_char_range = cursor_after;
             return false;
-        }
+        };
 
-        self.push_undo_snapshot();
-        self.redo_stack.clear();
-        self.buffer.set_text(normalized);
-        self.cursor_char_range = cursor_after;
-        self.bump_revision_and_sync_modified();
+        let inserted = &normalized[start..new_end];
+        self.commit_edit(start..old_end, inserted, cursor_after, true);
         true
     }
 
     /// 지정한 바이트 범위를 `replacement`로 치환한다 (단일 Undo 단계로 기록).
+    ///
+    /// 범위가 텍스트 길이를 넘거나 문자 경계가 아니면 아무것도 하지 않고 `false`를 반환한다.
     pub fn replace_range(&mut self, byte_range: Range<usize>, replacement: &str) -> bool {
-        if self.readonly {
+        if self.readonly || !is_valid_byte_range(self.buffer.as_str(), &byte_range) {
             return false;
         }
-        let norm_rep = crate::core::line_ending::normalize_to_lf(replacement);
-        if self.buffer.as_str().get(byte_range.clone()) == Some(norm_rep.as_str()) {
+        let norm_rep = normalize_to_lf(replacement);
+        if self.buffer.as_str()[byte_range.clone()] == *norm_rep {
             return false;
         }
 
-        self.push_undo_snapshot();
-        self.redo_stack.clear();
-        self.buffer.replace_range(byte_range.clone(), &norm_rep);
-        let new_cursor_byte = byte_range.start + norm_rep.len();
-        let new_cursor_char =
-            crate::core::buffer::byte_to_char_offset(self.buffer.as_str(), new_cursor_byte);
-        self.cursor_char_range = new_cursor_char..new_cursor_char;
-        self.bump_revision_and_sync_modified();
+        // 치환 후 커서는 넣은 문자열 끝. 문자 인덱스 = 범위 앞 문자 수 + 넣은 문자 수.
+        let cursor_char =
+            byte_to_char_offset(self.buffer.as_str(), byte_range.start) + norm_rep.chars().count();
+        self.commit_edit(byte_range, &norm_rep, cursor_char..cursor_char, false);
         true
     }
 
     /// 여러 바이트 구간 치환(예: `Replace All` 전체 바꾸기)을 **단 한 번의 Undo 단계**로 일괄 적용한다 (PLAN.md §3.2).
     ///
-    /// `replacements`는 오름차순·비중첩 바이트 범위 목록이어야 하며, 실제 치환된 개수를 반환한다.
+    /// `replacements`는 오름차순·비중첩 바이트 범위 목록이어야 한다. 이전 범위와 겹치거나 텍스트 길이를 넘거나
+    /// 문자 경계가 아닌 범위는 건너뛰며, 실제 치환된 개수를 반환한다.
     pub fn apply_batch_replacements(
         &mut self,
         replacements: &[(Range<usize>, &str)],
@@ -482,37 +591,35 @@ impl Document {
         let mut out = String::with_capacity(src.len());
         let mut last_end = 0usize;
         let mut applied = 0usize;
+        // 바뀐 전체 구간 (첫 치환 시작 ~ 마지막 치환 끝)
+        let mut span: Option<Range<usize>> = None;
 
         for (range, rep) in replacements {
-            if range.start < last_end || range.end > src.len() || range.start > range.end {
+            if range.start < last_end || !is_valid_byte_range(src, range) {
                 continue;
             }
             out.push_str(&src[last_end..range.start]);
             if rep.as_bytes().contains(&b'\r') {
-                out.push_str(&crate::core::line_ending::normalize_to_lf(rep));
+                out.push_str(&normalize_to_lf(rep));
             } else {
                 out.push_str(rep);
             }
             last_end = range.end;
             applied += 1;
+            span = Some(span.map_or(range.start, |s| s.start)..range.end);
         }
 
-        if applied == 0 {
+        let Some(span) = span else {
+            return 0;
+        };
+        // out = src[..span.start] + (치환된 구간) — 이 시점에 out 끝은 src[span.end]에 대응한다.
+        let inserted = out[span.start..].to_owned();
+        if src[span.clone()] == *inserted {
             return 0;
         }
-        out.push_str(&src[last_end..]);
 
-        if out == src {
-            return 0;
-        }
-
-        self.push_undo_snapshot();
-        self.redo_stack.clear();
-        self.buffer.set_text(out);
-        if let Some(cursor) = cursor_after {
-            self.cursor_char_range = cursor;
-        }
-        self.bump_revision_and_sync_modified();
+        let cursor = cursor_after.unwrap_or_else(|| self.cursor_char_range.clone());
+        self.commit_edit(span, &inserted, cursor, false);
         applied
     }
 
@@ -521,16 +628,16 @@ impl Document {
         if self.readonly {
             return false;
         }
-        let Some(prev) = self.undo_stack.pop() else {
+        let Some(entry) = self.undo_stack.pop_back() else {
             return false;
         };
+        self.undo_bytes -= entry.bytes();
+        self.typing_group_open = false;
 
-        self.redo_stack.push(HistoryEntry {
-            text: self.buffer.as_string().clone(),
-            cursor_char_range: self.cursor_char_range.clone(),
-        });
-        self.buffer.set_text(prev.text);
-        self.cursor_char_range = prev.cursor_char_range;
+        let end = entry.start + entry.inserted.len();
+        self.buffer.replace_range(entry.start..end, &entry.removed);
+        self.cursor_char_range = entry.cursor_before.clone();
+        self.redo_stack.push(entry);
         self.bump_revision_and_sync_modified();
         true
     }
@@ -540,16 +647,15 @@ impl Document {
         if self.readonly {
             return false;
         }
-        let Some(next) = self.redo_stack.pop() else {
+        let Some(entry) = self.redo_stack.pop() else {
             return false;
         };
+        self.typing_group_open = false;
 
-        self.undo_stack.push(HistoryEntry {
-            text: self.buffer.as_string().clone(),
-            cursor_char_range: self.cursor_char_range.clone(),
-        });
-        self.buffer.set_text(next.text);
-        self.cursor_char_range = next.cursor_char_range;
+        let end = entry.start + entry.removed.len();
+        self.buffer.replace_range(entry.start..end, &entry.inserted);
+        self.cursor_char_range = entry.cursor_after.clone();
+        self.push_undo_entry(entry);
         self.bump_revision_and_sync_modified();
         true
     }
@@ -557,7 +663,9 @@ impl Document {
     /// Undo/Redo 이력을 모두 비운다.
     pub fn clear_history(&mut self) {
         self.undo_stack.clear();
+        self.undo_bytes = 0;
         self.redo_stack.clear();
+        self.typing_group_open = false;
     }
 
     // ── 인코딩 및 줄바꿈 전환 ──
@@ -579,23 +687,27 @@ impl Document {
         self.has_bom = target_bom;
         self.encoding_estimated = false;
         self.encoding_fallback_from = None;
+        self.typing_group_open = false;
         self.bump_revision_and_sync_modified();
         true
     }
 
     /// 저장할 줄바꿈 방식을 변경한다 (`Command::SetLineEnding`, PLAN.md §3.4).
     ///
-    /// 줄바꿈이 바뀌거나 기존에 `Mixed` 상태였으면 `mixed_line_endings`를 해제하고 수정됨 상태로 전환한다.
+    /// 줄바꿈이 바뀌거나, 같은 방식이라도 저장 시 변환이 남아 있으면(`Mixed`·단독 `CR`) 사용자가 통일을 고른 것으로 보고
+    /// 두 플래그를 해제한 뒤 수정됨 상태로 전환한다.
     pub fn set_line_ending(&mut self, target_line_ending: LineEnding) -> bool {
         if self.readonly {
             return false;
         }
-        if self.line_ending == target_line_ending && !self.mixed_line_endings {
+        if self.line_ending == target_line_ending && !self.line_ending_converts_on_save() {
             return false;
         }
 
         self.line_ending = target_line_ending;
         self.mixed_line_endings = false;
+        self.legacy_cr_line_endings = false;
+        self.typing_group_open = false;
         self.bump_revision_and_sync_modified();
         true
     }
@@ -617,8 +729,10 @@ impl Document {
         encode_text_lossy_with_bom(&with_eol, self.encoding, self.has_bom)
     }
 
-    /// 디스크 저장 성공 후 호출하여 수정 플래그(`modified`), `Mixed` 플래그, 손상 플래그를 초기화하고
+    /// 디스크 저장 성공 후 호출하여 수정 플래그(`modified`), 줄바꿈 변환 플래그, 손상 플래그를 초기화하고
     /// 경로·메타데이터 및 저장 기준점(`saved_baseline`)을 갱신한다.
+    ///
+    /// 연속 입력 묶음도 끊어서, Undo가 저장 시점을 건너뛰지 않게 한다.
     pub fn mark_saved(&mut self, new_path: Option<PathBuf>, disk_metadata: Option<DiskMetadata>) {
         if let Some(p) = new_path {
             self.path = Some(p);
@@ -628,29 +742,77 @@ impl Document {
             self.disk_metadata = disk_metadata;
         }
         self.mixed_line_endings = false;
+        self.legacy_cr_line_endings = false;
         self.damaged = false;
         self.encoding_estimated = false;
         self.encoding_fallback_from = None;
+        self.typing_group_open = false;
         self.saved_baseline = Some(SavedBaseline {
             text: self.buffer.as_string().clone(),
             encoding: self.encoding,
             has_bom: self.has_bom,
             line_ending: self.line_ending,
-            had_mixed_line_endings: false,
+            line_ending_converts_on_save: false,
         });
         self.modified = false;
     }
 
     // ── 내부 도우미 ──
 
-    fn push_undo_snapshot(&mut self) {
-        if self.undo_stack.len() >= self.max_undo_history {
-            self.undo_stack.remove(0);
+    /// 버퍼의 `range`를 `inserted`로 바꾸고 Undo 이력·수정 카운터를 갱신한다.
+    fn commit_edit(
+        &mut self,
+        range: Range<usize>,
+        inserted: &str,
+        cursor_after: Range<usize>,
+        typing: bool,
+    ) {
+        let entry = HistoryEntry {
+            start: range.start,
+            removed: self.buffer.as_str()[range.clone()].to_owned(),
+            inserted: inserted.to_owned(),
+            cursor_before: self.cursor_char_range.clone(),
+            cursor_after: cursor_after.clone(),
+        };
+        self.buffer.replace_range(range, inserted);
+        self.cursor_char_range = cursor_after;
+        self.redo_stack.clear();
+
+        let typing = typing && entry.is_typing();
+        let merged = typing
+            && self.typing_group_open
+            && self.undo_stack.back_mut().is_some_and(|last| {
+                let before = last.bytes();
+                let merged = last.merge_typing(&entry);
+                if merged {
+                    self.undo_bytes = self.undo_bytes - before + last.bytes();
+                }
+                merged
+            });
+        if merged {
+            self.enforce_undo_limits();
+        } else {
+            self.push_undo_entry(entry);
         }
-        self.undo_stack.push(HistoryEntry {
-            text: self.buffer.as_string().clone(),
-            cursor_char_range: self.cursor_char_range.clone(),
-        });
+        self.typing_group_open = typing;
+        self.bump_revision_and_sync_modified();
+    }
+
+    fn push_undo_entry(&mut self, entry: HistoryEntry) {
+        self.undo_bytes += entry.bytes();
+        self.undo_stack.push_back(entry);
+        self.enforce_undo_limits();
+    }
+
+    fn enforce_undo_limits(&mut self) {
+        while self.undo_stack.len() > self.max_undo_history
+            || (self.undo_bytes > self.max_undo_bytes && self.undo_stack.len() > 1)
+        {
+            let Some(oldest) = self.undo_stack.pop_front() else {
+                break;
+            };
+            self.undo_bytes -= oldest.bytes();
+        }
     }
 
     fn bump_revision_and_sync_modified(&mut self) {
@@ -661,11 +823,48 @@ impl Document {
                     || self.encoding != base.encoding
                     || self.has_bom != base.has_bom
                     || self.line_ending != base.line_ending
-                    || self.mixed_line_endings != base.had_mixed_line_endings
+                    || self.line_ending_converts_on_save() != base.line_ending_converts_on_save
             }
             None => true,
         };
     }
+}
+
+/// `range`가 `text` 안에 있고 양 끝이 문자 경계인지 여부.
+fn is_valid_byte_range(text: &str, range: &Range<usize>) -> bool {
+    range.start <= range.end
+        && range.end <= text.len()
+        && text.is_char_boundary(range.start)
+        && text.is_char_boundary(range.end)
+}
+
+/// 두 문자열의 공통 앞부분·뒷부분을 제외한 바뀐 구간 `(start, old_end, new_end)`를 구한다 (같으면 `None`).
+///
+/// 경계는 문자 경계로 맞춘다. 같은 바이트가 이어지므로 `old`에서 문자 경계인 위치는 `new`에서도 문자 경계다.
+fn diff_range(old: &str, new: &str) -> Option<(usize, usize, usize)> {
+    if old == new {
+        return None;
+    }
+    let (ob, nb) = (old.as_bytes(), new.as_bytes());
+
+    let mut prefix = ob.iter().zip(nb).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(prefix) {
+        prefix -= 1;
+    }
+
+    let max_suffix = ob.len().min(nb.len()) - prefix;
+    let mut suffix = ob
+        .iter()
+        .rev()
+        .zip(nb.iter().rev())
+        .take(max_suffix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !old.is_char_boundary(ob.len() - suffix) {
+        suffix -= 1;
+    }
+
+    Some((prefix, ob.len() - suffix, nb.len() - suffix))
 }
 
 #[cfg(test)]
@@ -819,5 +1018,201 @@ mod tests {
         assert_eq!(doc.encoding(), TextEncoding::EucKr);
         assert!(!doc.has_bom());
         assert!(doc.is_modified());
+    }
+
+    /// egui 입력창처럼 한 글자씩 전체 텍스트를 넘겨 입력한다.
+    fn type_chars(doc: &mut Document, s: &str) {
+        for ch in s.chars() {
+            let mut text = doc.text().to_owned();
+            let cursor = doc.cursor_char_range().end;
+            let byte = crate::core::buffer::char_to_byte_offset(&text, cursor);
+            text.insert(byte, ch);
+            assert!(doc.apply_edit_with_cursor(text, cursor + 1..cursor + 1));
+        }
+    }
+
+    #[test]
+    fn undo_history_records_changed_span_not_whole_text() {
+        let base = "한글 줄 abc\n".repeat(20_000); // 약 300KB (디버그 빌드 테스트 시간 고려)
+        let mut doc = Document::from_bytes(None, base.as_bytes(), false, None).unwrap();
+        let end = doc.text().chars().count();
+        doc.set_cursor_char_range(end..end);
+
+        type_chars(&mut doc, &"가".repeat(200));
+        // 200자 연속 입력은 한 단계로 묶이고, 이력은 넣은 글자 바이트만 보관한다.
+        assert_eq!(doc.undo_len(), 1);
+        assert_eq!(doc.undo_bytes(), 200 * '가'.len_utf8());
+
+        assert!(doc.undo());
+        assert_eq!(doc.text(), base);
+        assert!(!doc.is_modified());
+        assert_eq!(doc.cursor_char_range(), end..end);
+        assert!(doc.redo());
+        assert!(doc.text().ends_with(&"가".repeat(200)));
+    }
+
+    #[test]
+    fn undo_history_respects_step_and_byte_limits() {
+        let mut doc = Document::new_untitled_with_defaults(1, TextEncoding::Utf8, LineEnding::Lf);
+        doc.set_undo_limits(3, 1000);
+
+        // 범위 치환은 묶지 않으므로 매번 새 단계
+        for i in 0..5 {
+            let len = doc.text().len();
+            assert!(doc.replace_range(len..len, &format!("{i}")));
+        }
+        assert_eq!(doc.undo_len(), 3);
+
+        // 600바이트 치환 2번 → 바이트 상한(1000) 때문에 최근 1단계만 남음
+        for _ in 0..2 {
+            let len = doc.text().len();
+            assert!(doc.replace_range(len..len, &"x".repeat(600)));
+        }
+        assert_eq!(doc.undo_len(), 1);
+        assert!(doc.undo_bytes() <= 1000);
+
+        // 상한보다 큰 단일 편집도 최근 1단계는 남겨 되돌릴 수 있다.
+        let len = doc.text().len();
+        assert!(doc.replace_range(len..len, &"y".repeat(5000)));
+        assert_eq!(doc.undo_len(), 1);
+        let before = doc.text().len();
+        assert!(doc.undo());
+        assert_eq!(doc.text().len(), before - 5000);
+    }
+
+    #[test]
+    fn typing_is_grouped_until_whitespace_newline_or_break() {
+        let mut doc = Document::new_untitled_with_defaults(1, TextEncoding::Utf8, LineEnding::Lf);
+
+        type_chars(&mut doc, "안녕 하세요");
+        assert_eq!(doc.undo_len(), 2); // "안녕" | " 하세요"
+        type_chars(&mut doc, "\n");
+        type_chars(&mut doc, "둘째");
+        assert_eq!(doc.undo_len(), 4); // 줄바꿈은 단독 단계, 이후 새 묶음
+
+        doc.break_undo_group();
+        type_chars(&mut doc, "줄");
+        assert_eq!(doc.undo_len(), 5);
+
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "안녕 하세요\n둘째");
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "안녕 하세요\n");
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "안녕 하세요");
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "안녕");
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "");
+        assert!(!doc.is_modified());
+    }
+
+    #[test]
+    fn ime_composition_and_backspace_merge_into_one_step() {
+        let mut doc = Document::new_untitled_with_defaults(1, TextEncoding::Utf8, LineEnding::Lf);
+
+        // 한글 IME 조합: 조합 중 글자가 계속 바뀌어도 한 단계
+        for (text, cursor) in [
+            ("ㅎ", 1),
+            ("하", 1),
+            ("한", 1),
+            ("한ㄱ", 2),
+            ("한그", 2),
+            ("한글", 2),
+        ] {
+            assert!(doc.apply_edit_with_cursor(text, cursor..cursor));
+        }
+        assert_eq!(doc.undo_len(), 1);
+        assert_eq!(doc.undo_bytes(), "한글".len());
+
+        // 커서 이동 후 Backspace 연속 → 한 단계
+        doc.mark_saved(Some(PathBuf::from("a.txt")), None);
+        type_chars(&mut doc, "입력");
+        doc.break_undo_group();
+        for (text, cursor) in [("한글입", 3), ("한글", 2), ("한", 1)] {
+            assert!(doc.apply_edit_with_cursor(text, cursor..cursor));
+        }
+        assert_eq!(doc.undo_len(), 3);
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "한글입력");
+        assert_eq!(doc.cursor_char_range(), 4..4);
+
+        // Delete 키 연속 → 한 단계
+        doc.set_cursor_char_range(0..0);
+        doc.break_undo_group();
+        for text in ["글입력", "입력", "력"] {
+            assert!(doc.apply_edit_with_cursor(text, 0..0));
+        }
+        assert_eq!(doc.text(), "력");
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "한글입력");
+
+        // 저장 시점에서 묶음이 끊기므로 Undo가 저장 시점("한글")에 멈춘다.
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "한글");
+        assert!(!doc.is_modified());
+    }
+
+    #[test]
+    fn invalid_ranges_are_rejected_without_panic() {
+        let mut doc = Document::from_bytes(None, "가나다".as_bytes(), false, None).unwrap();
+
+        assert!(!doc.replace_range(1..2, "x")); // 문자 경계 아님
+        assert!(!doc.replace_range(0..100, "x")); // 길이 초과
+        #[allow(clippy::reversed_empty_ranges)]
+        let reversed = 6..3;
+        assert!(!doc.replace_range(reversed, "x")); // 시작 > 끝
+        assert_eq!(doc.text(), "가나다");
+        assert_eq!(doc.undo_len(), 0);
+        assert_eq!(doc.revision(), 0);
+
+        // 일괄 치환: 잘못된 범위만 건너뛰고 나머지는 적용
+        let applied =
+            doc.apply_batch_replacements(&[(1..3, "x"), (3..6, "N"), (7..100, "y")], None);
+        assert_eq!(applied, 1);
+        assert_eq!(doc.text(), "가N다");
+        assert_eq!(doc.apply_batch_replacements(&[(1..2, "x")], None), 0);
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "가나다");
+    }
+
+    #[test]
+    fn legacy_cr_only_file_needs_conversion_notice() {
+        let mut doc = Document::from_bytes(None, b"a\rb\rc\r", false, None).unwrap();
+        assert!(!doc.has_mixed_line_endings());
+        assert!(doc.has_legacy_cr_line_endings());
+        assert!(doc.line_ending_converts_on_save());
+        assert!(doc.needs_line_ending_conversion_notice());
+        assert!(!doc.is_modified());
+
+        doc.mark_line_ending_conversion_notified();
+        assert!(!doc.needs_line_ending_conversion_notice());
+
+        // 같은 방식을 다시 골라도 단독 CR 통일을 선택한 것이므로 수정됨
+        let current = doc.line_ending();
+        assert!(doc.set_line_ending(current));
+        assert!(!doc.has_legacy_cr_line_endings());
+        assert!(doc.is_modified());
+
+        // 저장 후에는 변환 대상이 아님
+        let mut doc = Document::from_bytes(None, b"a\rb\r", false, None).unwrap();
+        doc.mark_saved(None, None);
+        assert!(!doc.line_ending_converts_on_save());
+        assert!(!doc.needs_line_ending_conversion_notice());
+
+        // 순수 CRLF 파일은 안내 대상이 아님
+        let doc = Document::from_bytes(None, b"a\r\nb\r\n", false, None).unwrap();
+        assert!(!doc.needs_line_ending_conversion_notice());
+    }
+
+    #[test]
+    fn diff_range_aligns_to_char_boundaries() {
+        // '가'(EA B0 80)와 '각'(EA B0 81)은 앞 2바이트가 같다.
+        assert_eq!(diff_range("가", "각"), Some((0, 3, 3)));
+        // '나'(EB 82 98) → '냐'(EB 83 90): 첫 바이트만 같음
+        assert_eq!(diff_range("가나다", "가냐다"), Some((3, 6, 6)));
+        assert_eq!(diff_range("abc", "abc"), None);
+        assert_eq!(diff_range("aa", "aaa"), Some((2, 2, 3)));
+        assert_eq!(diff_range("한글", ""), Some((0, 6, 0)));
     }
 }
