@@ -3,9 +3,10 @@
 //! 설계 원칙 (PLAN.md §3.4):
 //! - **내부 표현은 `LF`(`\n`)로 정규화**하고, 문서별로 저장 시 사용할 줄바꿈 방식([`LineEnding`])을 별도 보관한다.
 //! - **감지**: 파일 로드 시 `CRLF`(`\r\n`) / 단독 `LF`(`\n`) / 단독 `CR`(`\r`, 구형 Mac) 개수를 세어
-//!   가장 많은 방식을 채택한다. 둘 이상의 줄바꿈 방식이 섞여 있으면 `mixed = true`로 표시하고
-//!   상태 표시줄에는 `Mixed (CRLF)` 또는 `Mixed (LF)` 형태로 표기한다.
-//! - **새 문서 및 개행 없는 문서 기본값**: Windows는 `CRLF`, macOS/Linux는 `LF`.
+//!   저장 방식으로 고를 수 있는 `CRLF`·`LF` 중 많은 쪽을 채택한다. 둘 이상의 줄바꿈 방식이 섞여 있으면 `mixed = true`로
+//!   표시하고 상태 표시줄에는 `Mixed (CRLF)` 또는 `Mixed (LF)` 형태로 표기한다. 단독 `CR`은 저장 시 변환되므로
+//!   `has_legacy_cr = true`로 표시한다 ([`LineEndingDetection::converts_on_save`]).
+//! - **새 문서, 개행 없는 문서, `CRLF`·`LF` 동수 문서 기본값**: Windows는 `CRLF`, macOS/Linux는 `LF`.
 //! - **파일 끝 개행 보존**: 원본 텍스트의 끝 개행 유무(있음/없음)를 정규화 및 저장 시 그대로 보존한다.
 
 /// 문서 저장 및 UI 선택에 사용하는 줄바꿈 방식 (PLAN.md §3.4).
@@ -21,11 +22,6 @@ impl LineEnding {
     /// 현재 OS의 새 문서 기본 줄바꿈 방식 (Windows: `CRLF`, macOS/Linux: `LF`).
     pub const fn default_for_os() -> Self {
         if cfg!(windows) { Self::CrLf } else { Self::Lf }
-    }
-
-    /// 지정한 OS(`is_macos_or_unix`)에 따른 기본 줄바꿈 방식 (`is_windows = true`이면 `CRLF`, 아니면 `LF`).
-    pub const fn default_for_windows(is_windows: bool) -> Self {
-        if is_windows { Self::CrLf } else { Self::Lf }
     }
 
     /// 실제 줄바꿈 문자열 슬라이스 (`"\r\n"` 또는 `"\n"`).
@@ -101,6 +97,9 @@ pub struct LineEndingDetection {
     /// 단독 `CR`(`\r`, 구형 Mac)이 1개 이상 포함되어 저장 시 변환이 일어나는지 여부.
     pub has_legacy_cr: bool,
     /// 파일 끝에 개행 문자(`\r\n`, `\n`, `\r`)가 있었는지 여부.
+    ///
+    /// 정보 표시용이다. 끝 개행은 정규화 텍스트에 그대로 남으므로 저장 시 이 값을 다시 적용하지 않는다
+    /// (편집 중 사용자가 마지막 개행을 지우면 그대로 저장된다).
     pub has_trailing_newline: bool,
     /// 종류별 줄바꿈 개수.
     pub counts: LineEndingCounts,
@@ -110,6 +109,14 @@ impl LineEndingDetection {
     /// 상태 표시줄에 표시할 줄바꿈 라벨 (`"CRLF"`, `"LF"`, `"Mixed (CRLF)"`, `"Mixed (LF)"`).
     pub const fn status_label(&self) -> &'static str {
         self.line_ending.status_label(self.mixed)
+    }
+
+    /// 채택된 방식([`Self::line_ending`])으로 저장하면 원본 줄바꿈 바이트가 바뀌는지 여부.
+    ///
+    /// 여러 방식이 섞였거나(`mixed`) 단독 `CR`(구형 Mac, 저장 방식으로 지원하지 않음)이 있으면 `true`다.
+    /// "저장 시 채택된 방식으로 통일됨" 첫 저장 1회 알림(PLAN.md §3.4)은 이 값을 기준으로 한다.
+    pub const fn converts_on_save(&self) -> bool {
+        self.mixed || self.has_legacy_cr
     }
 }
 
@@ -160,10 +167,10 @@ pub fn detect_line_ending(text: &str) -> LineEndingDetection {
 /// 개행이 없거나 동수일 때 사용할 `default_line_ending`을 지정해 줄바꿈 방식을 감지한다.
 ///
 /// 규칙 (PLAN.md §3.4):
-/// - `CRLF` / `LF` / `CR` 개수를 세어 가장 많은 방식을 채택한다.
-/// - `CRLF`와 `LF`가 동수이면 `default_line_ending`을 따른다.
-/// - 단독 `CR`(구형 Mac)만 있는 파일은 내부 정규화 후 `LF`(또는 `CRLF`가 더 많으면 `CRLF`)로 채택하되
-///   `has_legacy_cr = true`로 표시한다.
+/// - 저장 방식으로 고를 수 있는 `CRLF`와 `LF` 중 더 많은 쪽을 채택한다.
+/// - 둘이 동수이면(개행이 없거나 단독 `CR`만 있는 경우 포함) `default_line_ending`을 따른다.
+/// - 단독 `CR`(구형 Mac)은 저장 방식으로 지원하지 않으므로 개수가 가장 많아도 채택 대상이 아니며,
+///   `has_legacy_cr = true`로 표시해 저장 시 변환됨([`LineEndingDetection::converts_on_save`])을 알린다.
 pub fn detect_line_ending_with_default(
     text: &str,
     default_line_ending: LineEnding,
@@ -171,22 +178,10 @@ pub fn detect_line_ending_with_default(
     let counts = count_line_endings(text);
     let has_trailing_newline = text.ends_with('\n') || text.ends_with('\r');
 
-    let line_ending = if counts.total() == 0 {
-        default_line_ending
-    } else if counts.crlf > counts.lf && counts.crlf >= counts.cr {
-        LineEnding::CrLf
-    } else if counts.lf > counts.crlf && counts.lf >= counts.cr {
-        LineEnding::Lf
-    } else if counts.cr > counts.crlf && counts.cr > counts.lf {
-        // 구형 Mac 단독 CR이 다수인 경우: 함께 섞인 CRLF/LF 중 많은 쪽, 둘 다 없으면 LF로 채택
-        if counts.crlf > counts.lf {
-            LineEnding::CrLf
-        } else {
-            LineEnding::Lf
-        }
-    } else {
-        // CRLF == LF 동수인 경우 기본값 사용
-        default_line_ending
+    let line_ending = match counts.crlf.cmp(&counts.lf) {
+        std::cmp::Ordering::Greater => LineEnding::CrLf,
+        std::cmp::Ordering::Less => LineEnding::Lf,
+        std::cmp::Ordering::Equal => default_line_ending,
     };
 
     LineEndingDetection {

@@ -5,6 +5,7 @@
 //! - 내부 `LF` 정규화 (`normalize_to_lf`, `analyze_and_normalize`)
 //! - 저장 시 대상 줄바꿈 방식으로 변환 (`apply_line_ending`)
 //! - 파일 끝 개행 유무(有/無) 보존
+//! - 저장 시 변환 여부(`converts_on_save`)와 단독 `CR` 다수·동수일 때 기본값 규칙
 
 use std::fs;
 use std::path::Path;
@@ -62,9 +63,11 @@ fn pure_crlf_lf_and_cr_detection_normalization_and_restoration() {
             cr: 3
         }
     );
-    assert_eq!(norm_cr.detection.line_ending, LineEnding::Lf);
+    // 단독 CR은 저장 방식이 아니므로 CRLF·LF 동수(0:0) → 기본값(CRLF)
+    assert_eq!(norm_cr.detection.line_ending, LineEnding::CrLf);
     assert!(!norm_cr.detection.mixed);
     assert!(norm_cr.detection.has_legacy_cr);
+    assert!(norm_cr.detection.converts_on_save());
     assert!(norm_cr.detection.has_trailing_newline);
     assert_eq!(norm_cr.text, "mac line 1\nmac line 2\nmac line 3\n");
 }
@@ -184,4 +187,60 @@ fn trailing_newline_presence_and_absence_are_preserved() {
         single_line
     );
     assert_eq!(normalize_to_lf(""), "");
+}
+
+#[test]
+fn converts_on_save_flags_mixed_and_legacy_cr_only() {
+    for (raw, expected) in [
+        ("a\r\nb\r\n", false),
+        ("a\nb\n", false),
+        ("개행 없는 한 줄", false),
+        ("", false),
+        ("a\r\nb\n", true),
+        ("a\rb\rc\r", true),
+        ("a\r\nb\r", true),
+    ] {
+        let detection = detect_line_ending_with_default(raw, LineEnding::CrLf);
+        assert_eq!(detection.converts_on_save(), expected, "{raw:?}");
+
+        // 변환이 없다고 판정되면 채택 방식으로 저장한 결과가 원본과 바이트 동일해야 한다.
+        if !expected {
+            let norm = analyze_and_normalize_with_default(raw, LineEnding::CrLf);
+            assert_eq!(apply_line_ending(&norm.text, detection.line_ending), raw);
+        }
+    }
+}
+
+#[test]
+fn legacy_cr_majority_and_ties_follow_crlf_lf_comparison_then_default() {
+    // CR 전용: CRLF·LF 동수(0:0) → 기본값
+    for default in LineEnding::ALL {
+        let d = detect_line_ending_with_default("a\rb\rc\r", default);
+        assert_eq!(d.line_ending, default);
+        assert!(d.has_legacy_cr);
+        assert!(!d.mixed);
+    }
+
+    // CR 다수 + CRLF 1·LF 1 동수 → 기본값
+    for default in LineEnding::ALL {
+        let d = detect_line_ending_with_default("a\rb\rc\r\nd\ne", default);
+        assert_eq!(d.line_ending, default);
+        assert!(d.mixed);
+    }
+
+    // CR 다수 + CRLF 2·LF 1 → CRLF (기본값 LF여도)
+    let d = detect_line_ending_with_default("a\rb\rc\rd\r\ne\r\nf\ng", LineEnding::Lf);
+    assert_eq!(d.line_ending, LineEnding::CrLf);
+
+    // CR 다수 + CRLF 1·LF 2 → LF (기본값 CRLF여도)
+    let d = detect_line_ending_with_default("a\rb\rc\rd\r\ne\nf\ng", LineEnding::CrLf);
+    assert_eq!(d.line_ending, LineEnding::Lf);
+
+    // 개행 없음 → 기본값
+    for default in LineEnding::ALL {
+        assert_eq!(
+            detect_line_ending_with_default("한 줄", default).line_ending,
+            default
+        );
+    }
 }
