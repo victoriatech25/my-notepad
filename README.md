@@ -66,7 +66,8 @@ cargo xtask doctor
 
 ```text
 my-notepad/
-├── docs/          기획·작업계획 문서
+├── src/           본 앱 소스 코드 (core 도메인 로직 + ui 계층)
+├── docs/          기획·작업계획·ADR·UI 명세 문서
 ├── spikes/        Phase 0 실험 프로젝트
 ├── xtask/         개발 보조 명령 (cargo xtask)
 └── tests/fixtures 테스트용 원본 파일 (바이트 그대로 보존)

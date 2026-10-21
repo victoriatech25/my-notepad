@@ -22,6 +22,13 @@ struct Scenario {
 
 const SCENARIOS: &[Scenario] = &[
     Scenario {
+        name: "empty",
+        package: "my-notepad",
+        args: &[],
+        description: "P1-01 본 앱 빈 창 실행 (메뉴바·상태 표시줄 자리 표시)",
+        wait: false,
+    },
+    Scenario {
         name: "spike",
         package: "editor-spike",
         args: &[],
