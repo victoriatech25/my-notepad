@@ -423,11 +423,12 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [x] 감지/정규화/복원 테스트 (Mixed 파일 → 다수 방식, 끝 개행 有/無 보존)
 
 #### P1-07 버퍼·문서 모델 · S
+- **상태**: ✅ 완료 (자동 검증 통과, 2026-10-21)
 - **목표**: `TextBuffer` 트레이트 + `String` 구현 + 줄 시작 위치 색인(`LineIndex`, 바이트↔줄/열 변환 공통 기반), `Document`(경로, 버퍼, 인코딩, 줄바꿈, 수정/손상/읽기전용 플래그, 수정 카운터, 탭별 독립 Undo/Redo 이력 — 향후 `Replace All` 단일 Undo 연동 가능 구조, 디스크 메타데이터)
 - **산출물**: `src/core/buffer.rs`, `src/core/document.rs`
 - **선행**: P1-05, P1-06
 - 🤖 **자동 검증**
-  - [ ] 편집 시 수정 플래그·수정 카운터 변화, 저장 후 초기화, Undo/Redo 복원 테스트
+  - [x] 편집 시 수정 플래그·수정 카운터 변화, 저장 후 초기화, Undo/Redo 복원 테스트
 
 #### P1-08 파일 입출력 · M
 - **목표**: 원자적 저장, 파일 크기 판정(ADR 0001: ~1MB 편집 · 1~5MB 편집+안내 · 5MB 초과 뷰어, 경계값 설정 가능), 바이너리 확인, 읽기 전용/권한 오류 처리
@@ -1050,6 +1051,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-21 | P1-04 | 🤖 | 통과 | `src/core/encoding.rs`(§3.3-2 6단계 감지·디코딩·손상 플래그) 및 `tests/fixtures/encoding/*` 픽스처 10종 생성·검증 단위 테스트 3개 통과 | |
 | 2026-10-21 | P1-05 | 🤖 | 통과 | `src/core/encoding.rs` 인코딩부(`encode_text`, `encode_text_lossy`, UTF-16 직접 직렬화, EUC-KR 표현 불가 문자 위치 검출·NCR 방지) 및 `tests/encoding_roundtrip.rs` 통합 테스트 6개 통과 | |
 | 2026-10-21 | P1-06 | 🤖 | 통과 | `src/core/line_ending.rs`(CRLF/LF/CR 감지, Mixed 다수 방식 판정, 내부 LF 정규화, 저장용 변환, 끝 개행 보존) 및 `tests/line_ending.rs` 통합 테스트 3개 통과 | |
+| 2026-10-21 | P1-07 | 🤖 | 통과 | `src/core/buffer.rs`(`LineIndex`, `TextBuffer`, `StringBuffer`) 및 `src/core/document.rs`(`Document`, 수정 플래그·수정 카운터, `SavedBaseline`, 탭별 독립 Undo/Redo 스택, `Replace All` 단일 Undo 일괄 치환, 저장 바이트 직렬화) 단위 테스트 11개 통과 | |
 
 ### 9.3 측정 결과 기록표
 
