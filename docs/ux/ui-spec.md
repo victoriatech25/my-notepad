@@ -32,18 +32,22 @@
 | 줄 번호 | 에디터 좌측, 현재 줄 번호 강조 | |
 | 상태 표시줄 | 좌: 커서·선택·줄 수 / 우: 확대율·줄바꿈·인코딩 (클릭 시 팝업) | 우측은 "바꿀 수 있는 값" 묶음 |
 
-## 2. 색상 토큰 (초안)
+## 2. 색상 토큰
+
+> 구현: `src/ui/theme.rs` `Palette` (P1-01). 값을 바꿀 때는 이 표와 `theme.rs`를 함께 고친다.
 
 | 토큰 | 용도 | 라이트 | 다크 |
 | :--- | :--- | :--- | :--- |
 | `smart_highlight` | 선택 단어 일괄 강조 | 연한 녹색 `#C8F0C8` | 어두운 녹색 `#2E5A2E` |
 | `search_match` | 찾기 매치 전체 | 연한 노랑 `#FFF0A0` | 어두운 황토 `#6A5A1E` |
 | `search_current` | 현재 매치 | 주황 `#FFB347` | 주황 `#B8691A` |
-| `gutter_text` | 줄 번호 | 회색 | 회색 |
-| `gutter_current` | 현재 줄 번호 | 본문색 | 본문색 |
-| `modified_marker` | 탭 수정 표시 `●` | 강조색 | 강조색 |
-| `status_warning` | 추정됨·Mixed 표시 | 주황 글자 | 주황 글자 |
-| `status_error` | 손상 표시 | 빨강 글자 | 빨강 글자 |
+| `gutter_text` | 줄 번호 | 회색 `#969696` | 회색 `#6E6E6E` |
+| `gutter_current` | 현재 줄 번호 | 본문색 `#1E1E1E` | 본문색 `#DCDCDC` |
+| `modified_marker` | 탭 수정 표시 `●` | 강조색 `#1E6FD9` | 강조색 `#6CB4FF` |
+| `status_warning` | 추정됨·Mixed 표시 | 주황 글자 `#C06A00` | 주황 글자 `#FFB040` |
+| `status_error` | 손상 표시 | 빨강 글자 `#C62828` | 빨강 글자 `#FF6B6B` |
+| `preview_code_bg` | Markdown 미리보기 코드 블록 배경 | `#EEEEEE` | `#282828` |
+| `cursor_block` | 분할 모드 현재 커서 위치 블록 강조 배경 | `#1E6FD9` 알파 20 | `#6CB4FF` 알파 24 |
 
 ## 3. 대화상자 문구 (초안)
 

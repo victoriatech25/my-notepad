@@ -13,6 +13,7 @@ Windows에서 에이전트의 `run_command`는 격리된 데스크톱(`WinSta0\e
   cargo xtask try <시나리오> --wait
   ```
 - 만약 `xtask`를 거치지 않고 임의의 GUI 실행 파일을 띄워야 한다면, Win32 `CreateProcessW`에서 `STARTUPINFO.lpDesktop = "WinSta0\\Default"`를 지정하고 `Wait-Process`로 대기해야 사용자 화면에 창이 보입니다.
+- **Windows 파일 탐색기(`explorer.exe`)를 열 때**: `explorer.exe`를 직접 실행하면 샌드박스 격리로 인해 창이 열리지 않고 즉시 종료됩니다. 반드시 `(New-Object -ComObject Shell.Application).Open("C:\devel\My-Notepad")` COM 호출을 사용해 사용자의 기본 데스크톱 셸에서 탐색기 창이 열리게 하세요.
 
 ## 2. 개발 및 브랜치 규칙 요약
 
