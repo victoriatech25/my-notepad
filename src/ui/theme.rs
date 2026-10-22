@@ -28,6 +28,10 @@ pub struct Palette {
     pub preview_code_bg: Color32,
     /// 분할 모드에서 현재 커서 위치 블록 강조 배경
     pub cursor_block: Color32,
+    /// 대화상자 제목 띠 배경 (`dialog_title_bg`)
+    pub dialog_title_bg: Color32,
+    /// 대화상자 버튼 띠 배경 (`dialog_footer_bg`)
+    pub dialog_footer_bg: Color32,
 }
 
 impl Palette {
@@ -53,6 +57,8 @@ impl Palette {
             status_error: Color32::from_rgb(0xFF, 0x6B, 0x6B),
             preview_code_bg: Color32::from_gray(40),
             cursor_block: Color32::from_rgba_unmultiplied(0x6C, 0xB4, 0xFF, 24),
+            dialog_title_bg: Color32::from_rgb(0x1B, 0x22, 0x33),
+            dialog_footer_bg: Color32::from_gray(20),
         }
     }
 
@@ -69,6 +75,8 @@ impl Palette {
             status_error: Color32::from_rgb(0xC6, 0x28, 0x28),
             preview_code_bg: Color32::from_gray(238),
             cursor_block: Color32::from_rgba_unmultiplied(0x1E, 0x6F, 0xD9, 20),
+            dialog_title_bg: Color32::from_rgb(0xE3, 0xEA, 0xF5),
+            dialog_footer_bg: Color32::from_gray(236),
         }
     }
 }

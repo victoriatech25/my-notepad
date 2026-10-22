@@ -34,11 +34,17 @@ impl Tab {
         editor.restore_view(&doc);
         editor.request_focus();
         let path_key = doc.path().map(path_key);
+        // `.md` 기본 보기 모드는 분할 (ui-spec §5, UX-1 승인)
+        let view_mode = if doc.is_markdown() {
+            ViewMode::Split
+        } else {
+            ViewMode::Source
+        };
         Self {
             id,
             doc,
             editor,
-            view_mode: ViewMode::Source,
+            view_mode,
             path_key,
             file_readonly: false,
         }
@@ -52,6 +58,18 @@ impl Tab {
     /// 다른 이름으로 저장 후 경로가 바뀌었을 때 중복 열기 판정 경로를 갱신한다.
     pub fn refresh_path_key(&mut self) {
         self.path_key = self.doc.path().map(path_key);
+    }
+
+    /// 같은 탭에서 문서를 바꾼다 (인코딩으로 다시 읽기). 커서는 새 문서 범위 안으로 맞추고 스크롤은 유지한다.
+    pub fn replace_document(&mut self, mut doc: Document) {
+        let len = doc.text().chars().count();
+        let cursor = self.doc.cursor_char_range();
+        doc.set_cursor_char_range(cursor.start.min(len)..cursor.end.min(len));
+        doc.set_scroll_offset_y(self.doc.scroll_offset_y());
+        self.doc = doc;
+        self.editor.invalidate();
+        self.editor.restore_view(&self.doc);
+        self.refresh_path_key();
     }
 
     /// 손대지 않은 빈 새 문서인지 (파일을 열면 이 탭을 바꿔 쓴다).
@@ -206,34 +224,59 @@ impl Tabs {
         }
     }
 
-    /// 수정되지 않은 탭만 닫고, 닫지 않은(수정된) 탭 수를 돌려준다.
-    ///
-    /// 수정된 탭의 저장 확인은 P1-11에서 붙인다. 그 전까지는 데이터를 잃지 않도록 닫지 않는다.
+    /// 탭 ID로 현재 탭 번호를 찾는다 (닫기 대기열처럼 번호가 바뀌는 동안 탭을 기억할 때).
+    pub fn index_of(&self, id: u64) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == id)
+    }
+
+    /// 탭 번호 목록을 탭 ID 목록으로 바꾼다 (범위 밖 번호는 무시).
+    pub fn ids_of(&self, indices: &[usize]) -> Vec<u64> {
+        indices
+            .iter()
+            .filter_map(|&i| self.tabs.get(i).map(|t| t.id))
+            .collect()
+    }
+
+    /// 수정되지 않은 탭만 닫고, 닫지 않은(수정된) 탭 수를 돌려준다 (`저장된 탭 닫기`).
     pub fn close_unmodified(&mut self, indices: &[usize]) -> usize {
+        let skipped = indices
+            .iter()
+            .filter(|&&i| self.tabs.get(i).is_some_and(|t| t.doc.is_modified()))
+            .count();
+        self.remove_where(|index, tab| indices.contains(&index) && !tab.doc.is_modified());
+        skipped
+    }
+
+    /// 지정한 탭을 수정 여부와 상관없이 닫는다. 저장 확인은 호출하는 쪽(닫기 대기열)이 끝낸 뒤여야 한다.
+    pub fn close_ids(&mut self, ids: &[u64]) {
+        self.remove_where(|_, tab| ids.contains(&tab.id));
+    }
+
+    /// 조건에 맞는 탭을 닫는다. 활성 탭이 닫히면 그 자리에 온 탭(없으면 왼쪽)으로 옮기고,
+    /// 모두 닫히면 빈 `Untitled-1`을 만든다.
+    fn remove_where(&mut self, mut remove: impl FnMut(usize, &Tab) -> bool) {
         let active_id = self.tabs[self.active].id;
-        let mut skipped = 0;
+        let old_active = self.active;
+        let mut removed_before_active = 0;
         let mut index = 0;
         self.tabs.retain(|tab| {
-            let requested = indices.contains(&index);
-            index += 1;
-            if requested && tab.doc.is_modified() {
-                skipped += 1;
+            let r = remove(index, tab);
+            if r && index < old_active {
+                removed_before_active += 1;
             }
-            !(requested && !tab.doc.is_modified())
+            index += 1;
+            !r
         });
 
         if self.tabs.is_empty() {
             self.active = 0;
             self.new_untitled();
-        } else if let Some(i) = self.tabs.iter().position(|t| t.id == active_id) {
+        } else if let Some(i) = self.index_of(active_id) {
             self.active = i;
         } else {
-            // 활성 탭이 닫혔으면 그 자리(없으면 왼쪽) 탭으로
-            let first_closed = indices.iter().copied().min().unwrap_or(0);
-            let fallback = first_closed.min(self.tabs.len() - 1);
+            let fallback = (old_active - removed_before_active).min(self.tabs.len() - 1);
             self.activate(fallback);
         }
-        skipped
     }
 
     fn push(&mut self, doc: Document) -> usize {
@@ -344,6 +387,43 @@ mod tests {
         tabs.get_mut(0).unwrap().doc.undo();
         assert_eq!(tabs.close_unmodified(&[0]), 0);
         assert_eq!(titles(&tabs), ["Untitled-1"]);
+    }
+
+    #[test]
+    fn close_ids_closes_modified_tabs_by_identity() {
+        let mut tabs = Tabs::new();
+        tabs.new_untitled();
+        tabs.new_untitled();
+        tabs.get_mut(1).unwrap().doc.set_text("수정됨");
+        let ids = tabs.ids_of(&[1, 2, 9]);
+        assert_eq!(ids.len(), 2);
+
+        // 앞쪽 탭을 먼저 닫아 번호가 바뀌어도 ID로 찾는다
+        tabs.close_ids(&ids[1..]);
+        assert_eq!(tabs.index_of(ids[0]), Some(1));
+        tabs.close_ids(&ids[..1]);
+        assert_eq!(titles(&tabs), ["Untitled-1"]);
+        assert_eq!(tabs.index_of(ids[0]), None);
+    }
+
+    #[test]
+    fn markdown_defaults_to_split_and_replace_keeps_tab() {
+        let mut tabs = Tabs::new();
+        let md = Document::from_bytes(Some("notes.md".into()), b"# a", false, None).unwrap();
+        tabs.open_document(md, false);
+        assert_eq!(tabs.active().view_mode, ViewMode::Split);
+        tabs.new_untitled();
+        assert_eq!(tabs.active().view_mode, ViewMode::Source);
+
+        // 다시 읽기: 같은 탭(ID)에서 문서만 바뀌고 커서는 새 길이 안으로
+        tabs.activate(0);
+        let id = tabs.active().id();
+        tabs.active_mut().doc.set_cursor_char_range(3..3);
+        let shorter = Document::from_bytes(Some("notes.md".into()), b"#", false, None).unwrap();
+        tabs.active_mut().replace_document(shorter);
+        assert_eq!(tabs.active().id(), id);
+        assert_eq!(tabs.active().doc.text(), "#");
+        assert_eq!(tabs.active().doc.cursor_char_range(), 1..1);
     }
 
     #[test]

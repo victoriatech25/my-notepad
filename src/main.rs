@@ -4,6 +4,7 @@
 //! - `--test-panic`: panic hook이 로그 파일에 정보를 남기는지 검증하기 위한 플래그
 //! - `--font-report`: 창을 띄우지 않고 OS 폰트 Fallback 체인 로드 보고서를 출력 (자동 검증용)
 //! - `--log-file <경로>`: 로그 파일 경로 수동 지정 (자동 테스트용)
+//! - 그 밖의 인자는 열 파일 경로 (P1-12에서 `xtask try encoding`용으로 추가, P1-13에서 확장)
 //! - `eframe` `glow` 렌더러로 네이티브 창 기동
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -17,6 +18,7 @@ struct CliArgs {
     log_file: Option<PathBuf>,
     test_panic: bool,
     font_report: bool,
+    files: Vec<PathBuf>,
 }
 
 impl CliArgs {
@@ -25,6 +27,7 @@ impl CliArgs {
         let mut log_file = None;
         let mut test_panic = false;
         let mut font_report = false;
+        let mut files = Vec::new();
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -38,6 +41,8 @@ impl CliArgs {
                 _ => {
                     if let Some(p) = arg.strip_prefix("--log-file=") {
                         log_file = Some(PathBuf::from(p));
+                    } else if !arg.starts_with("--") {
+                        files.push(PathBuf::from(arg));
                     }
                 }
             }
@@ -47,6 +52,7 @@ impl CliArgs {
             log_file,
             test_panic,
             font_report,
+            files,
         }
     }
 }
@@ -86,6 +92,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "my-notepad",
         options,
-        Box::new(|cc| Ok(Box::new(app::NotepadApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::NotepadApp::new(cc, &cli.files)))),
     )
 }

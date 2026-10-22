@@ -18,6 +18,9 @@ struct Scenario {
     /// true면 끝날 때까지 기다려 출력을 보여준다. false면 창을 띄우고 바로 돌아온다
     /// (xtask가 앱을 붙잡고 있으면 다음 빌드에서 xtask.exe를 교체하지 못한다).
     wait: bool,
+    /// 실행 전에 `target/try-<시나리오>/`로 새로 복사해 인자로 넘길 파일 (저장소 기준 경로).
+    /// 검증 중에 저장해도 `tests/fixtures`의 바이트가 바뀌지 않게 한다.
+    work_files: &'static [&'static str],
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -27,6 +30,7 @@ const SCENARIOS: &[Scenario] = &[
         args: &[],
         description: "P1-01 본 앱 빈 창 실행 (메뉴바·상태 표시줄 자리 표시)",
         wait: false,
+        work_files: &[],
     },
     Scenario {
         name: "basic",
@@ -34,6 +38,22 @@ const SCENARIOS: &[Scenario] = &[
         args: &[],
         description: "UX-2 첫 실사용 빌드 (P1-09 에디터 + P1-10 멀티 탭·파일 열기/저장)",
         wait: false,
+        work_files: &[],
+    },
+    Scenario {
+        name: "encoding",
+        package: "my-notepad",
+        args: &[],
+        description: "UX-3 인코딩·줄바꿈 UI (픽스처 사본 6개를 탭으로 열기: UTF-8·BOM·CP949·UTF-16 LE·손상·CRLF)",
+        wait: false,
+        work_files: &[
+            "tests/fixtures/encoding/utf8.txt",
+            "tests/fixtures/encoding/utf8_bom.txt",
+            "tests/fixtures/encoding/cp949.txt",
+            "tests/fixtures/encoding/utf16le.txt",
+            "tests/fixtures/encoding/cp949_damaged.bin",
+            "tests/fixtures/line_ending/crlf.txt",
+        ],
     },
     Scenario {
         name: "editor",
@@ -41,6 +61,7 @@ const SCENARIOS: &[Scenario] = &[
         args: &[],
         description: "P1-09 기본 에디터 (빈 새 문서 1개 — 한글 IME·Tab·Undo/Redo·클립보드 확인)",
         wait: false,
+        work_files: &[],
     },
     Scenario {
         name: "spike",
@@ -48,6 +69,7 @@ const SCENARIOS: &[Scenario] = &[
         args: &[],
         description: "에디터 스파이크 (입력 검증 + 폰트 화면)",
         wait: false,
+        work_files: &[],
     },
     Scenario {
         name: "input",
@@ -55,6 +77,7 @@ const SCENARIOS: &[Scenario] = &[
         args: &[],
         description: "P0-03~05 한글 IME·단축키·창 닫기 검증 화면",
         wait: false,
+        work_files: &[],
     },
     Scenario {
         name: "fonts",
@@ -62,6 +85,7 @@ const SCENARIOS: &[Scenario] = &[
         args: &[],
         description: "P0-02 폰트 Fallback 체인 확인 화면",
         wait: false,
+        work_files: &[],
     },
     Scenario {
         name: "prototype",
@@ -69,6 +93,7 @@ const SCENARIOS: &[Scenario] = &[
         args: &[],
         description: "P0-UX1 전체 화면 UX 프로토타입 (가짜 데이터)",
         wait: false,
+        work_files: &[],
     },
     Scenario {
         name: "perf",
@@ -76,6 +101,7 @@ const SCENARIOS: &[Scenario] = &[
         args: &["--screen=perf"],
         description: "P0-06 대용량 텍스트 성능 화면 (샘플: cargo xtask gen-samples)",
         wait: false,
+        work_files: &[],
     },
     Scenario {
         name: "md",
@@ -83,6 +109,7 @@ const SCENARIOS: &[Scenario] = &[
         args: &[],
         description: "P0-08 Markdown 렌더러 비교 (A egui_commonmark | B 자체 렌더러, docs/PLAN.md)",
         wait: false,
+        work_files: &[],
     },
     Scenario {
         name: "md-block-map",
@@ -90,6 +117,7 @@ const SCENARIOS: &[Scenario] = &[
         args: &["--block-map"],
         description: "P0-08 B 렌더러 블록 위치표 출력·점검 (창 없음)",
         wait: true,
+        work_files: &[],
     },
     Scenario {
         name: "perf-bench",
@@ -97,6 +125,7 @@ const SCENARIOS: &[Scenario] = &[
         args: &["--perf-bench"],
         description: "P0-06 대용량 텍스트 자동 벤치 (창 없음, 수 분 소요)",
         wait: true,
+        work_files: &[],
     },
     Scenario {
         name: "font-report",
@@ -104,6 +133,7 @@ const SCENARIOS: &[Scenario] = &[
         args: &["--font-report"],
         description: "P0-02 폰트 로드 보고서만 출력 (창 없음)",
         wait: true,
+        work_files: &[],
     },
 ];
 
@@ -185,9 +215,12 @@ fn try_scenario(name: Option<&str>, wait_flag: bool) -> Result<(), String> {
     let exe = root
         .join("target/release")
         .join(format!("{package}{}", env::consts::EXE_SUFFIX));
+    let work_args = prepare_work_files(&root, scenario)?;
+    let mut args: Vec<&str> = scenario.args.to_vec();
+    args.extend(work_args.iter().map(String::as_str));
     if scenario.wait {
         let mut command = Command::new(&exe);
-        command.current_dir(&root).args(scenario.args);
+        command.current_dir(&root).args(&args);
         let status = command
             .status()
             .map_err(|e| format!("{} 실행 실패: {e}", exe.display()))?;
@@ -195,9 +228,33 @@ fn try_scenario(name: Option<&str>, wait_flag: bool) -> Result<(), String> {
             return Err(format!("{package} 실행이 실패했습니다 ({status})"));
         }
     } else {
-        spawn_gui(&exe, scenario.args, &root, wait_flag)?;
+        spawn_gui(&exe, &args, &root, wait_flag)?;
     }
     Ok(())
+}
+
+/// 시나리오의 `work_files`를 `target/try-<이름>/`에 새로 복사하고 복사본의 절대 경로를 돌려준다.
+fn prepare_work_files(root: &Path, scenario: &Scenario) -> Result<Vec<String>, String> {
+    if scenario.work_files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = root.join("target").join(format!("try-{}", scenario.name));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("{} 정리 실패: {e}", dir.display()))?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{} 생성 실패: {e}", dir.display()))?;
+    let mut paths = Vec::new();
+    for file in scenario.work_files {
+        let src = root.join(file);
+        let name = src
+            .file_name()
+            .ok_or_else(|| format!("파일 이름 없음: {file}"))?;
+        let dst = dir.join(name);
+        std::fs::copy(&src, &dst).map_err(|e| format!("{file} 복사 실패: {e}"))?;
+        paths.push(dst.display().to_string());
+    }
+    println!("  작업 사본: {} ({}개)", dir.display(), paths.len());
+    Ok(paths)
 }
 
 /// GUI 앱을 실행한다.

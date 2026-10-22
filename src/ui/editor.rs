@@ -74,6 +74,11 @@ impl EditorState {
         self.id
     }
 
+    /// 문서 자체가 바뀌었으므로(같은 `revision`이어도) 다음 프레임에 사본을 다시 맞춘다.
+    pub fn invalidate(&mut self) {
+        self.synced_revision = None;
+    }
+
     /// 다음 프레임에 에디터로 키보드 포커스를 옮긴다.
     pub fn request_focus(&mut self) {
         self.focus_requested = true;
