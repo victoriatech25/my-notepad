@@ -4,6 +4,7 @@
 > - v0.1 — 초안
 > - v0.2 (2026-10-20) — 검토 결과 반영: Phase 0 기술 검증(스파이크) 추가, 성능 목표 수치를 측정 기반으로 조정, 누락 기능(Undo/Redo, 종료 시 저장 확인, 외부 변경 감지 등) 보강, 인코딩/줄바꿈 정책 상세화, 아키텍처를 `core`(UI 비의존) / `ui` 계층으로 분리, 배포·테스트 등 비기능 요구사항 추가
 > - v0.3 (2026-10-20) — Markdown 소스 보기 / 미리보기를 핵심 기능으로 추가(§3.8): 소스·미리보기·분할 모드, 양방향 스크롤 동기화, GFM 렌더링 범위, 링크·이미지 정책. 렌더러 방식 결정(§2.5), Phase 0 검증 항목 및 Phase 3(Markdown) 신설에 따라 이후 Phase 번호 하나씩 뒤로 이동
+> - v0.4 (2026-10-22) — Phase 5에 탐색기 우클릭 메뉴 "My-Notepad로 편집" 추가 (사용자 요청, P1-13 검증 중)
 
 ---
 
@@ -507,6 +508,10 @@ my-notepad/
 
 ### Phase 5: 배포 및 OS 통합
 - Windows: 설치 프로그램(MSI 또는 Inno Setup) + 포터블 zip, 파일 연결("연결 프로그램" 등록), 앱 아이콘, 코드 서명(SmartScreen 경고 완화)
+- Windows 탐색기 우클릭 메뉴 **"My-Notepad로 편집"** (모든 파일, 여러 개 선택 시 탭으로 열기). 설치 프로그램이 등록·제거를 맡는다.
+  - **A. Windows 11 첫 메뉴** ("메모장에서 편집"·"Notepad++로 편집"과 같은 자리): `IExplorerCommand` 셸 확장 DLL + 앱 신원을 주는 sparse package(MSIX 매니페스트 `desktop4:FileExplorerContextMenus`). 패키지는 **코드 서명이 필수**
+  - **B. 대체안**: 사용자 레지스트리(`HKCU\Software\Classes\*\shell`) 동사 등록 — Windows 11에서는 "추가 옵션 표시" 아래에만 나옴, Windows 10에서는 기본 메뉴
+  - 결정: Phase 5 착수 시 코드 서명 인증서 준비 여부로 A/B를 고른다 (서명 인증서가 있으면 A + B를 함께 등록해 Windows 10도 지원)
 - macOS: `.app` 번들, Universal 바이너리(Apple Silicon + Intel), 코드 서명 및 공증(Notarization), `.dmg` 배포
 - 단일 인스턴스 동작 검토: 이미 실행 중이면 기존 창의 새 탭으로 파일 열기
 - GitHub Actions 릴리스 파이프라인 (Windows/macOS 빌드·테스트·패키징)
