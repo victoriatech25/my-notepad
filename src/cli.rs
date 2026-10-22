@@ -3,7 +3,8 @@
 //! - `my-notepad a.txt b.txt` → 파일마다 탭으로 연다. 탐색기 "연결 프로그램"도 같은 방식으로 경로 하나를 넘긴다.
 //! - 상대 경로는 실행한 폴더 기준 절대 경로로 바꾼다 (탭 툴팁·중복 열기 판정에 전체 경로가 필요).
 //! - `--` 뒤의 인자는 모두 파일 경로로 본다 (`--`로 시작하는 파일 이름도 열 수 있게).
-//! - 개발·검증용 플래그: `--test-panic`, `--font-report`, `--log-file <경로>` / `--log-file=<경로>`.
+//! - 개발·검증용 플래그: `--test-panic`, `--font-report`, `--log-file <경로>` / `--log-file=<경로>`,
+//!   `--measure-out <경로>` (첫 화면·스크롤 프레임 시간을 파일로 남김 — `cargo xtask measure --viewer`, P1-14).
 //!   알 수 없는 `--` 플래그는 무시하고 [`CliArgs::unknown`]에 남긴다.
 
 use std::ffi::OsString;
@@ -15,6 +16,8 @@ pub struct CliArgs {
     pub log_file: Option<PathBuf>,
     pub test_panic: bool,
     pub font_report: bool,
+    /// 측정 결과를 쓸 파일
+    pub measure_out: Option<PathBuf>,
     /// 열 파일 (절대 경로, 받은 순서)
     pub files: Vec<PathBuf>,
     /// 알 수 없는 플래그 (로그에 경고만 남긴다)
@@ -49,6 +52,7 @@ impl CliArgs {
                 "--test-panic" => cli.test_panic = true,
                 "--font-report" => cli.font_report = true,
                 "--log-file" => cli.log_file = args.next().map(PathBuf::from),
+                "--measure-out" => cli.measure_out = args.next().map(PathBuf::from),
                 _ if text.starts_with("--log-file=") => {
                     cli.log_file = Some(PathBuf::from(&text["--log-file=".len()..]));
                 }
@@ -99,6 +103,7 @@ mod tests {
         assert_eq!(cli.log_file, Some(PathBuf::from("y.log")));
         assert!(cli.font_report);
         assert!(!cli.test_panic);
+        assert_eq!(cli.measure_out, None);
         assert_eq!(cli.unknown, ["--verbose"]);
         assert_eq!(cli.files.len(), 1);
         assert!(cli.files[0].ends_with("note.txt"));

@@ -82,9 +82,21 @@ pub fn tab_icon(tabs: &Tabs, index: usize) -> FileIcon {
 }
 
 fn path_hint(tabs: &Tabs, index: usize) -> String {
-    tabs.get(index)
-        .and_then(|t| t.doc.path())
-        .map_or_else(|| UNSAVED_PATH_HINT.to_owned(), |p| p.display().to_string())
+    let Some(tab) = tabs.get(index) else {
+        return String::new();
+    };
+    let path = tab
+        .doc
+        .path()
+        .map_or_else(|| UNSAVED_PATH_HINT.to_owned(), |p| p.display().to_string());
+    // 읽기 전용 표시 (P1-14: 뷰어·바이너리·읽기 전용 파일)
+    if tab.viewer.is_some() {
+        format!("{path}\n읽기 전용으로 보는 중 (큰 파일)")
+    } else if tab.doc.is_readonly() || tab.file_readonly {
+        format!("{path}\n읽기 전용")
+    } else {
+        path
+    }
 }
 
 /// 탭 바를 그리고 사용자가 고른 동작을 돌려준다.

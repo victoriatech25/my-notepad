@@ -56,6 +56,18 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        name: "large",
+        package: "my-notepad",
+        args: &[
+            "spikes/samples/text-1mb.txt",
+            "spikes/samples/text-10mb.txt",
+            "spikes/samples/text-50mb.txt",
+        ],
+        description: "P1-14 대용량: 1MB(안내 막대)·10MB·50MB(읽기 전용 뷰어) 탭 (샘플: cargo xtask gen-samples)",
+        wait: false,
+        work_files: &[],
+    },
+    Scenario {
         name: "editor",
         package: "my-notepad",
         args: &[],
@@ -158,7 +170,11 @@ fn main() -> ExitCode {
                 .and_then(|i| args.get(i + 1))
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10);
-            measure::run(&workspace_root(), runs)
+            if args.iter().any(|a| a == "--viewer") {
+                measure::run_viewer(&workspace_root(), runs.min(5))
+            } else {
+                measure::run(&workspace_root(), runs)
+            }
         }
         None | Some("help" | "-h" | "--help") => {
             print_help();
@@ -187,6 +203,9 @@ fn print_help() {
     println!("  doctor           개발 환경 점검 (두 장비 준비 상태 확인)");
     println!("  gen-samples      성능 측정용 샘플 생성 (spikes/samples, git 제외)");
     println!("  measure [--runs N]  메모리·기동 시간 측정 (렌더러 × 한글 폰트 × 문서, 기본 10회)");
+    println!(
+        "  measure --viewer [--runs N]  본 앱 대용량 뷰어 10MB·50MB: 첫 화면·스크롤 프레임·메모리 (P1-14, 기본 3회)"
+    );
     println!("  help             이 도움말\n");
     println!("시나리오:");
     for scenario in SCENARIOS {

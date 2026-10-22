@@ -5,6 +5,7 @@
 //!   일괄 닫기 시 "이어서 닫을 탭 N개" 안내, 창 목록(체크해서 여러 창 닫기·이동)
 //! - P1-12: 표현 불가 문자 경고(`UTF-8로 저장` · `?`로 바꿔 저장 · 취소), 손상된 문서 저장 경고,
 //!   수정된 문서를 인코딩으로 다시 읽기 전 확인
+//! - P1-14: 큰 파일(5MB 초과)을 편집 모드로 열기 전 경고 (기본 버튼 `읽기 전용 유지`)
 //! - UX-3 피드백: 모든 대화상자를 Notepad++ 형태 공통 모양(제목 띠 + `×` / 본문 / 버튼 띠)으로 통일
 
 use std::collections::HashSet;
@@ -17,6 +18,7 @@ use crate::core::file_io::LoadedFile;
 use crate::tabs::Tabs;
 use crate::ui::tab_bar::{self, UNSAVED_PATH_HINT};
 use crate::ui::theme::Palette;
+use crate::ui::viewer;
 
 /// 화면에 띄울 대화상자.
 #[derive(Debug)]
@@ -53,6 +55,14 @@ pub enum Dialog {
         title: String,
         encoding: TextEncoding,
     },
+    /// "큰 파일을 편집 모드로 열까요?" (뷰어 → 편집 위젯)
+    ConfirmEditLarge {
+        tab_id: u64,
+        title: String,
+        size_bytes: u64,
+        /// 권장 편집 크기 (뷰어 경계값)
+        limit_bytes: u64,
+    },
 }
 
 /// 대화상자를 닫으며 사용자가 고른 결과.
@@ -85,6 +95,8 @@ pub enum DialogOutcome {
         tab_id: u64,
         target: Option<PathBuf>,
     },
+    /// 큰 파일을 편집 모드로 열기
+    OpenEditMode(u64),
     /// 변경 내용을 버리고 다시 읽기
     Reopen {
         tab_id: u64,
@@ -107,6 +119,7 @@ impl Dialog {
             Self::Unmappable { .. } => "unmappable",
             Self::DamagedSave { .. } => "damaged-save",
             Self::ConfirmReopen { .. } => "confirm-reopen",
+            Self::ConfirmEditLarge { .. } => "confirm-edit-large",
         };
         egui::Id::unique(("app-dialog", kind))
     }
@@ -332,6 +345,31 @@ pub fn show(
                         }
                         if default_button(ui, "취소").clicked() {
                             outcome = Some(DialogOutcome::Dismissed);
+                        }
+                    });
+                }
+                Dialog::ConfirmEditLarge {
+                    tab_id,
+                    title,
+                    size_bytes,
+                    limit_bytes,
+                } => {
+                    ui.set_width(480.0);
+                    close_button = title_bar(ui, &palette, "큰 파일을 편집 모드로 열까요?");
+                    body_area(ui, |ui| {
+                        ui.label(format!(
+                            "\"{title}\" ({})는 권장 편집 크기({})를 넘습니다. 편집 모드로 열면 입력과 화면 반응이                              느려지거나 메모리를 많이 쓸 수 있습니다.",
+                            viewer::format_size(*size_bytes),
+                            viewer::format_size(*limit_bytes)
+                        ));
+                    });
+                    footer(ui, &palette, |ui| {
+                        // 실수로 무거운 편집 위젯을 열지 않도록 Enter 기본 버튼은 "읽기 전용 유지"
+                        if default_button(ui, "읽기 전용 유지").clicked() {
+                            outcome = Some(DialogOutcome::Dismissed);
+                        }
+                        if button(ui, "편집 모드로 열기").clicked() {
+                            outcome = Some(DialogOutcome::OpenEditMode(*tab_id));
                         }
                     });
                 }
@@ -725,6 +763,12 @@ mod tests {
         let dialogs = [
             Dialog::window_list(),
             Dialog::message("제목", "본문"),
+            Dialog::ConfirmEditLarge {
+                tab_id: id,
+                title: "huge.log".into(),
+                size_bytes: 85 * 1_048_576,
+                limit_bytes: 5 * 1_048_576,
+            },
             Dialog::Unsaved {
                 tab_id: id,
                 title: "cp949.txt".into(),

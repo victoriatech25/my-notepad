@@ -11,9 +11,11 @@
 //! - P1-12: 상태 표시줄 인코딩·줄바꿈 팝업, 인코딩으로 다시 읽기(수정 중이면 확인), 변환 저장,
 //!   표현 불가 문자 경고(UTF-8로 저장 · `?`로 바꿔 저장 · 취소), 손상된 문서 저장 경고, 명령줄 파일 인자
 //! - P1-13: 파일을 창에 끌어다 놓아 열기(놓기 전 안내 덧그림, 폴더는 건너뜀), 명령줄 인자 해석은 `cli.rs`
+//! - P1-14: 5MB 초과 파일은 읽기 전용 뷰어(`ui::viewer`), 1~5MB는 안내 막대, 뷰어 ↔ 편집 모드 전환(큰 파일은 경고)
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use eframe::egui::{self, FontId, ViewportCommand};
 
@@ -31,10 +33,24 @@ use crate::ui::{
     status_bar::{self, StatusBarInfo},
     tab_bar::{self, TabAction, TabBarState, UNSAVED_PATH_HINT},
     theme::Palette,
+    viewer,
 };
 
 /// 상태 표시줄 안내 문구를 보여 주는 시간(초).
 const NOTICE_SECONDS: f64 = 4.0;
+
+/// 측정 중 문서 전체를 훑으며 프레임 시간을 재는 횟수.
+const MEASURE_SCROLL_FRAMES: u64 = 60;
+
+/// `--measure-out` 측정 상태 (`cargo xtask measure --viewer`, P1-14).
+struct MeasureRun {
+    out: PathBuf,
+    started: Instant,
+    frame: u64,
+    first_frame_ms: f64,
+    /// 스크롤 중 프레임별 CPU 시간 (ms, `eframe` `cpu_usage` — 앱 로직 + 그리기, vsync 대기 제외)
+    scroll_ms: Vec<f32>,
+}
 
 /// My-Notepad 메인 애플리케이션 상태.
 pub struct NotepadApp {
@@ -67,6 +83,8 @@ pub struct NotepadApp {
     scroll_sync: bool,
     theme: ThemeMode,
     last_command: Option<String>,
+
+    measure: Option<MeasureRun>,
 }
 
 impl NotepadApp {
@@ -107,6 +125,7 @@ impl NotepadApp {
             scroll_sync: true,
             theme: ThemeMode::System,
             last_command: None,
+            measure: None,
         };
         for file in files {
             app.open_path(&cc.egui_ctx, file);
@@ -126,7 +145,24 @@ impl NotepadApp {
         self.last_command = Some(summary);
 
         let tab = self.tabs.active_mut();
-        if tab.editor.handle_command(ctx, &mut tab.doc, command) {
+        if let Some(viewer) = &mut tab.viewer {
+            // 뷰어는 읽기 전용: 복사·모두 선택만 처리하고 편집 커맨드는 무시한다.
+            match command {
+                Command::Copy | Command::Cut => {
+                    if let Some(text) = viewer.selected_text(&tab.doc) {
+                        ctx.copy_text(text.to_owned());
+                    }
+                    return;
+                }
+                Command::SelectAll => {
+                    viewer.select_all(&tab.doc);
+                    viewer.request_focus();
+                    return;
+                }
+                Command::Undo | Command::Redo | Command::Paste => return,
+                _ => {}
+            }
+        } else if tab.editor.handle_command(ctx, &mut tab.doc, command) {
             return;
         }
 
@@ -421,20 +457,16 @@ impl NotepadApp {
                 if mode != OpenMode::Viewer {
                     document.set_readonly(false);
                 }
-                self.tabs.open_document(document, opened.file_readonly);
-                match mode {
-                    OpenMode::Edit if opened.file_readonly => self.show_notice(
+                let index = self.tabs.open_document(document, opened.file_readonly);
+                if let Some(tab) = self.tabs.get_mut(index) {
+                    // 5MB 초과는 뷰어, 1~5MB는 안내 막대 (ADR 0001)
+                    tab.apply_open_mode(mode);
+                }
+                if mode == OpenMode::Edit && opened.file_readonly {
+                    self.show_notice(
                         ctx,
                         "읽기 전용 파일입니다. 편집 후 저장하면 다른 이름으로 저장합니다.",
-                    ),
-                    OpenMode::Edit => {}
-                    // 안내 막대와 읽기 전용 뷰어는 P1-14
-                    OpenMode::EditWithNotice => {
-                        self.show_notice(ctx, "큰 파일이라 입력이 느릴 수 있습니다.");
-                    }
-                    OpenMode::Viewer => {
-                        self.show_notice(ctx, "5MB가 넘는 큰 파일이라 읽기 전용으로 열었습니다.")
-                    }
+                    );
                 }
             }
             Ok(OpenOutcome::Binary(loaded)) => {
@@ -680,6 +712,60 @@ impl NotepadApp {
         self.show_notice(ctx, text);
     }
 
+    /// 측정 모드를 켠다: 첫 화면 시간을 기록하고, 활성 탭을 처음부터 끝까지 훑으며 프레임 시간을 잰 뒤
+    /// `out` 파일에 `key=value` 줄로 쓴다 (마지막 줄 `done=1`).
+    pub fn enable_measure(&mut self, out: PathBuf, started: Instant) {
+        self.measure = Some(MeasureRun {
+            out,
+            started,
+            frame: 0,
+            first_frame_ms: 0.0,
+            scroll_ms: Vec::new(),
+        });
+    }
+
+    fn step_measure(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(m) = &mut self.measure else {
+            return;
+        };
+        m.frame += 1;
+        ctx.request_repaint();
+        if m.frame == 2 {
+            // 두 번째 프레임이 시작됐다 = 첫 프레임이 화면에 나갔다
+            m.first_frame_ms = m.started.elapsed().as_secs_f64() * 1000.0;
+        } else if m.frame > 3
+            && let Some(cpu) = frame.info().cpu_usage
+        {
+            // 직전 프레임(스크롤 위치를 바꾼 프레임)의 CPU 시간
+            m.scroll_ms.push(cpu * 1000.0);
+        }
+        if m.frame >= 3 && m.frame < 3 + MEASURE_SCROLL_FRAMES {
+            let step = m.frame - 3;
+            let tab = self.tabs.active_mut();
+            let lines = tab.doc.line_count() as u64;
+            if let Some(viewer) = &mut tab.viewer {
+                viewer.scroll_to_line((lines * step / MEASURE_SCROLL_FRAMES) as usize);
+            }
+        } else if m.frame >= 3 + MEASURE_SCROLL_FRAMES {
+            let avg = m.scroll_ms.iter().sum::<f32>() / m.scroll_ms.len().max(1) as f32;
+            let max = m.scroll_ms.iter().copied().fold(0.0, f32::max);
+            let viewer = self.tabs.active().viewer.is_some();
+            let report = format!(
+                "first_frame_ms={:.0}
+scroll_frame_ms_avg={avg:.1}
+scroll_frame_ms_max={max:.1}
+viewer={viewer}
+done=1
+",
+                m.first_frame_ms
+            );
+            if let Err(err) = std::fs::write(&m.out, report) {
+                log::warn!("측정 결과 쓰기 실패: {err}");
+            }
+            self.measure = None;
+        }
+    }
+
     // ── 끌어다 놓기 ──
 
     /// 창에 끌어다 놓은 파일을 탭으로 연다. 폴더는 아직 열 수 없으므로 건너뛰고 알려 준다 (사이드바는 Phase 2).
@@ -761,9 +847,10 @@ impl NotepadApp {
 }
 
 impl eframe::App for NotepadApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.frames += 1;
         let ctx = ui.ctx().clone();
+        self.step_measure(&ctx, frame);
 
         // 0. 창 닫기 요청 가로채기 (수정된 탭이 있으면 저장 확인), 끌어다 놓은 파일 열기
         self.intercept_close_request(&ctx);
@@ -846,8 +933,12 @@ impl eframe::App for NotepadApp {
                 ctx.format_shortcut(&self.keymap.chord_k())
             )
         });
-        let doc = &self.tabs.active().doc;
-        let (line, column, selected_chars) = editor::cursor_status(doc);
+        let active_tab = self.tabs.active();
+        let doc = &active_tab.doc;
+        let (line, column, selected_chars) = match &active_tab.viewer {
+            Some(viewer) => viewer.cursor_status(doc),
+            None => editor::cursor_status(doc),
+        };
         let status_info = StatusBarInfo {
             line,
             column,
@@ -879,12 +970,51 @@ impl eframe::App for NotepadApp {
             word_wrap: self.word_wrap,
             font: FontId::monospace(font_size),
         };
+        let mut switch_to_edit = false;
+        let mut edit_large = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(ui.style()).inner_margin(0))
             .show(ui, |ui| {
+                let viewer_above = self.size_policy.viewer_above();
                 let tab = self.tabs.active_mut();
-                tab.editor.show(ui, &mut tab.doc, &options);
+                let tab_id = tab.id();
+                if let Some(viewer) = &mut tab.viewer {
+                    let size = tab
+                        .doc
+                        .disk_metadata()
+                        .map_or(tab.doc.text().len() as u64, |m| m.byte_len);
+                    if viewer::readonly_bar(ui, &palette, size) {
+                        if size > viewer_above {
+                            edit_large = Some(Dialog::ConfirmEditLarge {
+                                tab_id,
+                                title: tab.doc.title(),
+                                size_bytes: size,
+                                limit_bytes: viewer_above,
+                            });
+                        } else {
+                            switch_to_edit = true;
+                        }
+                    }
+                    viewer.show(ui, &tab.doc, &options.font, &palette);
+                } else {
+                    if tab.size_notice {
+                        match viewer::size_banner(ui, &palette) {
+                            Some(viewer::BannerAction::ViewReadOnly) => tab.switch_to_viewer(),
+                            Some(viewer::BannerAction::Close) => tab.size_notice = false,
+                            None => {}
+                        }
+                    }
+                    if tab.viewer.is_none() {
+                        tab.editor.show(ui, &mut tab.doc, &options);
+                    }
+                }
             });
+        if switch_to_edit {
+            self.tabs.active_mut().switch_to_editor();
+        }
+        if let Some(dialog) = edit_large {
+            self.dialogs.push_back(dialog);
+        }
 
         // 6. 대화상자 (한 번에 하나씩)
         let mut current = self.dialogs.pop_front();
@@ -895,8 +1025,22 @@ impl eframe::App for NotepadApp {
         match outcome {
             Some(DialogOutcome::OpenBinary(loaded)) => {
                 let opened = file_io::open_binary_anyway(*loaded, LineEnding::default_for_os());
-                self.tabs
+                let index = self
+                    .tabs
                     .open_document(opened.document, opened.file_readonly);
+                if let Some(tab) = self.tabs.get_mut(index) {
+                    tab.binary = true;
+                    tab.apply_open_mode(opened.open_mode);
+                }
+            }
+            Some(DialogOutcome::OpenEditMode(tab_id)) => {
+                if let Some(tab) = self
+                    .tabs
+                    .index_of(tab_id)
+                    .and_then(|i| self.tabs.get_mut(i))
+                {
+                    tab.switch_to_editor();
+                }
             }
             Some(DialogOutcome::Activate(id)) => {
                 if let Some(index) = self.tabs.index_of(id) {
