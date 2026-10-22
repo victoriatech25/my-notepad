@@ -72,7 +72,7 @@ pub fn icon_label(ui: &mut egui::Ui, icon: FileIcon) {
     );
 }
 
-fn tab_icon(tabs: &Tabs, index: usize) -> FileIcon {
+pub fn tab_icon(tabs: &Tabs, index: usize) -> FileIcon {
     let tab = tabs.get(index).expect("탭 번호 범위");
     if tab.file_readonly || tab.doc.is_readonly() {
         READONLY_ICON

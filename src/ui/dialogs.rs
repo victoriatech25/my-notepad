@@ -1,19 +1,34 @@
-//! 모달 대화상자 (PLAN.md §3.6, ui-spec 대화상자 문구).
+//! 모달 대화상자 (PLAN.md §3.6, ui-spec §3 대화상자 문구, §7 창 목록).
 //!
 //! - P1-10: 파일 열기·저장 오류 안내, 바이너리 파일 열기 확인
-//! - P1-11: 미저장 확인(`저장 / 저장 안 함 / 취소`)과 여러 문서 순차 확인 추가 예정
+//! - P1-11: 미저장 확인(`저장 / 저장 안 함 / 취소`, 기본 버튼 `저장`, `Esc` = 취소)과
+//!   일괄 닫기 시 "이어서 닫을 탭 N개" 안내, 창 목록(체크해서 여러 창 닫기·이동)
+
+use std::collections::HashSet;
 
 use eframe::egui::{self, RichText};
 
 use crate::core::file_io::LoadedFile;
+use crate::tabs::Tabs;
+use crate::ui::tab_bar::{self, UNSAVED_PATH_HINT};
+use crate::ui::theme::Palette;
 
 /// 화면에 띄울 대화상자.
 #[derive(Debug)]
 pub enum Dialog {
     /// 확인 버튼만 있는 안내·오류.
     Message { title: String, body: String },
-    /// "바이너리 파일입니다. 그래도 여시겠습니까?"
+    /// "텍스트 파일이 아닌 것 같습니다" — 읽기 전용으로 열기 / 취소
     ConfirmBinary(Box<LoadedFile>),
+    /// "변경 내용을 저장할까요?" — 닫기 대기열에서 수정된 탭마다 띄운다.
+    Unsaved {
+        tab_id: u64,
+        title: String,
+        /// 이 탭 다음에 이어서 닫을 탭 수
+        remaining: usize,
+    },
+    /// 창 목록 (체크한 탭 ID)
+    WindowList { checked: HashSet<u64> },
 }
 
 /// 대화상자를 닫으며 사용자가 고른 결과.
@@ -21,6 +36,16 @@ pub enum Dialog {
 pub enum DialogOutcome {
     Dismissed,
     OpenBinary(Box<LoadedFile>),
+    /// 미저장 확인: 저장 후 닫기
+    Save(u64),
+    /// 미저장 확인: 저장하지 않고 닫기
+    Discard(u64),
+    /// 미저장 확인: 취소 (남은 닫기 대기열도 취소)
+    CancelClose,
+    /// 창 목록: 그 탭으로 이동
+    Activate(u64),
+    /// 창 목록: 체크한(또는 모든) 탭 닫기
+    CloseTabs(Vec<u64>),
 }
 
 impl Dialog {
@@ -30,69 +55,343 @@ impl Dialog {
             body: body.into(),
         }
     }
+
+    pub fn window_list() -> Self {
+        Self::WindowList {
+            checked: HashSet::new(),
+        }
+    }
 }
 
 /// 대화상자를 그린다. 닫히면 `dialog`를 비우고 결과를 돌려준다.
-pub fn show(ctx: &egui::Context, dialog: &mut Option<Dialog>) -> Option<DialogOutcome> {
-    let current = dialog.as_ref()?;
-    let mut confirm = false;
-    let mut dismiss = false;
+pub fn show(
+    ctx: &egui::Context,
+    dialog: &mut Option<Dialog>,
+    tabs: &Tabs,
+) -> Option<DialogOutcome> {
+    let current = dialog.as_mut()?;
+    let mut outcome = None;
+    let mut open_binary = false;
 
-    let modal = egui::Modal::new(egui::Id::unique("app-dialog")).show(ctx, |ui| {
-        ui.set_width(420.0);
-        match current {
-            Dialog::Message { title, body } => {
-                ui.heading(title);
-                ui.add_space(4.0);
-                ui.label(body);
-                ui.add_space(8.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let ok = ui.button(RichText::new("확인").strong());
-                    if ok.clicked() {
-                        dismiss = true;
-                    }
-                    ok.request_focus();
-                });
+    let modal = egui::Modal::new(egui::Id::unique("app-dialog")).show(ctx, |ui| match current {
+        Dialog::Message { title, body } => {
+            ui.set_width(420.0);
+            ui.heading(title.as_str());
+            ui.add_space(4.0);
+            ui.label(body.as_str());
+            ui.add_space(8.0);
+            buttons_right(ui, |ui| {
+                if default_button(ui, "확인").clicked() {
+                    outcome = Some(DialogOutcome::Dismissed);
+                }
+            });
+        }
+        Dialog::ConfirmBinary(loaded) => {
+            ui.set_width(420.0);
+            let name = loaded.path.file_name().map_or_else(
+                || loaded.path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            ui.heading("텍스트 파일이 아닌 것 같습니다");
+            ui.add_space(4.0);
+            ui.label(format!(
+                "\"{name}\"에 텍스트가 아닌 데이터가 있습니다. 열면 내용이 깨져 보이고, \
+                 저장하면 파일이 손상될 수 있습니다."
+            ));
+            ui.add_space(8.0);
+            buttons_right(ui, |ui| {
+                // 실수로 바이너리를 열지 않도록 Enter 기본 버튼은 "취소"
+                if default_button(ui, "취소").clicked() {
+                    outcome = Some(DialogOutcome::Dismissed);
+                }
+                if ui.button("읽기 전용으로 열기").clicked() {
+                    open_binary = true;
+                }
+            });
+        }
+        Dialog::Unsaved {
+            tab_id,
+            title,
+            remaining,
+        } => {
+            ui.set_width(420.0);
+            ui.heading("변경 내용을 저장할까요?");
+            ui.add_space(4.0);
+            ui.label(format!("\"{title}\"의 변경 내용이 저장되지 않았습니다."));
+            if *remaining > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "이어서 닫을 탭 {remaining}개 — 취소하면 남은 탭은 닫지 않습니다."
+                    ))
+                    .small()
+                    .weak(),
+                );
             }
-            Dialog::ConfirmBinary(loaded) => {
-                ui.heading("바이너리 파일입니다");
-                ui.add_space(4.0);
-                ui.label(format!(
-                    "\"{}\"은(는) 텍스트 파일이 아닌 것 같습니다. 그래도 여시겠습니까?\n\
-                     읽기 전용으로 열리며, 표시할 수 없는 바이트는 �로 보입니다.",
-                    loaded.path.file_name().map_or_else(
-                        || loaded.path.display().to_string(),
-                        |n| { n.to_string_lossy().into_owned() }
-                    )
-                ));
-                ui.add_space(8.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 실수로 바이너리를 열지 않도록 Enter 기본 버튼은 "취소"
-                    let cancel = ui.button(RichText::new("취소").strong());
-                    if cancel.clicked() {
-                        dismiss = true;
-                    }
-                    cancel.request_focus();
-                    if ui.button("읽기 전용으로 열기").clicked() {
-                        confirm = true;
-                    }
-                });
-            }
+            ui.add_space(8.0);
+            buttons_right(ui, |ui| {
+                if ui.button("취소").clicked() {
+                    outcome = Some(DialogOutcome::CancelClose);
+                }
+                if ui.button("저장 안 함").clicked() {
+                    outcome = Some(DialogOutcome::Discard(*tab_id));
+                }
+                // 실수로 변경 내용을 잃지 않도록 Enter 기본 버튼은 "저장"
+                if default_button(ui, "저장").clicked() {
+                    outcome = Some(DialogOutcome::Save(*tab_id));
+                }
+            });
+        }
+        Dialog::WindowList { checked } => {
+            outcome = window_list(ui, checked, tabs);
         }
     });
-    if modal.should_close() {
-        dismiss = true;
+
+    // 바깥 클릭·Esc: 미저장 확인에서는 취소, 그 밖에는 그냥 닫기
+    if outcome.is_none() && modal.should_close() {
+        outcome = Some(match current {
+            Dialog::Unsaved { .. } => DialogOutcome::CancelClose,
+            _ => DialogOutcome::Dismissed,
+        });
     }
 
-    if confirm {
-        match dialog.take() {
-            Some(Dialog::ConfirmBinary(loaded)) => Some(DialogOutcome::OpenBinary(loaded)),
-            _ => Some(DialogOutcome::Dismissed),
-        }
-    } else if dismiss {
+    // 바이너리 "읽기 전용으로 열기"는 대화상자가 가진 파일을 넘겨야 하므로 꺼내서 돌려준다.
+    if open_binary && let Some(Dialog::ConfirmBinary(loaded)) = dialog.take() {
+        return Some(DialogOutcome::OpenBinary(loaded));
+    }
+    if outcome.is_some() {
         *dialog = None;
-        Some(DialogOutcome::Dismissed)
-    } else {
-        None
+    }
+    outcome
+}
+
+fn buttons_right(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
+}
+
+/// Enter로 눌리는 기본 버튼 (굵게 + 키보드 포커스).
+///
+/// 포커스가 대화상자 밖(뒤의 에디터 등)에 있거나 없으면 이 버튼으로 가져온다.
+/// 대화상자 안에서 `Tab`으로 다른 버튼에 옮긴 포커스는 빼앗지 않는다.
+fn default_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let response = ui.button(RichText::new(label).strong());
+    let ctx = ui.ctx();
+    let focus_in_dialog = ctx
+        .memory(|m| m.focused())
+        .and_then(|id| ctx.read_response(id))
+        .is_some_and(|r| r.layer_id == ui.layer_id());
+    if !focus_in_dialog {
+        response.request_focus();
+    }
+    response
+}
+
+/// 창 목록 대화상자 (ui-spec §7): 체크박스 · 아이콘 · 이름(현재 창 굵게) · 수정 여부 · 경로 /
+/// 전체 선택 / `이동`(하나 체크 시) · `선택한 창 닫기 (N)` · `모든 창 닫기` · `닫기`, 줄 더블클릭으로 이동.
+fn window_list(
+    ui: &mut egui::Ui,
+    checked: &mut HashSet<u64>,
+    tabs: &Tabs,
+) -> Option<DialogOutcome> {
+    let palette = Palette::from_visuals(ui.visuals());
+    let mut outcome = None;
+    ui.set_width(600.0);
+    ui.heading("창 목록");
+    ui.label(
+        RichText::new(
+            "체크해서 여러 창을 한꺼번에 닫을 수 있습니다. 줄을 더블클릭하면 그 창으로 이동합니다.",
+        )
+        .small()
+        .weak(),
+    );
+    ui.add_space(4.0);
+
+    // 닫힌 탭의 체크는 버린다
+    checked.retain(|id| tabs.index_of(*id).is_some());
+    let mut all = checked.len() == tabs.len();
+    if ui.checkbox(&mut all, "전체 선택").changed() {
+        if all {
+            checked.extend(tabs.iter().map(|t| t.id()));
+        } else {
+            checked.clear();
+        }
+    }
+    ui.separator();
+
+    egui::ScrollArea::vertical()
+        .max_height(360.0)
+        .show(ui, |ui| {
+            egui::Grid::new("window-list")
+                .striped(true)
+                .num_columns(4)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    for (i, tab) in tabs.iter().enumerate() {
+                        let id = tab.id();
+                        let mut on = checked.contains(&id);
+                        if ui.checkbox(&mut on, "").changed() {
+                            if on {
+                                checked.insert(id);
+                            } else {
+                                checked.remove(&id);
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            tab_bar::icon_label(ui, tab_bar::tab_icon(tabs, i));
+                            let mut text = RichText::new(tab.doc.title());
+                            if i == tabs.active_index() {
+                                text = text.strong();
+                            }
+                            let row = ui.add(
+                                egui::Label::new(text)
+                                    .selectable(false)
+                                    .sense(egui::Sense::click()),
+                            );
+                            if row.double_clicked() {
+                                outcome = Some(DialogOutcome::Activate(id));
+                            }
+                        });
+                        if tab.doc.is_modified() {
+                            ui.label(RichText::new("● 수정됨").color(palette.modified_marker));
+                        } else {
+                            ui.label("");
+                        }
+                        let path = tab.doc.path().map_or_else(
+                            || UNSAVED_PATH_HINT.to_owned(),
+                            |p| p.display().to_string(),
+                        );
+                        ui.label(RichText::new(path).small().weak());
+                        ui.end_row();
+                    }
+                });
+        });
+
+    ui.separator();
+    // 탭 순서대로 닫도록 목록 순서로 정렬
+    let selected: Vec<u64> = tabs
+        .iter()
+        .map(|t| t.id())
+        .filter(|id| checked.contains(id))
+        .collect();
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(selected.len() == 1, egui::Button::new("이동"))
+            .on_hover_text("체크한 창 하나로 이동")
+            .clicked()
+        {
+            outcome = selected.first().copied().map(DialogOutcome::Activate);
+        }
+        if ui
+            .add_enabled(
+                !selected.is_empty(),
+                egui::Button::new(format!("선택한 창 닫기 ({})", selected.len())),
+            )
+            .clicked()
+        {
+            outcome = Some(DialogOutcome::CloseTabs(selected.clone()));
+        }
+        if ui.button("모든 창 닫기").clicked() {
+            outcome = Some(DialogOutcome::CloseTabs(
+                tabs.iter().map(|t| t.id()).collect(),
+            ));
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button(RichText::new("닫기").strong()).clicked() {
+                outcome = Some(DialogOutcome::Dismissed);
+            }
+        });
+    });
+    outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::{Event, Key, Modifiers, RawInput};
+
+    fn frame(
+        ctx: &egui::Context,
+        dialog: &mut Option<Dialog>,
+        tabs: &Tabs,
+        events: Vec<Event>,
+    ) -> Option<DialogOutcome> {
+        let raw = RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let mut outcome = None;
+        let mut full = ctx.run_ui(raw, |ui| {
+            outcome = show(ui.ctx(), dialog, tabs);
+        });
+        full.textures_delta.clear();
+        outcome
+    }
+
+    fn press(key: Key) -> Event {
+        Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    fn unsaved(tab_id: u64) -> Option<Dialog> {
+        Some(Dialog::Unsaved {
+            tab_id,
+            title: "회의록.txt".into(),
+            remaining: 2,
+        })
+    }
+
+    #[test]
+    fn unsaved_enter_saves_and_escape_cancels() {
+        let tabs = Tabs::new();
+
+        let ctx = egui::Context::default();
+        let mut dialog = unsaved(7);
+        assert!(frame(&ctx, &mut dialog, &tabs, vec![]).is_none());
+        let outcome = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Enter)]);
+        assert!(
+            matches!(outcome, Some(DialogOutcome::Save(7))),
+            "{outcome:?}"
+        );
+        assert!(dialog.is_none());
+
+        let ctx = egui::Context::default();
+        let mut dialog = unsaved(7);
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let outcome = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Escape)]);
+        assert!(
+            matches!(outcome, Some(DialogOutcome::CancelClose)),
+            "{outcome:?}"
+        );
+        assert!(dialog.is_none());
+    }
+
+    #[test]
+    fn binary_enter_cancels() {
+        let tabs = Tabs::new();
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::ConfirmBinary(Box::new(LoadedFile {
+            path: "image.dat".into(),
+            bytes: vec![0, 1, 2],
+            metadata: crate::core::document::DiskMetadata {
+                modified_time: None,
+                byte_len: 3,
+            },
+            readonly: false,
+            open_mode: crate::core::file_io::OpenMode::Edit,
+        })));
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let outcome = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Enter)]);
+        assert!(
+            matches!(outcome, Some(DialogOutcome::Dismissed)),
+            "{outcome:?}"
+        );
     }
 }

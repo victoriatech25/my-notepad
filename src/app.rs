@@ -5,7 +5,9 @@
 //! - P1-03: 전역 `Command` 열거형, OS별 `Keymap`, 위젯 선처리 `KeyDispatcher`, 상단 7개 메뉴바 연결
 //! - P1-09: 본문을 실제 에디터(`ui::editor`)와 문서 모델(`Document`)로 교체, 편집 커맨드·상태 표시줄 커서 연결
 //! - P1-10: 멀티 탭(`tabs::Tabs`, `ui::tab_bar`), 파일 열기/저장/다른 이름으로 저장(`rfd` 대화상자 + `core::file_io`),
-//!   탭 이동·정렬·닫기 커맨드, 창 메뉴 탭 목록, 창 제목. 수정된 탭은 저장 확인(P1-11) 전까지 닫지 않는다.
+//!   탭 이동·정렬·닫기 커맨드, 창 메뉴 탭 목록, 창 제목
+//! - P1-11: 닫기 대기열 — 탭 닫기·일괄 닫기·창 목록·앱 종료 시 수정된 탭마다 `저장 / 저장 안 함 / 취소` 확인,
+//!   `취소`하면 남은 대기열과 종료를 모두 중단. 창 닫기(X·`Alt+F4`·`Cmd+Q`)는 가로채서 같은 대기열로 처리
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -44,6 +46,14 @@ pub struct NotepadApp {
     notice: Option<(String, f64)>,
     window_title: String,
 
+    // P1-11 닫기 대기열·종료 가로채기
+    /// 닫을 탭 ID (앞에서부터 하나씩 처리)
+    close_queue: VecDeque<u64>,
+    /// 대기열을 모두 처리하면 앱을 종료한다.
+    quit_after_close: bool,
+    /// 저장 확인을 마쳤으므로 다음 창 닫기 요청은 가로채지 않는다.
+    allow_close: bool,
+
     // P1-03 커맨드·단축키 및 메뉴 상태
     keymap: Keymap,
     key_dispatcher: KeyDispatcher,
@@ -81,6 +91,9 @@ impl NotepadApp {
             dialogs: VecDeque::new(),
             notice: None,
             window_title: String::new(),
+            close_queue: VecDeque::new(),
+            quit_after_close: false,
+            allow_close: false,
             keymap: Keymap::current(),
             key_dispatcher: KeyDispatcher::new(),
             sidebar_open: true,
@@ -120,8 +133,12 @@ impl NotepadApp {
                 self.tabs.new_untitled();
             }
             Command::OpenFile => self.open_with_dialog(ctx),
-            Command::Save => self.save_active(ctx, false),
-            Command::SaveAs => self.save_active(ctx, true),
+            Command::Save => {
+                self.save_active(ctx, false);
+            }
+            Command::SaveAs => {
+                self.save_active(ctx, true);
+            }
 
             // ── 탭 이동·정렬·닫기 ──
             Command::NextTab => self.tabs.next(),
@@ -132,14 +149,14 @@ impl NotepadApp {
             Command::LastTab => self.tabs.last(),
             Command::MoveTabLeft => self.tabs.move_active(false),
             Command::MoveTabRight => self.tabs.move_active(true),
-            Command::CloseTab => self.close_tabs(ctx, &[active]),
+            Command::CloseTab => self.close_tabs(&[active]),
             Command::CloseOtherTabs => {
                 let others: Vec<usize> = (0..count).filter(|&i| i != active).collect();
-                self.close_tabs(ctx, &others);
+                self.close_tabs(&others);
             }
             Command::CloseTabsToRight => {
                 let right: Vec<usize> = (active + 1..count).collect();
-                self.close_tabs(ctx, &right);
+                self.close_tabs(&right);
             }
             Command::CloseSavedTabs => {
                 let all: Vec<usize> = (0..count).collect();
@@ -147,9 +164,10 @@ impl NotepadApp {
             }
             Command::CloseAllTabs => {
                 let all: Vec<usize> = (0..count).collect();
-                self.close_tabs(ctx, &all);
+                self.close_tabs(&all);
             }
             Command::CopyTabPath => self.copy_tab_path(ctx, active),
+            Command::ShowWindowList => self.dialogs.push_back(Dialog::window_list()),
 
             // ── 보기 ──
             Command::ToggleSidebar => {
@@ -214,14 +232,14 @@ impl NotepadApp {
             TabAction::New => {
                 self.tabs.new_untitled();
             }
-            TabAction::Close(i) => self.close_tabs(ctx, &[i]),
+            TabAction::Close(i) => self.close_tabs(&[i]),
             TabAction::CloseOthers(i) => {
                 let others: Vec<usize> = (0..count).filter(|&j| j != i).collect();
-                self.close_tabs(ctx, &others);
+                self.close_tabs(&others);
             }
             TabAction::CloseRight(i) => {
                 let right: Vec<usize> = (i + 1..count).collect();
-                self.close_tabs(ctx, &right);
+                self.close_tabs(&right);
             }
             TabAction::CloseSaved => {
                 let all: Vec<usize> = (0..count).collect();
@@ -229,7 +247,7 @@ impl NotepadApp {
             }
             TabAction::CloseAll => {
                 let all: Vec<usize> = (0..count).collect();
-                self.close_tabs(ctx, &all);
+                self.close_tabs(&all);
             }
             TabAction::CopyPath(i) => self.copy_tab_path(ctx, i),
             TabAction::SetViewMode(mode) => {
@@ -240,14 +258,103 @@ impl NotepadApp {
 
     // ── 탭 닫기·경로 복사 ──
 
-    fn close_tabs(&mut self, ctx: &egui::Context, indices: &[usize]) {
-        let skipped = self.tabs.close_unmodified(indices);
-        if skipped > 0 {
-            self.show_notice(
-                ctx,
-                format!("저장하지 않은 변경이 있는 탭 {skipped}개는 닫지 않았습니다. 저장한 뒤 닫아 주세요."),
-            );
+    /// 탭을 닫기 대기열에 넣는다. 실제로 닫는 것은 [`Self::process_close_queue`].
+    fn close_tabs(&mut self, indices: &[usize]) {
+        let ids = self.tabs.ids_of(indices);
+        self.queue_close(ids);
+    }
+
+    fn queue_close(&mut self, ids: Vec<u64>) {
+        for id in ids {
+            if !self.close_queue.contains(&id) {
+                self.close_queue.push_back(id);
+            }
         }
+    }
+
+    /// 대화상자가 없을 때 매 프레임 호출: 대기열의 탭을 앞에서부터 닫고, 수정된 탭이면 저장 확인을 띄우고 멈춘다.
+    fn process_close_queue(&mut self, ctx: &egui::Context) {
+        while self.dialogs.is_empty()
+            && let Some(id) = self.close_queue.pop_front()
+        {
+            let Some(index) = self.tabs.index_of(id) else {
+                continue;
+            };
+            let tab = self.tabs.get(index).expect("index_of 결과");
+            if tab.doc.is_modified() {
+                let title = tab.doc.title();
+                // 무엇을 묻는지 보이도록 그 탭으로 이동한다.
+                self.tabs.activate(index);
+                self.close_queue.push_front(id);
+                self.dialogs.push_back(Dialog::Unsaved {
+                    tab_id: id,
+                    title,
+                    remaining: self.close_queue.len() - 1,
+                });
+                return;
+            }
+            self.tabs.close_ids(&[id]);
+        }
+        if self.dialogs.is_empty() && self.close_queue.is_empty() && self.quit_after_close {
+            self.quit_after_close = false;
+            self.allow_close = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+    }
+
+    /// 미저장 확인 결과를 처리한다.
+    fn resolve_unsaved(&mut self, ctx: &egui::Context, outcome: &DialogOutcome) {
+        match *outcome {
+            DialogOutcome::Save(id) => {
+                let saved = match self.tabs.index_of(id) {
+                    Some(index) => {
+                        self.tabs.activate(index);
+                        self.save_active(ctx, false)
+                    }
+                    None => false,
+                };
+                if saved {
+                    self.close_queue.retain(|&q| q != id);
+                    self.tabs.close_ids(&[id]);
+                } else {
+                    // 다른 이름으로 저장을 취소했거나 저장에 실패하면 닫지 않고 멈춘다.
+                    self.cancel_close();
+                }
+            }
+            DialogOutcome::Discard(id) => {
+                self.close_queue.retain(|&q| q != id);
+                self.tabs.close_ids(&[id]);
+            }
+            DialogOutcome::CancelClose => self.cancel_close(),
+            _ => {}
+        }
+    }
+
+    fn cancel_close(&mut self) {
+        self.close_queue.clear();
+        self.quit_after_close = false;
+    }
+
+    /// 창 닫기 요청(X 버튼·`Alt+F4`·`Cmd+Q`·종료 메뉴)을 가로채 수정된 탭마다 저장 확인을 받는다.
+    fn intercept_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) || self.allow_close {
+            return;
+        }
+        let modified: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter(|t| t.doc.is_modified())
+            .map(|t| t.id())
+            .collect();
+        if modified.is_empty() {
+            return;
+        }
+        ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+        if self.quit_after_close {
+            return; // 이미 종료 확인 중
+        }
+        self.quit_after_close = true;
+        self.queue_close(modified);
     }
 
     fn copy_tab_path(&mut self, ctx: &egui::Context, index: usize) {
@@ -358,7 +465,9 @@ impl NotepadApp {
     }
 
     /// 활성 탭을 저장한다. 새 문서·읽기 전용 파일·`save_as`면 다른 이름으로 저장 대화상자를 연다.
-    fn save_active(&mut self, ctx: &egui::Context, save_as: bool) {
+    ///
+    /// 저장했으면 `true`. 대화상자를 취소했거나 실패하면 `false`.
+    fn save_active(&mut self, ctx: &egui::Context, save_as: bool) -> bool {
         let tab = self.tabs.active();
         let file_readonly = tab.file_readonly;
         let has_path = tab.doc.path().is_some();
@@ -367,7 +476,7 @@ impl NotepadApp {
         }
         let target = if save_as || !has_path || file_readonly {
             let Some(path) = self.save_dialog() else {
-                return;
+                return false;
             };
             if let Some(other) = self.tabs.find_path(&path)
                 && other != self.tabs.active_index()
@@ -379,7 +488,7 @@ impl NotepadApp {
                         path.display()
                     ),
                 ));
-                return;
+                return false;
             }
             Some(path)
         } else {
@@ -407,10 +516,11 @@ impl NotepadApp {
                 } else {
                     self.show_notice(ctx, format!("\"{title}\" 저장됨"));
                 }
+                true
             }
             Err(SaveError::Io(err)) if err.kind() == FileIoErrorKind::ReadOnly && !save_as => {
                 tab.file_readonly = true;
-                self.save_active(ctx, true);
+                self.save_active(ctx, true)
             }
             Err(SaveError::Unmappable(err)) => {
                 let first = &err.unmappable[0];
@@ -426,6 +536,7 @@ impl NotepadApp {
                         first.ch
                     ),
                 ));
+                false
             }
             Err(SaveError::NoPath) => self.save_active(ctx, true),
             Err(SaveError::Io(err)) => {
@@ -433,6 +544,7 @@ impl NotepadApp {
                     "저장하지 못했습니다",
                     format!("{err}\n원본 파일은 바뀌지 않았습니다."),
                 ));
+                false
             }
         }
     }
@@ -463,6 +575,9 @@ impl eframe::App for NotepadApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.frames += 1;
         let ctx = ui.ctx().clone();
+
+        // 0. 창 닫기 요청 가로채기 (수정된 탭이 있으면 저장 확인)
+        self.intercept_close_request(&ctx);
 
         // 1. 위젯보다 먼저 전역 단축키를 소비·디스패치한다 (PLAN.md §3.5). 대화상자가 떠 있으면 막는다.
         if self.dialogs.is_empty()
@@ -575,17 +690,32 @@ impl eframe::App for NotepadApp {
 
         // 6. 대화상자 (한 번에 하나씩)
         let mut current = self.dialogs.pop_front();
-        match dialogs::show(&ctx, &mut current) {
+        let outcome = dialogs::show(&ctx, &mut current, &self.tabs);
+        if let Some(dialog) = current {
+            self.dialogs.push_front(dialog);
+        }
+        match outcome {
             Some(DialogOutcome::OpenBinary(loaded)) => {
                 let opened = file_io::open_binary_anyway(*loaded, LineEnding::default_for_os());
                 self.tabs
                     .open_document(opened.document, opened.file_readonly);
             }
+            Some(DialogOutcome::Activate(id)) => {
+                if let Some(index) = self.tabs.index_of(id) {
+                    self.tabs.activate(index);
+                }
+            }
+            Some(DialogOutcome::CloseTabs(ids)) => self.queue_close(ids),
+            Some(
+                ref unsaved @ (DialogOutcome::Save(_)
+                | DialogOutcome::Discard(_)
+                | DialogOutcome::CancelClose),
+            ) => self.resolve_unsaved(&ctx, unsaved),
             Some(DialogOutcome::Dismissed) | None => {}
         }
-        if let Some(dialog) = current {
-            self.dialogs.push_front(dialog);
-        }
+
+        // 7. 닫기 대기열 (대화상자가 없을 때만 진행)
+        self.process_close_queue(&ctx);
 
         self.update_window_title(&ctx);
     }
