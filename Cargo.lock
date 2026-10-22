@@ -2000,6 +2000,7 @@ dependencies = [
  "encoding_rs",
  "log",
  "memmap2",
+ "tempfile",
  "ttf-parser",
 ]
 
