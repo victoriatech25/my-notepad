@@ -521,7 +521,7 @@ impl Document {
     /// 전체 텍스트를 새 문자열로 교체하고(내부 `LF` 정규화 적용), 변경이 있으면 Undo 이력·수정 플래그·수정 카운터를 갱신한다.
     ///
     /// 읽기 전용(`readonly == true`)이거나 정규화 후 텍스트가 기존과 동일하면 아무것도 하지 않고 `false`를 반환한다.
-    pub fn set_text(&mut self, new_text: impl Into<String>) -> bool {
+    pub fn set_text(&mut self, new_text: impl AsRef<str>) -> bool {
         let cursor = self.cursor_char_range.clone();
         self.apply_edit_with_cursor(new_text, cursor)
     }
@@ -529,21 +529,21 @@ impl Document {
     /// 편집 후 커서 위치까지 함께 지정하여 텍스트를 변경한다 (에디터 위젯의 입력 경로).
     ///
     /// 이전 텍스트와 비교해 바뀐 구간만 Undo 이력에 기록하고, 줄바꿈 없는 연속 입력·삭제·IME 조합은
-    /// 하나의 Undo 단계로 묶는다.
+    /// 하나의 Undo 단계로 묶는다. 전체 텍스트를 복사하지 않도록 빌려서 받는다 (`\r`이 있을 때만 정규화 사본).
     pub fn apply_edit_with_cursor(
         &mut self,
-        new_text: impl Into<String>,
+        new_text: impl AsRef<str>,
         cursor_after: Range<usize>,
     ) -> bool {
         if self.readonly {
             return false;
         }
 
-        let raw: String = new_text.into();
-        let normalized = if raw.as_bytes().contains(&b'\r') {
-            normalize_to_lf(&raw)
+        let raw = new_text.as_ref();
+        let normalized: std::borrow::Cow<'_, str> = if raw.as_bytes().contains(&b'\r') {
+            normalize_to_lf(raw).into()
         } else {
-            raw
+            raw.into()
         };
 
         let Some((start, old_end, new_end)) = diff_range(self.buffer.as_str(), &normalized) else {
