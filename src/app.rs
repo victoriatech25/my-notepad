@@ -10,6 +10,7 @@
 //!   `취소`하면 남은 대기열과 종료를 모두 중단. 창 닫기(X·`Alt+F4`·`Cmd+Q`)는 가로채서 같은 대기열로 처리
 //! - P1-12: 상태 표시줄 인코딩·줄바꿈 팝업, 인코딩으로 다시 읽기(수정 중이면 확인), 변환 저장,
 //!   표현 불가 문자 경고(UTF-8로 저장 · `?`로 바꿔 저장 · 취소), 손상된 문서 저장 경고, 명령줄 파일 인자
+//! - P1-13: 파일을 창에 끌어다 놓아 열기(놓기 전 안내 덧그림, 폴더는 건너뜀), 명령줄 인자 해석은 `cli.rs`
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -679,6 +680,64 @@ impl NotepadApp {
         self.show_notice(ctx, text);
     }
 
+    // ── 끌어다 놓기 ──
+
+    /// 창에 끌어다 놓은 파일을 탭으로 연다. 폴더는 아직 열 수 없으므로 건너뛰고 알려 준다 (사이드바는 Phase 2).
+    fn open_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        let mut folders = 0;
+        for path in dropped {
+            if path.is_dir() {
+                folders += 1;
+            } else {
+                self.open_path(ctx, &path);
+            }
+        }
+        if folders > 0 {
+            self.show_notice(
+                ctx,
+                format!("폴더 {folders}개는 건너뛰었습니다. 파일을 끌어다 놓아 주세요."),
+            );
+        }
+        // 다른 앱에서 끌어 온 뒤 바로 입력할 수 있게 창을 앞으로 가져온다.
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+    }
+
+    /// 파일을 창 위로 끌고 있는 동안 "놓으면 탭으로 엽니다" 안내를 덧그린다.
+    fn paint_drop_overlay(ctx: &egui::Context) {
+        let count = ctx.input(|i| i.raw.hovered_files.len());
+        if count == 0 {
+            return;
+        }
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::unique("drop-overlay"),
+        ));
+        let rect = ctx.content_rect();
+        painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(150));
+        let text = if count > 1 {
+            format!("여기에 놓으면 파일 {count}개를 탭으로 엽니다")
+        } else {
+            "여기에 놓으면 탭으로 엽니다".to_owned()
+        };
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            FontId::proportional(22.0),
+            egui::Color32::WHITE,
+        );
+    }
+
     // ── 안내·창 제목 ──
 
     fn show_notice(&mut self, ctx: &egui::Context, text: impl Into<String>) {
@@ -706,8 +765,9 @@ impl eframe::App for NotepadApp {
         self.frames += 1;
         let ctx = ui.ctx().clone();
 
-        // 0. 창 닫기 요청 가로채기 (수정된 탭이 있으면 저장 확인)
+        // 0. 창 닫기 요청 가로채기 (수정된 탭이 있으면 저장 확인), 끌어다 놓은 파일 열기
         self.intercept_close_request(&ctx);
+        self.open_dropped_files(&ctx);
 
         // 1. 위젯보다 먼저 전역 단축키를 소비·디스패치한다 (PLAN.md §3.5). 대화상자가 떠 있으면 막는다.
         if self.dialogs.is_empty()
@@ -866,6 +926,9 @@ impl eframe::App for NotepadApp {
 
         // 7. 닫기 대기열 (대화상자가 없을 때만 진행)
         self.process_close_queue(&ctx);
+
+        // 8. 끌어다 놓기 안내 (맨 위에 덧그림)
+        Self::paint_drop_overlay(&ctx);
 
         self.update_window_title(&ctx);
     }

@@ -4,62 +4,17 @@
 //! - `--test-panic`: panic hook이 로그 파일에 정보를 남기는지 검증하기 위한 플래그
 //! - `--font-report`: 창을 띄우지 않고 OS 폰트 Fallback 체인 로드 보고서를 출력 (자동 검증용)
 //! - `--log-file <경로>`: 로그 파일 경로 수동 지정 (자동 테스트용)
-//! - 그 밖의 인자는 열 파일 경로 (P1-12에서 `xtask try encoding`용으로 추가, P1-13에서 확장)
+//! - 그 밖의 인자는 열 파일 경로 — 탭으로 연다 (`cli.rs`, P1-13: 상대 경로·`--`·탐색기 연결 프로그램)
 //! - `eframe` `glow` 렌더러로 네이티브 창 기동
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
-
 use eframe::egui;
-use my_notepad::{app, fonts, logging};
-
-struct CliArgs {
-    log_file: Option<PathBuf>,
-    test_panic: bool,
-    font_report: bool,
-    files: Vec<PathBuf>,
-}
-
-impl CliArgs {
-    fn parse() -> Self {
-        let mut args = std::env::args().skip(1);
-        let mut log_file = None;
-        let mut test_panic = false;
-        let mut font_report = false;
-        let mut files = Vec::new();
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--test-panic" => test_panic = true,
-                "--font-report" => font_report = true,
-                "--log-file" => {
-                    if let Some(p) = args.next() {
-                        log_file = Some(PathBuf::from(p));
-                    }
-                }
-                _ => {
-                    if let Some(p) = arg.strip_prefix("--log-file=") {
-                        log_file = Some(PathBuf::from(p));
-                    } else if !arg.starts_with("--") {
-                        files.push(PathBuf::from(arg));
-                    }
-                }
-            }
-        }
-
-        Self {
-            log_file,
-            test_panic,
-            font_report,
-            files,
-        }
-    }
-}
+use my_notepad::{app, cli::CliArgs, fonts, logging};
 
 fn main() -> eframe::Result {
-    let cli = CliArgs::parse();
-    let log_path = logging::init(cli.log_file);
+    let cli = CliArgs::from_env();
+    let log_path = logging::init(cli.log_file.clone());
     log::info!(
         "My-Notepad v{} 기동 ({}/{})",
         env!("CARGO_PKG_VERSION"),
@@ -68,6 +23,9 @@ fn main() -> eframe::Result {
     );
     if let Some(path) = &log_path {
         log::info!("로그 파일: {}", path.display());
+    }
+    for flag in &cli.unknown {
+        log::warn!("알 수 없는 명령줄 플래그 무시: {flag}");
     }
 
     if cli.test_panic {
@@ -84,7 +42,9 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("My-Notepad")
             .with_inner_size([1200.0, 780.0])
-            .with_min_inner_size([480.0, 320.0]),
+            .with_min_inner_size([480.0, 320.0])
+            // 탐색기에서 파일을 끌어다 놓아 열기 (P1-13)
+            .with_drag_and_drop(true),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
