@@ -32,6 +32,10 @@ pub struct Palette {
     pub dialog_title_bg: Color32,
     /// 대화상자 버튼 띠 배경 (`dialog_footer_bg`)
     pub dialog_footer_bg: Color32,
+    /// 텍스트 선택 및 선택된 메뉴/버튼 강조 배경 (`selection_bg`)
+    pub selection_bg: Color32,
+    /// 텍스트 선택 및 선택된 메뉴/버튼 글자 스트로크 (`selection_stroke`)
+    pub selection_stroke: Color32,
 }
 
 impl Palette {
@@ -59,6 +63,9 @@ impl Palette {
             cursor_block: Color32::from_rgba_unmultiplied(0x6C, 0xB4, 0xFF, 24),
             dialog_title_bg: Color32::from_rgb(0x1B, 0x22, 0x33),
             dialog_footer_bg: Color32::from_gray(20),
+            // 기본 egui의 쨍한 청록(#005C80) 대신 톤을 낮춘 차분한 슬레이트 네이비
+            selection_bg: Color32::from_rgb(0x26, 0x46, 0x69),
+            selection_stroke: Color32::from_rgb(0xE0, 0xEC, 0xF8),
         }
     }
 
@@ -77,8 +84,39 @@ impl Palette {
             cursor_block: Color32::from_rgba_unmultiplied(0x1E, 0x6F, 0xD9, 20),
             dialog_title_bg: Color32::from_rgb(0xE3, 0xEA, 0xF5),
             dialog_footer_bg: Color32::from_gray(236),
+            // 기본 egui의 쨍한 하늘색(#90D1FF) 대신 톤을 낮춘 부드러운 소프트 블루
+            selection_bg: Color32::from_rgb(0xCE, 0xDF, 0xF2),
+            selection_stroke: Color32::from_rgb(0x1A, 0x36, 0x5D),
         }
     }
+}
+
+/// 다크 모드용 커스텀 `egui::Visuals`를 반환한다 (강조색 톤 다운).
+pub fn dark_visuals() -> Visuals {
+    let mut visuals = Visuals::dark();
+    let palette = Palette::dark();
+    visuals.selection = eframe::egui::style::Selection {
+        bg_fill: palette.selection_bg,
+        stroke: eframe::egui::Stroke::new(1.0, palette.selection_stroke),
+    };
+    visuals
+}
+
+/// 라이트 모드용 커스텀 `egui::Visuals`를 반환한다 (강조색 톤 다운).
+pub fn light_visuals() -> Visuals {
+    let mut visuals = Visuals::light();
+    let palette = Palette::light();
+    visuals.selection = eframe::egui::style::Selection {
+        bg_fill: palette.selection_bg,
+        stroke: eframe::egui::Stroke::new(1.0, palette.selection_stroke),
+    };
+    visuals
+}
+
+/// egui Context에 My-Notepad 커스텀 테마 Visuals를 등록한다.
+pub fn configure_visuals(ctx: &eframe::egui::Context) {
+    ctx.set_visuals_of(eframe::egui::Theme::Dark, dark_visuals());
+    ctx.set_visuals_of(eframe::egui::Theme::Light, light_visuals());
 }
 
 #[cfg(test)]
@@ -93,5 +131,29 @@ mod tests {
         assert_eq!(light, Palette::light());
         assert_ne!(dark.smart_highlight, light.smart_highlight);
         assert_ne!(dark.search_match, light.search_match);
+        assert_ne!(dark.selection_bg, light.selection_bg);
+    }
+
+    #[test]
+    fn custom_visuals_apply_toned_down_selection() {
+        let default_dark = Visuals::dark();
+        let custom_dark = dark_visuals();
+        // 기본 egui 쨍한 청록색(0, 92, 128)과 다른 차분한 색상이 적용되었는지 확인
+        assert_ne!(
+            custom_dark.selection.bg_fill,
+            default_dark.selection.bg_fill
+        );
+        assert_eq!(custom_dark.selection.bg_fill, Palette::dark().selection_bg);
+
+        let default_light = Visuals::light();
+        let custom_light = light_visuals();
+        assert_ne!(
+            custom_light.selection.bg_fill,
+            default_light.selection.bg_fill
+        );
+        assert_eq!(
+            custom_light.selection.bg_fill,
+            Palette::light().selection_bg
+        );
     }
 }

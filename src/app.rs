@@ -32,7 +32,7 @@ use crate::ui::{
     menu_bar::{self, MenuBarState, MenuTabEntry},
     status_bar::{self, StatusBarInfo},
     tab_bar::{self, TabAction, TabBarState, UNSAVED_PATH_HINT},
-    theme::Palette,
+    theme::{self, Palette},
     viewer,
 };
 
@@ -103,6 +103,7 @@ impl NotepadApp {
     pub fn new(cc: &eframe::CreationContext<'_>, files: &[PathBuf]) -> Self {
         let (defs, report) = fonts::explicit_chain();
         cc.egui_ctx.set_fonts(defs);
+        theme::configure_visuals(&cc.egui_ctx);
 
         log::info!(
             "폰트 체인 로드 완료 ({:.2} ms, 성공 {}개, 실패 {}개)",
