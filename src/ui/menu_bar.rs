@@ -3,7 +3,9 @@
 //! 모든 메뉴 항목은 [`Keymap`]을 통해 현재 OS에 맞는 단축키 표기를 오른쪽에 표시하고,
 //! 클릭 시 [`Command`]를 반환하여 단축키 입력과 완전히 동일한 경로(`app.rs`)로 처리되게 한다.
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Align, Color32, FontSelection, RichText, text::LayoutJob};
+
+use crate::ui::theme::Palette;
 
 use crate::commands::{Command, EncodingChoice, Keymap, LineEndingChoice, ThemeMode, ViewMode};
 
@@ -86,6 +88,37 @@ fn menu_item(
     }
 }
 
+/// 메뉴의 선택 가능한 항목 글자: 왼쪽에 선택 표시 점 `•`(녹색)을 두고 글자를 잇는다 (UX-3 피드백, Notepad++ 방식).
+///
+/// 선택되지 않은 항목도 같은 폭의 투명한 점을 둬서 글자 시작 위치가 맞는다. 줄 전체를 강조하지 않는다.
+pub fn marked_text(ui: &egui::Ui, selected: bool, text: impl Into<RichText>) -> LayoutJob {
+    let palette = Palette::from_visuals(ui.visuals());
+    let marker_color = if selected {
+        palette.menu_selected_marker
+    } else {
+        Color32::TRANSPARENT
+    };
+    let mut job = LayoutJob::default();
+    RichText::new("•  ").strong().color(marker_color).append_to(
+        &mut job,
+        ui.style(),
+        FontSelection::Default,
+        Align::Center,
+    );
+    text.into()
+        .append_to(&mut job, ui.style(), FontSelection::Default, Align::Center);
+    job
+}
+
+/// 선택 표시 점이 붙은 메뉴 버튼.
+pub fn marked_button(
+    ui: &egui::Ui,
+    selected: bool,
+    text: impl Into<RichText>,
+) -> egui::Button<'static> {
+    egui::Button::new(marked_text(ui, selected, text))
+}
+
 fn selectable_menu_item(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -95,7 +128,7 @@ fn selectable_menu_item(
     command: Command,
     triggered: &mut Option<Command>,
 ) {
-    let mut button = egui::Button::selectable(selected, label);
+    let mut button = marked_button(ui, selected, label);
     if let Some(shortcut_text) = keymap.format_shortcut_for(command, ctx) {
         button = button.shortcut_text(shortcut_text);
     }
@@ -287,7 +320,7 @@ pub fn encoding_items(ui: &mut egui::Ui, current: EncodingChoice, triggered: &mu
     ui.label(RichText::new("다시 읽기 — 파일을 이 인코딩으로 다시 해석").weak());
     for enc in EncodingChoice::ALL {
         if ui
-            .add(egui::Button::selectable(current == enc, enc.label()))
+            .add(marked_button(ui, current == enc, enc.label()))
             .clicked()
         {
             *triggered = Some(Command::ReopenWithEncoding(enc));
@@ -298,7 +331,15 @@ pub fn encoding_items(ui: &mut egui::Ui, current: EncodingChoice, triggered: &mu
     ui.separator();
     ui.label(RichText::new("변환 저장 — 내용은 그대로, 저장할 인코딩만 변경").weak());
     for enc in EncodingChoice::ALL {
-        if ui.button(format!("{}(으)로 변환", enc.label())).clicked() {
+        // 변환 항목은 선택 상태가 없지만 다시 읽기 항목과 글자 위치를 맞춘다
+        if ui
+            .add(marked_button(
+                ui,
+                false,
+                format!("{}(으)로 변환", enc.label()),
+            ))
+            .clicked()
+        {
             *triggered = Some(Command::ConvertToEncoding(enc));
             ui.close();
         }
@@ -325,10 +366,7 @@ pub fn line_ending_items(
     for le in LineEndingChoice::ALL {
         // 섞여 있으면 어느 것도 "현재 방식"으로 강조하지 않는다 (고르면 통일).
         if ui
-            .add(egui::Button::selectable(
-                !mixed && current == le,
-                le.menu_label(),
-            ))
+            .add(marked_button(ui, !mixed && current == le, le.menu_label()))
             .clicked()
         {
             *triggered = Some(Command::SetLineEnding(le));
@@ -445,7 +483,7 @@ fn window_menu(
                         text = text.color(state.modified_marker_color);
                     }
                     let response = ui.add(
-                        egui::Button::selectable(idx == state.active_tab, text)
+                        marked_button(ui, idx == state.active_tab, text)
                             .shortcut_text(shortcut_text),
                     );
                     if response.on_hover_text(tab.path_hint).clicked() {
@@ -524,6 +562,26 @@ mod tests {
             full.textures_delta.clear();
         }
         result
+    }
+
+    /// 선택된 항목은 왼쪽 녹색 점, 아닌 항목은 같은 폭의 투명한 점 (줄 전체 강조 없음).
+    #[test]
+    fn marked_text_puts_green_dot_only_on_selected() {
+        let ctx = egui::Context::default();
+        let mut result = None;
+        let mut full = ctx.run_ui(RawInput::default(), |ui| {
+            let on = marked_text(ui, true, "UTF-8");
+            let off = marked_text(ui, false, "UTF-8");
+            result = Some((on, off, Palette::from_visuals(ui.visuals())));
+        });
+        full.textures_delta.clear();
+        let (on, off, palette) = result.unwrap();
+        assert_eq!(on.text, off.text);
+        assert!(on.text.starts_with('•') && on.text.ends_with("UTF-8"));
+        assert_eq!(on.sections[0].format.color, palette.menu_selected_marker);
+        assert_eq!(off.sections[0].format.color, Color32::TRANSPARENT);
+        // 항목 글자 색은 선택 여부와 같다
+        assert_eq!(on.sections[1].format.color, off.sections[1].format.color);
     }
 
     #[test]

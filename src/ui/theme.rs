@@ -36,6 +36,8 @@ pub struct Palette {
     pub selection_bg: Color32,
     /// 텍스트 선택 및 선택된 메뉴/버튼 글자 스트로크 (`selection_stroke`)
     pub selection_stroke: Color32,
+    /// 메뉴에서 선택된 항목 왼쪽의 점 `•` (`menu_selected_marker`)
+    pub menu_selected_marker: Color32,
 }
 
 impl Palette {
@@ -66,6 +68,7 @@ impl Palette {
             // 기본 egui의 쨍한 청록(#005C80) 대신 톤을 낮춘 차분한 슬레이트 네이비
             selection_bg: Color32::from_rgb(0x26, 0x46, 0x69),
             selection_stroke: Color32::from_rgb(0xE0, 0xEC, 0xF8),
+            menu_selected_marker: Color32::from_rgb(0x4C, 0xC3, 0x8A),
         }
     }
 
@@ -87,6 +90,7 @@ impl Palette {
             // 기본 egui의 쨍한 하늘색(#90D1FF) 대신 톤을 낮춘 부드러운 소프트 블루
             selection_bg: Color32::from_rgb(0xCE, 0xDF, 0xF2),
             selection_stroke: Color32::from_rgb(0x1A, 0x36, 0x5D),
+            menu_selected_marker: Color32::from_rgb(0x1E, 0x8E, 0x3E),
         }
     }
 }
