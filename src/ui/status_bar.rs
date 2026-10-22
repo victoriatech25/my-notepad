@@ -2,6 +2,7 @@
 //!
 //! - P1-02: 시스템 폰트 로드 실패 시 경고를 표시
 //! - P1-03: 실행된 커맨드·연속 입력 대기 상태 및 현재 확대율·줄바꿈·인코딩 표시
+//! - P1-10: 열기·저장 결과 등 잠깐 보여 주는 안내 문구
 //! - P1-09: 실제 커서 위치(`Ln/Col`, 문자 단위)와 선택 글자 수 표시
 //! - P1-12: 팝업 및 상세 정보를 구현
 
@@ -25,6 +26,8 @@ pub struct StatusBarInfo<'a> {
     pub line_ending: LineEndingChoice,
     pub font_warning: Option<&'a str>,
     pub chord_hint: Option<&'a str>,
+    /// 잠깐 보여 주는 안내 (마지막 실행 커맨드보다 우선)
+    pub notice: Option<&'a str>,
     pub last_command: Option<&'a str>,
 }
 
@@ -47,6 +50,9 @@ pub fn show(ui: &mut egui::Ui, palette: &Palette, info: &StatusBarInfo<'_>) {
         if let Some(chord) = info.chord_hint {
             ui.separator();
             ui.label(RichText::new(chord).color(palette.modified_marker).strong());
+        } else if let Some(notice) = info.notice {
+            ui.separator();
+            ui.label(RichText::new(notice).color(palette.modified_marker));
         } else if let Some(cmd) = info.last_command {
             ui.separator();
             ui.label(RichText::new(format!("실행됨: {cmd}")).weak());
