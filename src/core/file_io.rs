@@ -123,6 +123,7 @@ impl FileIoError {
             io::ErrorKind::NotFound => FileIoErrorKind::NotFound,
             io::ErrorKind::PermissionDenied => FileIoErrorKind::PermissionDenied,
             io::ErrorKind::IsADirectory => FileIoErrorKind::IsDirectory,
+            io::ErrorKind::ReadOnlyFilesystem => FileIoErrorKind::ReadOnly,
             _ => FileIoErrorKind::Other,
         };
         Self {
@@ -210,6 +211,10 @@ pub fn is_binary(bytes: &[u8]) -> bool {
 pub struct OpenedDocument {
     pub document: Document,
     pub open_mode: OpenMode,
+    /// 파일 시스템의 읽기 전용 속성 (탭 자물쇠 표시, 뷰어에서 "편집 모드로 열기" 후에도 저장 시 다른 이름으로 저장 유도).
+    ///
+    /// 문서의 읽기 전용 여부([`Document::is_readonly`])는 뷰어·바이너리 열람 때문에도 켜지므로 이 값과 구분한다.
+    pub file_readonly: bool,
 }
 
 /// [`open_document`] 결과.
@@ -243,6 +248,7 @@ pub fn open_document(
         Ok(document) => Ok(OpenOutcome::Opened(Box::new(OpenedDocument {
             document,
             open_mode: loaded.open_mode,
+            file_readonly: loaded.readonly,
         }))),
         Err(_) => Ok(OpenOutcome::Binary(Box::new(loaded))),
     }
@@ -260,6 +266,7 @@ pub fn open_binary_anyway(loaded: LoadedFile, default_line_ending: LineEnding) -
             Some(loaded.metadata),
         ),
         open_mode: loaded.open_mode,
+        file_readonly: loaded.readonly,
     }
 }
 
@@ -275,7 +282,9 @@ fn write_atomic_with(
     path: &Path,
     write: impl FnOnce(&mut fs::File) -> io::Result<()>,
 ) -> Result<DiskMetadata, FileIoError> {
-    let existing = match fs::metadata(path) {
+    // 심볼릭 링크는 링크 자체를 일반 파일로 바꾸지 않고 가리키는 파일에 저장한다.
+    let target = resolve_symlinks(path).map_err(|e| FileIoError::from_io(path, e))?;
+    let existing = match fs::metadata(&target) {
         Ok(meta) => Some(meta),
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(FileIoError::from_io(path, e)),
@@ -290,11 +299,11 @@ fn write_atomic_with(
         }
     }
 
-    let dir = match path.parent() {
+    let dir = match target.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    let file_name = path
+    let file_name = target
         .file_name()
         .ok_or_else(|| FileIoError::new(FileIoErrorKind::Other, path))?;
     let mut prefix = std::ffi::OsString::from(".");
@@ -304,22 +313,90 @@ fn write_atomic_with(
     let mut temp = tempfile::Builder::new()
         .prefix(&prefix)
         .suffix(".tmp")
-        .tempfile_in(dir)
+        .make_in(dir, |p| create_temp_file(p, existing.as_ref()))
         .map_err(|e| FileIoError::from_io(path, e))?;
 
     write(temp.as_file_mut())
         .and_then(|()| temp.as_file().sync_all())
         .map_err(|e| FileIoError::from_io(path, e))?;
 
-    // 원본의 권한(Unix 실행 비트 등)을 이어받는다. 실패해도 저장 자체는 진행한다.
-    if let Some(meta) = &existing {
-        let _ = fs::set_permissions(temp.path(), meta.permissions());
+    // `NamedTempFile::persist`는 Windows에서 rename 직전에 속성을 NORMAL로 초기화해 숨김 속성이 사라지므로
+    // 직접 rename한다. 실패하면 `TempPath`가 드롭되며 임시 파일을 지운다.
+    let temp_path = temp.into_temp_path();
+    fs::rename(&temp_path, &target).map_err(|e| FileIoError::from_io(path, e))?;
+    // 이미 대상 이름으로 옮겨졌으므로 임시 경로 삭제를 끈다 (파일 시스템 작업 없음).
+    let _ = temp_path.keep();
+
+    // rename 결과(폴더 항목)까지 디스크에 남긴다. Windows는 폴더를 이렇게 열 수 없으므로 Unix만.
+    #[cfg(unix)]
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
     }
 
-    temp.persist(path)
-        .map_err(|e| FileIoError::from_io(path, e.error))?;
+    DiskMetadata::from_path(&target).map_err(|e| FileIoError::from_io(path, e))
+}
 
-    DiskMetadata::from_path(path).map_err(|e| FileIoError::from_io(path, e))
+/// 심볼릭 링크가 마지막으로 가리키는 파일 경로를 구한다 (대상이 없어도 그 경로를 돌려준다).
+fn resolve_symlinks(path: &Path) -> io::Result<PathBuf> {
+    const MAX_DEPTH: usize = 40;
+    let mut target = path.to_path_buf();
+    for _ in 0..MAX_DEPTH {
+        match fs::symlink_metadata(&target) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let link = fs::read_link(&target)?;
+                // 상대 링크는 링크가 있는 폴더 기준. 절대 링크는 join이 그대로 돌려준다.
+                target = match target.parent() {
+                    Some(parent) => parent.join(link),
+                    None => link,
+                };
+            }
+            Ok(_) => return Ok(target),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(target),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other("심볼릭 링크가 너무 많이 이어져 있습니다"))
+}
+
+/// 원자적 저장용 임시 파일을 만든다. 원본이 있으면 권한·속성을 이어받는다.
+///
+/// - Unix: 새 파일은 일반 파일처럼 `0o666 & !umask`, 기존 파일은 원본 권한(실행 비트 포함)을 그대로 쓴다.
+///   (`tempfile` 기본값 `0o600`으로 두면 새로 저장한 파일을 다른 사용자가 읽지 못한다.)
+/// - Windows: 원본의 숨김·시스템 속성을 유지한다 (rename으로 교체하면 새 파일 속성이 남는다).
+fn create_temp_file(path: &Path, original: Option<&fs::Metadata>) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // 원본 권한으로 바꾸기 전까지 다른 사용자가 열지 못하게, 기존 파일이 있으면 소유자 전용으로 만든다.
+        options.mode(if original.is_some() { 0o600 } else { 0o666 });
+        let file = options.open(path)?;
+        if let Some(meta) = original {
+            file.set_permissions(meta.permissions())?;
+        }
+        Ok(file)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+        if let Some(meta) = original {
+            options.attributes(
+                meta.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM),
+            );
+        }
+        options.open(path)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = original;
+        options.open(path)
+    }
 }
 
 /// [`save_document`] 오류.
@@ -468,6 +545,7 @@ mod tests {
             panic!("텍스트 파일이 바이너리로 판정됨");
         };
         assert!(opened.document.is_readonly());
+        assert!(opened.file_readonly);
 
         // tempdir 정리를 위해 읽기 전용 해제
         #[allow(clippy::permissions_set_readonly_false)]
@@ -530,6 +608,8 @@ mod tests {
         };
         assert_eq!(opened.open_mode, OpenMode::Viewer);
         assert!(opened.document.is_readonly());
+        // 뷰어라서 읽기 전용일 뿐 파일 자체는 쓸 수 있다
+        assert!(!opened.file_readonly);
 
         let bin = dir.path().join("image.bin");
         fs::write(&bin, b"hello\0world").unwrap();
@@ -610,5 +690,109 @@ mod tests {
         ));
         assert!(doc.is_modified());
         assert_eq!(doc.path(), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hidden_attribute_is_kept_after_save() {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".hidden.txt");
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .attributes(FILE_ATTRIBUTE_HIDDEN)
+            .open(&path)
+            .unwrap()
+            .write_all(b"old")
+            .unwrap();
+
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let attrs = fs::metadata(&path).unwrap().file_attributes();
+        assert_ne!(attrs & FILE_ATTRIBUTE_HIDDEN, 0, "숨김 속성이 사라짐");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_target_keeps_original_and_cleans_temp_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("locked.txt");
+        fs::write(&path, "원본").unwrap();
+
+        // 다른 프로그램이 공유 없이 열어 둔 상태 → 교체(rename) 단계에서 실패
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let err = write_atomic(&path, b"new").unwrap_err();
+        assert_ne!(err.kind(), FileIoErrorKind::ReadOnly);
+        assert!(leftover_temp_files(dir.path()).is_empty());
+        drop(lock);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "원본");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_permissions_follow_original_or_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // 새 파일은 tempfile 기본값(0o600)이 아니라 일반 파일 권한(0o666 & !umask)
+        let new_file = dir.path().join("new.txt");
+        write_atomic(&new_file, b"x").unwrap();
+        let reference = dir.path().join("reference.txt");
+        fs::write(&reference, b"x").unwrap();
+        assert_eq!(
+            fs::metadata(&new_file).unwrap().permissions().mode() & 0o777,
+            fs::metadata(&reference).unwrap().permissions().mode() & 0o777
+        );
+
+        // 기존 파일은 실행 비트까지 원본 권한 유지
+        let script = dir.path().join("run.sh");
+        fs::write(&script, b"echo old").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o750)).unwrap();
+        write_atomic(&script, b"echo new").unwrap();
+        assert_eq!(
+            fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_is_kept_and_target_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        fs::write(&real, b"old").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink("real.txt", &link).unwrap();
+
+        write_atomic(&link, b"new").unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&real).unwrap(), b"new");
+
+        // 대상이 없는 링크도 링크를 지우지 않고 대상 파일을 만든다
+        let dangling = dir.path().join("dangling.txt");
+        std::os::unix::fs::symlink("created.txt", &dangling).unwrap();
+        write_atomic(&dangling, b"made").unwrap();
+        assert!(
+            fs::symlink_metadata(&dangling)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(dir.path().join("created.txt")).unwrap(), b"made");
     }
 }
