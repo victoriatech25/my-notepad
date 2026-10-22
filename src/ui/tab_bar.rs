@@ -12,6 +12,7 @@ use crate::commands::{Command, Keymap, ViewMode};
 use crate::core::file_icons::{FileIcon, file_icon};
 use crate::fonts::ICON_FAMILY;
 use crate::tabs::Tabs;
+use crate::ui::menu_bar;
 use crate::ui::theme::Palette;
 
 /// 경로가 없는 새 문서의 툴팁.
@@ -363,7 +364,7 @@ fn open_tabs_list(
                         if selected {
                             text = text.strong();
                         }
-                        let r = ui.add(egui::Button::selectable(selected, text));
+                        let r = ui.add(menu_bar::marked_button(ui, selected, text));
                         if tab.doc.is_modified() {
                             ui.label(RichText::new("●").color(palette.modified_marker));
                         }
