@@ -39,6 +39,17 @@ use crate::ui::{
 /// 상태 표시줄 안내 문구를 보여 주는 시간(초).
 const NOTICE_SECONDS: f64 = 4.0;
 
+/// 저장 시도 결과.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveResult {
+    /// 디스크에 저장했다.
+    Saved,
+    /// 손상·표현 불가 문자 경고를 띄웠다 — 사용자가 고른 뒤 저장될 수 있다.
+    Pending,
+    /// 취소했거나 실패했다 (오류 대화상자를 띄웠을 수 있음).
+    NotSaved,
+}
+
 /// 측정 중 문서 전체를 훑으며 프레임 시간을 재는 횟수.
 const MEASURE_SCROLL_FRAMES: u64 = 60;
 
@@ -167,7 +178,6 @@ impl NotepadApp {
         }
 
         let active = self.tabs.active_index();
-        let count = self.tabs.len();
         match command {
             Command::Exit => {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -194,24 +204,13 @@ impl NotepadApp {
             Command::LastTab => self.tabs.last(),
             Command::MoveTabLeft => self.tabs.move_active(false),
             Command::MoveTabRight => self.tabs.move_active(true),
-            Command::CloseTab => self.close_tabs(&[active]),
-            Command::CloseOtherTabs => {
-                let others: Vec<usize> = (0..count).filter(|&i| i != active).collect();
-                self.close_tabs(&others);
-            }
-            Command::CloseTabsToRight => {
-                let right: Vec<usize> = (active + 1..count).collect();
-                self.close_tabs(&right);
-            }
-            Command::CloseSavedTabs => {
-                let all: Vec<usize> = (0..count).collect();
-                self.tabs.close_unmodified(&all);
-            }
-            Command::CloseAllTabs => {
-                let all: Vec<usize> = (0..count).collect();
-                self.close_tabs(&all);
-            }
-            Command::CopyTabPath => self.copy_tab_path(ctx, active),
+            // 닫기·경로 복사는 탭 바(우클릭 메뉴)와 같은 동작을 활성 탭 기준으로 실행한다.
+            Command::CloseTab => self.run_tab_action(ctx, TabAction::Close(active)),
+            Command::CloseOtherTabs => self.run_tab_action(ctx, TabAction::CloseOthers(active)),
+            Command::CloseTabsToRight => self.run_tab_action(ctx, TabAction::CloseRight(active)),
+            Command::CloseSavedTabs => self.run_tab_action(ctx, TabAction::CloseSaved),
+            Command::CloseAllTabs => self.run_tab_action(ctx, TabAction::CloseAll),
+            Command::CopyTabPath => self.run_tab_action(ctx, TabAction::CopyPath(active)),
             Command::ShowWindowList => self.dialogs.push_back(Dialog::window_list()),
 
             // ── 보기 ──
@@ -350,19 +349,23 @@ impl NotepadApp {
     fn resolve_unsaved(&mut self, ctx: &egui::Context, outcome: &DialogOutcome) {
         match *outcome {
             DialogOutcome::Save(id) => {
-                let saved = match self.tabs.index_of(id) {
+                let result = match self.tabs.index_of(id) {
                     Some(index) => {
                         self.tabs.activate(index);
                         self.save_active(ctx, false)
                     }
-                    None => false,
+                    None => SaveResult::NotSaved,
                 };
-                if saved {
-                    self.close_queue.retain(|&q| q != id);
-                    self.tabs.close_ids(&[id]);
-                } else {
+                match result {
+                    SaveResult::Saved => {
+                        self.close_queue.retain(|&q| q != id);
+                        self.tabs.close_ids(&[id]);
+                    }
+                    // 손상·표현 불가 문자 경고 중: 탭이 대기열 맨 앞에 남아 있으므로, 경고에서 저장하면
+                    // 수정되지 않은 탭으로 닫히고 대기열(종료 포함)이 이어진다. 경고를 취소하면 다시 묻는다.
+                    SaveResult::Pending => {}
                     // 다른 이름으로 저장을 취소했거나 저장에 실패하면 닫지 않고 멈춘다.
-                    self.cancel_close();
+                    SaveResult::NotSaved => self.cancel_close(),
                 }
             }
             DialogOutcome::Discard(id) => {
@@ -506,9 +509,16 @@ impl NotepadApp {
 
     /// 활성 탭을 저장한다. 새 문서·읽기 전용 파일·`save_as`면 다른 이름으로 저장 대화상자를 연다.
     ///
-    /// 저장했으면 `true`. 대화상자를 취소했거나 실패하면 `false`.
-    fn save_active(&mut self, ctx: &egui::Context, save_as: bool) -> bool {
+    /// 읽기 전용으로 보는 문서(뷰어·바이너리)는 수정되지 않았으면 다시 쓰지 않는다 — 다른 이름으로 저장만 한다.
+    fn save_active(&mut self, ctx: &egui::Context, save_as: bool) -> SaveResult {
         let tab = self.tabs.active();
+        if !save_as && !tab.doc.is_modified() && (tab.viewer.is_some() || tab.doc.is_readonly()) {
+            self.show_notice(
+                ctx,
+                "읽기 전용으로 보는 문서라 저장하지 않았습니다. 사본은 다른 이름으로 저장할 수 있습니다.",
+            );
+            return SaveResult::NotSaved;
+        }
         let file_readonly = tab.file_readonly;
         let has_path = tab.doc.path().is_some();
         if file_readonly && !save_as {
@@ -516,7 +526,7 @@ impl NotepadApp {
         }
         let target = if save_as || !has_path || file_readonly {
             let Some(path) = self.save_dialog() else {
-                return false;
+                return SaveResult::NotSaved;
             };
             if let Some(other) = self.tabs.find_path(&path)
                 && other != self.tabs.active_index()
@@ -528,7 +538,7 @@ impl NotepadApp {
                         path.display()
                     ),
                 ));
-                return false;
+                return SaveResult::NotSaved;
             }
             Some(path)
         } else {
@@ -542,23 +552,22 @@ impl NotepadApp {
     /// 탭을 저장한다 (`target`이 있으면 그 경로로). 손상된 문서는 `allow_damaged`가 아니면 먼저 경고하고,
     /// 표현 불가 문자가 있으면 저장을 막고 경고 대화상자를 띄운다.
     ///
-    /// 저장했으면 `true`. 경고를 띄웠거나 실패하면 `false`.
     fn save_tab(
         &mut self,
         ctx: &egui::Context,
         tab_id: u64,
         target: Option<PathBuf>,
         allow_damaged: bool,
-    ) -> bool {
+    ) -> SaveResult {
         let Some(index) = self.tabs.index_of(tab_id) else {
-            return false;
+            return SaveResult::NotSaved;
         };
         self.tabs.activate(index);
         let tab = self.tabs.active_mut();
         if tab.doc.is_damaged() && !allow_damaged {
             self.dialogs
                 .push_back(Dialog::DamagedSave { tab_id, target });
-            return false;
+            return SaveResult::Pending;
         }
 
         let eol_notice = tab.doc.needs_line_ending_conversion_notice();
@@ -581,7 +590,7 @@ impl NotepadApp {
                 } else {
                     self.show_notice(ctx, format!("\"{title}\" 저장됨"));
                 }
-                true
+                SaveResult::Saved
             }
             Err(SaveError::Io(err))
                 if err.kind() == FileIoErrorKind::ReadOnly && target.is_none() =>
@@ -596,7 +605,7 @@ impl NotepadApp {
                     encoding: err.encoding,
                     chars: err.unmappable,
                 });
-                false
+                SaveResult::Pending
             }
             Err(SaveError::NoPath) => self.save_active(ctx, true),
             Err(SaveError::Io(err)) => {
@@ -604,7 +613,7 @@ impl NotepadApp {
                     "저장하지 못했습니다",
                     format!("{err}\n원본 파일은 바뀌지 않았습니다."),
                 ));
-                false
+                SaveResult::NotSaved
             }
         }
     }

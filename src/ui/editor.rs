@@ -156,7 +156,8 @@ impl EditorState {
         }
 
         let focused_before = ctx.memory(|m| m.has_focus(self.id));
-        if focused_before {
+        // 이번 프레임에 포커스를 받는 경우(메뉴 `붙여넣기` 직후 등)에도 위젯보다 먼저 입력을 고친다.
+        if focused_before || self.focus_requested {
             ctx.input_mut(|i| filter_input_events(&mut i.events));
         }
 
@@ -205,9 +206,15 @@ impl EditorState {
 
         let mut changed = false;
         if output.response.changed() && !readonly {
-            changed = doc.apply_edit_with_cursor(self.scratch.as_str(), cursor.clone());
-            if doc.text() != self.scratch {
-                // 문서가 정규화 등으로 다르게 받아들였으면 위젯 쪽을 문서에 맞춘다.
+            // 그래도 `\r`이 들어왔다면 문서는 `LF`로 정규화하므로, 커서도 지워지는 `\r` 수만큼 당겨서 넘긴다.
+            let had_cr = self.scratch.as_bytes().contains(&b'\r');
+            let cursor = if had_cr {
+                lf_char_index(&self.scratch, cursor.start)..lf_char_index(&self.scratch, cursor.end)
+            } else {
+                cursor
+            };
+            changed = doc.apply_edit_with_cursor(&self.scratch, cursor);
+            if had_cr {
                 self.sync_from(doc);
                 self.pending_cursor = Some(doc.cursor_char_range());
             }
@@ -275,6 +282,22 @@ pub fn cursor_status(doc: &Document) -> (usize, usize, usize) {
     let range = doc.cursor_char_range();
     let (line, col) = doc.line_index().line_col_of_char(doc.text(), range.end);
     (line, col, range.end.saturating_sub(range.start))
+}
+
+/// `\r`이 섞인 `text`의 문자 인덱스를 `LF` 정규화(`\r\n` → `\n`, 단독 `\r` → `\n`) 뒤의 문자 인덱스로 바꾼다.
+fn lf_char_index(text: &str, char_index: usize) -> usize {
+    let mut removed = 0;
+    let mut chars = text.chars().peekable();
+    for _ in 0..char_index {
+        let Some(c) = chars.next() else {
+            break;
+        };
+        // `\r\n`의 `\r`만 사라진다. 단독 `\r`은 `\n`으로 바뀌어 글자 수가 같다.
+        if c == '\r' && chars.peek() == Some(&'\n') {
+            removed += 1;
+        }
+    }
+    char_index - removed
 }
 
 fn sorted_char_range(range: &CCursorRange) -> Range<usize> {
@@ -556,5 +579,38 @@ mod tests {
         let out = frame(&ctx, &mut editor, &mut doc, vec![Event::Text("x".into())]);
         assert!(!out.changed);
         assert_eq!(doc.text(), "읽기 전용");
+    }
+
+    /// 리뷰 1: 메뉴 `붙여넣기`처럼 포커스를 되찾는 프레임에 들어온 CRLF도 정규화되고 커서가 맞아야 한다.
+    #[test]
+    fn menu_paste_while_unfocused_normalizes_crlf_and_cursor() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(3);
+        let mut doc = new_doc();
+        // 포커스 없이 한 프레임 (메뉴를 누른 상태)
+        frame(&ctx, &mut editor, &mut doc, vec![]);
+        assert!(editor.handle_command(&ctx, &mut doc, Command::Paste));
+        // 다음 프레임: 포커스 요청 + 통합 계층이 넣은 Paste 이벤트
+        frame(
+            &ctx,
+            &mut editor,
+            &mut doc,
+            vec![Event::Paste("a\r\nb\r\nc".into())],
+        );
+        assert_eq!(doc.text(), "a\nb\nc");
+        assert_eq!(doc.cursor_char_range(), 5..5);
+        frame(&ctx, &mut editor, &mut doc, vec![Event::Text("!".into())]);
+        assert_eq!(doc.text(), "a\nb\nc!");
+    }
+
+    #[test]
+    fn lf_char_index_drops_only_crlf_carriage_returns() {
+        // "a\r\nb\rc": \r\n의 \r만 사라지고 단독 \r은 \n으로 바뀌어 글자 수 유지
+        let text = "a\r\nb\rc";
+        assert_eq!(lf_char_index(text, 0), 0);
+        assert_eq!(lf_char_index(text, 1), 1);
+        assert_eq!(lf_char_index(text, 3), 2);
+        assert_eq!(lf_char_index(text, 6), 5);
+        assert_eq!(lf_char_index("한\r\n글", 4), 3);
     }
 }
