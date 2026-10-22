@@ -34,11 +34,17 @@ impl Tab {
         editor.restore_view(&doc);
         editor.request_focus();
         let path_key = doc.path().map(path_key);
+        // `.md` 기본 보기 모드는 분할 (ui-spec §5, UX-1 승인)
+        let view_mode = if doc.is_markdown() {
+            ViewMode::Split
+        } else {
+            ViewMode::Source
+        };
         Self {
             id,
             doc,
             editor,
-            view_mode: ViewMode::Source,
+            view_mode,
             path_key,
             file_readonly: false,
         }
@@ -52,6 +58,18 @@ impl Tab {
     /// 다른 이름으로 저장 후 경로가 바뀌었을 때 중복 열기 판정 경로를 갱신한다.
     pub fn refresh_path_key(&mut self) {
         self.path_key = self.doc.path().map(path_key);
+    }
+
+    /// 같은 탭에서 문서를 바꾼다 (인코딩으로 다시 읽기). 커서는 새 문서 범위 안으로 맞추고 스크롤은 유지한다.
+    pub fn replace_document(&mut self, mut doc: Document) {
+        let len = doc.text().chars().count();
+        let cursor = self.doc.cursor_char_range();
+        doc.set_cursor_char_range(cursor.start.min(len)..cursor.end.min(len));
+        doc.set_scroll_offset_y(self.doc.scroll_offset_y());
+        self.doc = doc;
+        self.editor.invalidate();
+        self.editor.restore_view(&self.doc);
+        self.refresh_path_key();
     }
 
     /// 손대지 않은 빈 새 문서인지 (파일을 열면 이 탭을 바꿔 쓴다).
@@ -386,6 +404,26 @@ mod tests {
         tabs.close_ids(&ids[..1]);
         assert_eq!(titles(&tabs), ["Untitled-1"]);
         assert_eq!(tabs.index_of(ids[0]), None);
+    }
+
+    #[test]
+    fn markdown_defaults_to_split_and_replace_keeps_tab() {
+        let mut tabs = Tabs::new();
+        let md = Document::from_bytes(Some("notes.md".into()), b"# a", false, None).unwrap();
+        tabs.open_document(md, false);
+        assert_eq!(tabs.active().view_mode, ViewMode::Split);
+        tabs.new_untitled();
+        assert_eq!(tabs.active().view_mode, ViewMode::Source);
+
+        // 다시 읽기: 같은 탭(ID)에서 문서만 바뀌고 커서는 새 길이 안으로
+        tabs.activate(0);
+        let id = tabs.active().id();
+        tabs.active_mut().doc.set_cursor_char_range(3..3);
+        let shorter = Document::from_bytes(Some("notes.md".into()), b"#", false, None).unwrap();
+        tabs.active_mut().replace_document(shorter);
+        assert_eq!(tabs.active().id(), id);
+        assert_eq!(tabs.active().doc.text(), "#");
+        assert_eq!(tabs.active().doc.cursor_char_range(), 1..1);
     }
 
     #[test]

@@ -271,10 +271,20 @@ fn view_menu(
 }
 
 fn encoding_menu(ui: &mut egui::Ui, state: &MenuBarState<'_>, triggered: &mut Option<Command>) {
+    encoding_items(ui, state.encoding, triggered);
+    ui.separator();
+    line_ending_items(ui, state.line_ending, state.mixed_line_endings, triggered);
+}
+
+/// 인코딩 항목 (`인코딩` 메뉴와 상태 표시줄 인코딩 팝업이 같이 쓴다 — P1-12).
+///
+/// - 다시 읽기: 디스크의 파일을 고른 인코딩으로 다시 해석 (현재 인코딩 강조)
+/// - 변환: 내용은 그대로 두고 저장할 인코딩만 바꿈
+pub fn encoding_items(ui: &mut egui::Ui, current: EncodingChoice, triggered: &mut Option<Command>) {
     ui.label(RichText::new("다시 읽기 — 파일을 이 인코딩으로 다시 해석").weak());
     for enc in EncodingChoice::ALL {
         if ui
-            .add(egui::Button::selectable(state.encoding == enc, enc.label()))
+            .add(egui::Button::selectable(current == enc, enc.label()))
             .clicked()
         {
             *triggered = Some(Command::ReopenWithEncoding(enc));
@@ -290,21 +300,30 @@ fn encoding_menu(ui: &mut egui::Ui, state: &MenuBarState<'_>, triggered: &mut Op
             ui.close();
         }
     }
+}
 
-    ui.separator();
+/// 줄바꿈 항목 (`인코딩` 메뉴와 상태 표시줄 줄바꿈 팝업이 같이 쓴다 — P1-12).
+pub fn line_ending_items(
+    ui: &mut egui::Ui,
+    current: LineEndingChoice,
+    mixed: bool,
+    triggered: &mut Option<Command>,
+) {
     ui.label(RichText::new("줄바꿈").weak());
-    if state.mixed_line_endings {
+    if mixed {
         ui.label(
             RichText::new(
-                "이 파일은 줄바꿈이 섞여 있습니다.\n저장하면 선택한 방식으로 통일됩니다.",
+                "이 파일은 줄바꿈이 섞여 있습니다.
+저장하면 선택한 방식으로 통일됩니다.",
             )
             .small(),
         );
     }
     for le in LineEndingChoice::ALL {
+        // 섞여 있으면 어느 것도 "현재 방식"으로 강조하지 않는다 (고르면 통일).
         if ui
             .add(egui::Button::selectable(
-                state.line_ending == le,
+                !mixed && current == le,
                 le.menu_label(),
             ))
             .clicked()

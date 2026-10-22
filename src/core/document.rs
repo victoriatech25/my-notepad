@@ -21,6 +21,7 @@ use crate::core::buffer::{LineIndex, StringBuffer, TextBuffer, byte_to_char_offs
 use crate::core::encoding::{
     DecodeOutcome, DecodedDocument, TextEncoding, UnmappableChar, UnmappableError,
     decode_bytes_with_default, encode_text_lossy_with_bom, encode_text_with_bom,
+    find_unmappable_chars,
 };
 use crate::core::line_ending::{
     LineEnding, analyze_and_normalize_with_default, apply_line_ending, normalize_to_lf,
@@ -712,6 +713,18 @@ impl Document {
         true
     }
 
+    /// 현재 인코딩으로 표현할 수 없는 문자를 모두 `?`로 바꾸고 바꾼 개수를 돌려준다 (단일 Undo 단계).
+    ///
+    /// 표현 불가 문자 경고에서 "`?`로 바꿔 저장"을 고른 경우, 디스크에 쓴 내용과 화면이 같도록 문서도 바꾼다.
+    pub fn replace_unmappable(&mut self) -> usize {
+        let ranges: Vec<(Range<usize>, &str)> =
+            find_unmappable_chars(self.buffer.as_str(), self.encoding, usize::MAX)
+                .into_iter()
+                .map(|c| (c.byte_offset..c.byte_offset + c.ch.len_utf8(), "?"))
+                .collect();
+        self.apply_batch_replacements(&ranges, None)
+    }
+
     // ── 저장 직렬화 및 저장 완료 처리 ──
 
     /// 현재 문서의 줄바꿈 방식(`line_ending`)과 인코딩(`encoding`, `has_bom`)을 적용해
@@ -1203,6 +1216,34 @@ mod tests {
         // 순수 CRLF 파일은 안내 대상이 아님
         let doc = Document::from_bytes(None, b"a\r\nb\r\n", false, None).unwrap();
         assert!(!doc.needs_line_ending_conversion_notice());
+    }
+
+    #[test]
+    fn replace_unmappable_makes_document_savable_in_one_undo() {
+        let mut doc = Document::new_untitled_with_defaults(1, TextEncoding::Utf8, LineEnding::CrLf);
+        doc.set_text(
+            "한글 😀
+둘째 줄 👍 끝",
+        );
+        assert!(doc.convert_to_encoding(TextEncoding::EucKr));
+        let err = doc.encode_for_save().unwrap_err();
+        assert_eq!(err.unmappable.len(), 2);
+
+        assert_eq!(doc.replace_unmappable(), 2);
+        assert_eq!(
+            doc.text(),
+            "한글 ?
+둘째 줄 ? 끝"
+        );
+        assert!(doc.encode_for_save().is_ok());
+        assert_eq!(doc.replace_unmappable(), 0);
+
+        assert!(doc.undo());
+        assert_eq!(
+            doc.text(),
+            "한글 😀
+둘째 줄 👍 끝"
+        );
     }
 
     #[test]

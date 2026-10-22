@@ -8,6 +8,8 @@
 //!   탭 이동·정렬·닫기 커맨드, 창 메뉴 탭 목록, 창 제목
 //! - P1-11: 닫기 대기열 — 탭 닫기·일괄 닫기·창 목록·앱 종료 시 수정된 탭마다 `저장 / 저장 안 함 / 취소` 확인,
 //!   `취소`하면 남은 대기열과 종료를 모두 중단. 창 닫기(X·`Alt+F4`·`Cmd+Q`)는 가로채서 같은 대기열로 처리
+//! - P1-12: 상태 표시줄 인코딩·줄바꿈 팝업, 인코딩으로 다시 읽기(수정 중이면 확인), 변환 저장,
+//!   표현 불가 문자 경고(UTF-8로 저장 · `?`로 바꿔 저장 · 취소), 손상된 문서 저장 경고, 명령줄 파일 인자
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -15,7 +17,8 @@ use std::path::{Path, PathBuf};
 use eframe::egui::{self, FontId, ViewportCommand};
 
 use crate::commands::{Command, KeyDispatcher, Keymap, ThemeMode, ViewMode};
-use crate::core::encoding::TextEncoding;
+use crate::core::document::Document;
+use crate::core::encoding::{TextEncoding, decode_with_encoding, find_unmappable_chars};
 use crate::core::file_io::{self, FileIoErrorKind, OpenMode, OpenOutcome, SaveError, SizePolicy};
 use crate::core::line_ending::LineEnding;
 use crate::fonts;
@@ -66,7 +69,8 @@ pub struct NotepadApp {
 }
 
 impl NotepadApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    /// `files`는 명령줄로 받은 파일 경로 — 시작하면서 탭으로 연다.
+    pub fn new(cc: &eframe::CreationContext<'_>, files: &[PathBuf]) -> Self {
         let (defs, report) = fonts::explicit_chain();
         cc.egui_ctx.set_fonts(defs);
 
@@ -81,7 +85,7 @@ impl NotepadApp {
         }
 
         let font_warning = report.status_warning();
-        Self {
+        let mut app = Self {
             frames: 0,
             font_warning,
             // 첫 실행 화면은 포커스를 받은 빈 `Untitled-1` (UX-2: 바로 글을 쓸 수 있는 상태)
@@ -102,7 +106,11 @@ impl NotepadApp {
             scroll_sync: true,
             theme: ThemeMode::System,
             last_command: None,
+        };
+        for file in files {
+            app.open_path(&cc.egui_ctx, file);
         }
+        app
     }
 
     fn execute_command(&mut self, ctx: &egui::Context, command: Command, source: &'static str) {
@@ -213,9 +221,8 @@ impl NotepadApp {
             }
 
             // ── 인코딩·줄바꿈 (다시 읽기는 P1-12) ──
-            Command::ConvertToEncoding(enc) => {
-                self.tabs.active_mut().doc.convert_to_encoding(enc);
-            }
+            Command::ReopenWithEncoding(enc) => self.request_reopen(ctx, enc),
+            Command::ConvertToEncoding(enc) => self.convert_encoding(ctx, enc),
             Command::SetLineEnding(le) => {
                 self.tabs.active_mut().doc.set_line_ending(le);
             }
@@ -495,7 +502,32 @@ impl NotepadApp {
             None
         };
 
+        let id = self.tabs.active().id();
+        self.save_tab(ctx, id, target, false)
+    }
+
+    /// 탭을 저장한다 (`target`이 있으면 그 경로로). 손상된 문서는 `allow_damaged`가 아니면 먼저 경고하고,
+    /// 표현 불가 문자가 있으면 저장을 막고 경고 대화상자를 띄운다.
+    ///
+    /// 저장했으면 `true`. 경고를 띄웠거나 실패하면 `false`.
+    fn save_tab(
+        &mut self,
+        ctx: &egui::Context,
+        tab_id: u64,
+        target: Option<PathBuf>,
+        allow_damaged: bool,
+    ) -> bool {
+        let Some(index) = self.tabs.index_of(tab_id) else {
+            return false;
+        };
+        self.tabs.activate(index);
         let tab = self.tabs.active_mut();
+        if tab.doc.is_damaged() && !allow_damaged {
+            self.dialogs
+                .push_back(Dialog::DamagedSave { tab_id, target });
+            return false;
+        }
+
         let eol_notice = tab.doc.needs_line_ending_conversion_notice();
         let line_ending = tab.doc.line_ending().short_label();
         match file_io::save_document(&mut tab.doc, target.as_deref()) {
@@ -518,24 +550,19 @@ impl NotepadApp {
                 }
                 true
             }
-            Err(SaveError::Io(err)) if err.kind() == FileIoErrorKind::ReadOnly && !save_as => {
+            Err(SaveError::Io(err))
+                if err.kind() == FileIoErrorKind::ReadOnly && target.is_none() =>
+            {
                 tab.file_readonly = true;
                 self.save_active(ctx, true)
             }
             Err(SaveError::Unmappable(err)) => {
-                let first = &err.unmappable[0];
-                self.dialogs.push_back(Dialog::message(
-                    "저장할 수 없는 문자가 있습니다",
-                    format!(
-                        "{} 인코딩으로 표현할 수 없는 문자가 {}개 있습니다 (처음: Ln {}, Col {} '{}').\n\
-                         인코딩 메뉴에서 UTF-8 등으로 변환한 뒤 저장해 주세요.",
-                        err.encoding.label(),
-                        err.unmappable.len(),
-                        first.line,
-                        first.column,
-                        first.ch
-                    ),
-                ));
+                self.dialogs.push_back(Dialog::Unmappable {
+                    tab_id,
+                    target,
+                    encoding: err.encoding,
+                    chars: err.unmappable,
+                });
                 false
             }
             Err(SaveError::NoPath) => self.save_active(ctx, true),
@@ -547,6 +574,109 @@ impl NotepadApp {
                 false
             }
         }
+    }
+
+    /// 표현 불가 문자 경고에서 고른 방법으로 다시 저장한다.
+    fn resolve_unmappable(
+        &mut self,
+        ctx: &egui::Context,
+        tab_id: u64,
+        target: Option<PathBuf>,
+        to_utf8: bool,
+    ) {
+        let Some(index) = self.tabs.index_of(tab_id) else {
+            return;
+        };
+        let doc = &mut self.tabs.get_mut(index).expect("index_of 결과").doc;
+        if to_utf8 {
+            doc.convert_to_encoding(TextEncoding::Utf8);
+        } else {
+            // 디스크와 화면이 같도록 문서에서도 `?`로 바꾼다 (Undo 한 번으로 되돌릴 수 있음).
+            doc.replace_unmappable();
+        }
+        // 이 경고까지 왔다면 손상 경고는 이미 통과했다.
+        self.save_tab(ctx, tab_id, target, true);
+    }
+
+    // ── 인코딩 다시 읽기·변환 ──
+
+    /// 인코딩으로 다시 읽기: 수정된 문서면 변경 내용이 사라진다고 먼저 확인한다.
+    fn request_reopen(&mut self, ctx: &egui::Context, encoding: TextEncoding) {
+        let tab = self.tabs.active();
+        if tab.doc.path().is_none() {
+            self.show_notice(ctx, "저장된 파일만 다른 인코딩으로 다시 읽을 수 있습니다.");
+            return;
+        }
+        if tab.doc.is_modified() {
+            self.dialogs.push_back(Dialog::ConfirmReopen {
+                tab_id: tab.id(),
+                title: tab.doc.title(),
+                encoding,
+            });
+        } else {
+            self.reopen_tab(ctx, tab.id(), encoding);
+        }
+    }
+
+    /// 디스크의 파일을 지정한 인코딩으로 다시 해석해 같은 탭에 연다.
+    fn reopen_tab(&mut self, ctx: &egui::Context, tab_id: u64, encoding: TextEncoding) {
+        let Some(tab) = self
+            .tabs
+            .index_of(tab_id)
+            .and_then(|i| self.tabs.get_mut(i))
+        else {
+            return;
+        };
+        let Some(path) = tab.doc.path().map(Path::to_path_buf) else {
+            return;
+        };
+        match file_io::read_file(&path, &self.size_policy) {
+            Ok(loaded) => {
+                let decoded = decode_with_encoding(&loaded.bytes, encoding);
+                let readonly = loaded.open_mode == OpenMode::Viewer;
+                let doc = Document::from_decoded(
+                    Some(path),
+                    decoded,
+                    LineEnding::default_for_os(),
+                    readonly,
+                    Some(loaded.metadata),
+                );
+                let damaged = doc.is_damaged();
+                tab.file_readonly = loaded.readonly;
+                tab.replace_document(doc);
+                let mut text = format!("{}(으)로 다시 읽었습니다.", encoding.label());
+                if damaged {
+                    text.push_str(" 해석하지 못한 바이트가 있습니다(�).");
+                }
+                self.show_notice(ctx, text);
+            }
+            Err(err) => {
+                self.dialogs
+                    .push_back(Dialog::message("다시 읽지 못했습니다", err.to_string()));
+            }
+        }
+    }
+
+    /// 변환 저장: 내용은 그대로, 저장할 인코딩만 바꾼다. 표현 불가 문자가 있으면 미리 알려 준다.
+    fn convert_encoding(&mut self, ctx: &egui::Context, encoding: TextEncoding) {
+        let doc = &mut self.tabs.active_mut().doc;
+        if doc.is_readonly() {
+            self.show_notice(ctx, "읽기 전용 문서는 인코딩을 바꿀 수 없습니다.");
+            return;
+        }
+        if !doc.convert_to_encoding(encoding) {
+            return;
+        }
+        let unmappable = find_unmappable_chars(doc.text(), encoding, usize::MAX).len();
+        let text = if unmappable > 0 {
+            format!(
+                "저장할 때 {}(으)로 저장합니다 — 이 인코딩에 없는 문자가 {unmappable}개 있어 저장 전에 확인합니다.",
+                encoding.label()
+            )
+        } else {
+            format!("저장할 때 {}(으)로 저장합니다.", encoding.label())
+        };
+        self.show_notice(ctx, text);
     }
 
     // ── 안내·창 제목 ──
@@ -665,15 +795,23 @@ impl eframe::App for NotepadApp {
             line_count: doc.line_count(),
             zoom: self.zoom,
             encoding: doc.encoding(),
+            encoding_estimated: doc.is_encoding_estimated(),
+            encoding_fallback_from: doc.encoding_fallback_from(),
+            damaged: doc.is_damaged(),
             line_ending: doc.line_ending(),
+            mixed_line_endings: doc.has_mixed_line_endings(),
             font_warning: self.font_warning.as_deref(),
             chord_hint: chord_hint.as_deref(),
             notice: self.notice.as_ref().map(|(text, _)| text.as_str()),
             last_command: self.last_command.as_deref(),
         };
+        let mut status_cmd = None;
         egui::Panel::bottom("status_bar").show(ui, |ui| {
-            status_bar::show(ui, &palette, &status_info);
+            status_cmd = status_bar::show(ui, &palette, &status_info);
         });
+        if let Some(cmd) = status_cmd {
+            self.execute_command(&ctx, cmd, "상태 표시줄");
+        }
 
         // 5. 본문 영역: 활성 탭 에디터
         let font_size = ui.style().text_styles[&egui::TextStyle::Monospace].size * self.zoom;
@@ -711,6 +849,18 @@ impl eframe::App for NotepadApp {
                 | DialogOutcome::Discard(_)
                 | DialogOutcome::CancelClose),
             ) => self.resolve_unsaved(&ctx, unsaved),
+            Some(DialogOutcome::SaveAsUtf8 { tab_id, target }) => {
+                self.resolve_unmappable(&ctx, tab_id, target, true);
+            }
+            Some(DialogOutcome::SaveReplacing { tab_id, target }) => {
+                self.resolve_unmappable(&ctx, tab_id, target, false);
+            }
+            Some(DialogOutcome::SaveDamaged { tab_id, target }) => {
+                self.save_tab(&ctx, tab_id, target, true);
+            }
+            Some(DialogOutcome::Reopen { tab_id, encoding }) => {
+                self.reopen_tab(&ctx, tab_id, encoding);
+            }
             Some(DialogOutcome::Dismissed) | None => {}
         }
 

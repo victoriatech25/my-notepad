@@ -3,11 +3,15 @@
 //! - P1-10: 파일 열기·저장 오류 안내, 바이너리 파일 열기 확인
 //! - P1-11: 미저장 확인(`저장 / 저장 안 함 / 취소`, 기본 버튼 `저장`, `Esc` = 취소)과
 //!   일괄 닫기 시 "이어서 닫을 탭 N개" 안내, 창 목록(체크해서 여러 창 닫기·이동)
+//! - P1-12: 표현 불가 문자 경고(`UTF-8로 저장` · `?`로 바꿔 저장 · 취소), 손상된 문서 저장 경고,
+//!   수정된 문서를 인코딩으로 다시 읽기 전 확인
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use eframe::egui::{self, RichText};
 
+use crate::core::encoding::{TextEncoding, UnmappableChar};
 use crate::core::file_io::LoadedFile;
 use crate::tabs::Tabs;
 use crate::ui::tab_bar::{self, UNSAVED_PATH_HINT};
@@ -29,6 +33,25 @@ pub enum Dialog {
     },
     /// 창 목록 (체크한 탭 ID)
     WindowList { checked: HashSet<u64> },
+    /// "EUC-KR로 저장할 수 없는 문자가 있습니다" — 저장을 막고 고르게 한다.
+    Unmappable {
+        tab_id: u64,
+        /// 다른 이름으로 저장 중이었다면 그 경로
+        target: Option<PathBuf>,
+        encoding: TextEncoding,
+        chars: Vec<UnmappableChar>,
+    },
+    /// "손상된 문서를 저장하려고 합니다"
+    DamagedSave {
+        tab_id: u64,
+        target: Option<PathBuf>,
+    },
+    /// 수정된 문서를 인코딩으로 다시 읽기 전 확인 (변경 내용이 사라짐)
+    ConfirmReopen {
+        tab_id: u64,
+        title: String,
+        encoding: TextEncoding,
+    },
 }
 
 /// 대화상자를 닫으며 사용자가 고른 결과.
@@ -46,7 +69,30 @@ pub enum DialogOutcome {
     Activate(u64),
     /// 창 목록: 체크한(또는 모든) 탭 닫기
     CloseTabs(Vec<u64>),
+    /// 표현 불가 문자: UTF-8로 바꿔 저장
+    SaveAsUtf8 {
+        tab_id: u64,
+        target: Option<PathBuf>,
+    },
+    /// 표현 불가 문자: 문서에서도 `?`로 바꾼 뒤 저장
+    SaveReplacing {
+        tab_id: u64,
+        target: Option<PathBuf>,
+    },
+    /// 손상된 문서: 그래도 저장
+    SaveDamaged {
+        tab_id: u64,
+        target: Option<PathBuf>,
+    },
+    /// 변경 내용을 버리고 다시 읽기
+    Reopen {
+        tab_id: u64,
+        encoding: TextEncoding,
+    },
 }
+
+/// 표현 불가 문자 목록에서 한 번에 보여 줄 최대 줄 수.
+const UNMAPPABLE_ROWS: usize = 12;
 
 impl Dialog {
     pub fn message(title: impl Into<String>, body: impl Into<String>) -> Self {
@@ -144,6 +190,109 @@ pub fn show(
         Dialog::WindowList { checked } => {
             outcome = window_list(ui, checked, tabs);
         }
+        Dialog::Unmappable {
+            tab_id,
+            target,
+            encoding,
+            chars,
+        } => {
+            ui.set_width(460.0);
+            ui.heading(format!("{}로 저장할 수 없는 문자가 있습니다", short_name(*encoding)));
+            ui.add_space(4.0);
+            ui.label(format!(
+                "아래 문자는 {}에 없습니다. 그대로 저장하면 `?`로 바뀝니다.",
+                encoding.label()
+            ));
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                egui::Grid::new("unmappable")
+                    .striped(true)
+                    .num_columns(2)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.strong("문자");
+                        ui.strong("위치");
+                        ui.end_row();
+                        for c in chars.iter().take(UNMAPPABLE_ROWS) {
+                            ui.label(format!("{} (U+{:04X})", c.ch, u32::from(c.ch)));
+                            ui.label(format!("Ln {}, Col {}", c.line, c.column));
+                            ui.end_row();
+                        }
+                    });
+                if chars.len() > UNMAPPABLE_ROWS {
+                    ui.label(
+                        RichText::new(format!("외 {}개", chars.len() - UNMAPPABLE_ROWS)).weak(),
+                    );
+                }
+            });
+            ui.add_space(8.0);
+            buttons_right(ui, |ui| {
+                if ui.button("취소").clicked() {
+                    outcome = Some(DialogOutcome::Dismissed);
+                }
+                if ui.button("`?`로 바꿔 저장").clicked() {
+                    outcome = Some(DialogOutcome::SaveReplacing {
+                        tab_id: *tab_id,
+                        target: target.clone(),
+                    });
+                }
+                // 문자를 잃지 않는 쪽이 기본 버튼
+                if default_button(ui, "UTF-8로 저장").clicked() {
+                    outcome = Some(DialogOutcome::SaveAsUtf8 {
+                        tab_id: *tab_id,
+                        target: target.clone(),
+                    });
+                }
+            });
+        }
+        Dialog::DamagedSave { tab_id, target } => {
+            ui.set_width(440.0);
+            ui.heading("손상된 문서를 저장하려고 합니다");
+            ui.add_space(4.0);
+            ui.label(
+                "이 문서는 열 때 해석하지 못한 바이트(�)가 있습니다. 지금 저장하면 원본 바이트가 영구히 사라집니다.",
+            );
+            ui.label(
+                RichText::new("인코딩 → '다시 읽기'로 올바른 인코딩을 먼저 시도해 보세요.").weak(),
+            );
+            ui.add_space(8.0);
+            buttons_right(ui, |ui| {
+                if ui.button("그래도 저장").clicked() {
+                    outcome = Some(DialogOutcome::SaveDamaged {
+                        tab_id: *tab_id,
+                        target: target.clone(),
+                    });
+                }
+                if default_button(ui, "취소").clicked() {
+                    outcome = Some(DialogOutcome::Dismissed);
+                }
+            });
+        }
+        Dialog::ConfirmReopen {
+            tab_id,
+            title,
+            encoding,
+        } => {
+            ui.set_width(440.0);
+            ui.heading("변경 내용을 버리고 다시 읽을까요?");
+            ui.add_space(4.0);
+            ui.label(format!(
+                "\"{title}\"을(를) {}(으)로 다시 읽으면 저장하지 않은 변경 내용이 사라집니다.",
+                encoding.label()
+            ));
+            ui.add_space(8.0);
+            buttons_right(ui, |ui| {
+                if ui.button("다시 읽기").clicked() {
+                    outcome = Some(DialogOutcome::Reopen {
+                        tab_id: *tab_id,
+                        encoding: *encoding,
+                    });
+                }
+                if default_button(ui, "취소").clicked() {
+                    outcome = Some(DialogOutcome::Dismissed);
+                }
+            });
+        }
     });
 
     // 바깥 클릭·Esc: 미저장 확인에서는 취소, 그 밖에는 그냥 닫기
@@ -162,6 +311,14 @@ pub fn show(
         *dialog = None;
     }
     outcome
+}
+
+/// 제목에 쓰는 짧은 인코딩 이름 (`EUC-KR (CP949)` → `EUC-KR`).
+fn short_name(encoding: TextEncoding) -> &'static str {
+    match encoding {
+        TextEncoding::EucKr => "EUC-KR",
+        other => other.label(),
+    }
 }
 
 fn buttons_right(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
@@ -371,6 +528,42 @@ mod tests {
             "{outcome:?}"
         );
         assert!(dialog.is_none());
+    }
+
+    #[test]
+    fn unmappable_enter_saves_as_utf8_and_damaged_enter_cancels() {
+        let tabs = Tabs::new();
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::Unmappable {
+            tab_id: 3,
+            target: None,
+            encoding: TextEncoding::EucKr,
+            chars: Vec::new(),
+        });
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let outcome = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Enter)]);
+        assert!(
+            matches!(
+                outcome,
+                Some(DialogOutcome::SaveAsUtf8 {
+                    tab_id: 3,
+                    target: None
+                })
+            ),
+            "{outcome:?}"
+        );
+
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::DamagedSave {
+            tab_id: 3,
+            target: None,
+        });
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let outcome = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Enter)]);
+        assert!(
+            matches!(outcome, Some(DialogOutcome::Dismissed)),
+            "{outcome:?}"
+        );
     }
 
     #[test]
