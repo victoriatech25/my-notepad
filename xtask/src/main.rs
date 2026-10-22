@@ -29,6 +29,13 @@ const SCENARIOS: &[Scenario] = &[
         wait: false,
     },
     Scenario {
+        name: "basic",
+        package: "my-notepad",
+        args: &[],
+        description: "UX-2 첫 실사용 빌드 (P1-09 에디터 + P1-10 멀티 탭·파일 열기/저장)",
+        wait: false,
+    },
+    Scenario {
         name: "editor",
         package: "my-notepad",
         args: &[],

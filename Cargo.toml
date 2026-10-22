@@ -23,6 +23,8 @@ eframe = { version = "=0.37.0", default-features = false, features = [
 encoding_rs = "0.8.42"
 log = "0.4.34"
 memmap2 = "0.9.11"
+# 네이티브 파일 열기/저장 대화상자 (PLAN.md §2.2)
+rfd = "0.17.2"
 # 원자적 저장: 같은 폴더의 임시 파일에 쓰고 rename (PLAN.md §2.2, §3.6)
 tempfile = "3.27.0"
 ttf-parser = "0.25.1"
