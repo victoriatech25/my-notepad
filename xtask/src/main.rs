@@ -29,6 +29,13 @@ const SCENARIOS: &[Scenario] = &[
         wait: false,
     },
     Scenario {
+        name: "editor",
+        package: "my-notepad",
+        args: &[],
+        description: "P1-09 기본 에디터 (빈 새 문서 1개 — 한글 IME·Tab·Undo/Redo·클립보드 확인)",
+        wait: false,
+    },
+    Scenario {
         name: "spike",
         package: "editor-spike",
         args: &[],

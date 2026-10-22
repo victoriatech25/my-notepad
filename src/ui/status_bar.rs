@@ -2,6 +2,7 @@
 //!
 //! - P1-02: 시스템 폰트 로드 실패 시 경고를 표시
 //! - P1-03: 실행된 커맨드·연속 입력 대기 상태 및 현재 확대율·줄바꿈·인코딩 표시
+//! - P1-09: 실제 커서 위치(`Ln/Col`, 문자 단위)와 선택 글자 수 표시
 //! - P1-12: 팝업 및 상세 정보를 구현
 
 use eframe::egui::{self, RichText};
@@ -12,6 +13,12 @@ use crate::ui::theme::Palette;
 /// 상태 표시줄에 표시할 값 묶음.
 #[derive(Debug, Clone, Copy)]
 pub struct StatusBarInfo<'a> {
+    /// 커서 줄 번호 (1-기반)
+    pub line: usize,
+    /// 커서 열 번호 (1-기반, 문자 단위 — 한글 1글자 = 1칸)
+    pub column: usize,
+    /// 선택된 글자 수 (0이면 표시하지 않음)
+    pub selected_chars: usize,
     pub line_count: usize,
     pub zoom: f32,
     pub encoding: EncodingChoice,
@@ -24,7 +31,11 @@ pub struct StatusBarInfo<'a> {
 /// 하단 상태 표시줄을 렌더링한다.
 pub fn show(ui: &mut egui::Ui, palette: &Palette, info: &StatusBarInfo<'_>) {
     ui.horizontal(|ui| {
-        ui.label("Ln 1, Col 1");
+        ui.label(format!("Ln {}, Col {}", info.line, info.column));
+        if info.selected_chars > 0 {
+            ui.separator();
+            ui.label(format!("선택 {}자", info.selected_chars));
+        }
         ui.separator();
         ui.label(format!("{}줄", info.line_count));
 
