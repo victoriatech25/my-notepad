@@ -13,6 +13,7 @@ use eframe::egui;
 use my_notepad::{app, cli::CliArgs, fonts, logging};
 
 fn main() -> eframe::Result {
+    let started = std::time::Instant::now();
     let cli = CliArgs::from_env();
     let log_path = logging::init(cli.log_file.clone());
     log::info!(
@@ -52,6 +53,12 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "my-notepad",
         options,
-        Box::new(move |cc| Ok(Box::new(app::NotepadApp::new(cc, &cli.files)))),
+        Box::new(move |cc| {
+            let mut app = app::NotepadApp::new(cc, &cli.files);
+            if let Some(out) = cli.measure_out.clone() {
+                app.enable_measure(out, started);
+            }
+            Ok(Box::new(app))
+        }),
     )
 }

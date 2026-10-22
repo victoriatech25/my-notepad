@@ -7,12 +7,15 @@
 //! - 같은 파일은 한 번만 연다. 경로는 [`std::fs::canonicalize`] 결과로 비교한다 (Windows 대소문자·`..`·심볼릭 링크).
 //! - 파일을 열 때 지금 탭이 손대지 않은 빈 새 문서면 그 탭을 바꿔 쓴다 (첫 실행 직후 열기).
 //! - 마지막 탭을 닫으면 빈 `Untitled-1`을 새로 만든다 (탭이 0개인 상태는 없다).
+//! - 5MB 초과 파일은 편집 위젯 대신 읽기 전용 뷰어로 보여 준다 (ADR 0001, P1-14). 1~5MB는 편집 위젯 위에 안내 막대.
 
 use std::path::{Path, PathBuf};
 
 use crate::commands::ViewMode;
 use crate::core::document::Document;
+use crate::core::file_io::OpenMode;
 use crate::ui::editor::EditorState;
+use crate::ui::viewer::ViewerState;
 
 /// 열린 탭 하나.
 #[derive(Debug)]
@@ -26,6 +29,12 @@ pub struct Tab {
     path_key: Option<PathBuf>,
     /// 파일 시스템의 읽기 전용 속성 (저장 시 다른 이름으로 저장 유도).
     pub file_readonly: bool,
+    /// 읽기 전용 뷰어로 보는 중이면 뷰어 상태 (P1-14)
+    pub viewer: Option<ViewerState>,
+    /// 1~5MB 안내 막대를 보여 줄지
+    pub size_notice: bool,
+    /// 바이너리 파일을 확인 후 연 탭 (편집 모드로 바꿔도 읽기 전용 유지)
+    pub binary: bool,
 }
 
 impl Tab {
@@ -47,6 +56,9 @@ impl Tab {
             view_mode,
             path_key,
             file_readonly: false,
+            viewer: None,
+            size_notice: false,
+            binary: false,
         }
     }
 
@@ -60,6 +72,36 @@ impl Tab {
         self.path_key = self.doc.path().map(path_key);
     }
 
+    /// 파일 크기에 따른 열기 방식을 적용한다 (뷰어 또는 안내 막대).
+    pub fn apply_open_mode(&mut self, mode: OpenMode) {
+        match mode {
+            OpenMode::Edit => {}
+            OpenMode::EditWithNotice => self.size_notice = true,
+            OpenMode::Viewer => self.viewer = Some(ViewerState::new(self.id)),
+        }
+    }
+
+    /// 편집 위젯 → 읽기 전용 뷰어 (1~5MB 안내 막대의 "읽기 전용으로 보기").
+    pub fn switch_to_viewer(&mut self) {
+        self.size_notice = false;
+        self.viewer = Some(ViewerState::new(self.id));
+    }
+
+    /// 읽기 전용 뷰어 → 편집 위젯. 캐럿·선택 위치를 넘기고, 바이너리가 아니면 편집을 허용한다.
+    pub fn switch_to_editor(&mut self) {
+        let Some(viewer) = self.viewer.take() else {
+            return;
+        };
+        self.doc
+            .set_cursor_char_range(viewer.caret_char_range(&self.doc));
+        if !self.binary {
+            self.doc.set_readonly(false);
+        }
+        self.editor.invalidate();
+        self.editor.restore_view(&self.doc);
+        self.editor.request_focus();
+    }
+
     /// 같은 탭에서 문서를 바꾼다 (인코딩으로 다시 읽기). 커서는 새 문서 범위 안으로 맞추고 스크롤은 유지한다.
     pub fn replace_document(&mut self, mut doc: Document) {
         let len = doc.text().chars().count();
@@ -67,6 +109,9 @@ impl Tab {
         doc.set_cursor_char_range(cursor.start.min(len)..cursor.end.min(len));
         doc.set_scroll_offset_y(self.doc.scroll_offset_y());
         self.doc = doc;
+        if self.viewer.is_some() {
+            self.viewer = Some(ViewerState::new(self.id));
+        }
         self.editor.invalidate();
         self.editor.restore_view(&self.doc);
         self.refresh_path_key();
@@ -193,6 +238,9 @@ impl Tabs {
         };
         tab.editor.restore_view(&tab.doc);
         tab.editor.request_focus();
+        if let Some(viewer) = &mut tab.viewer {
+            viewer.request_focus();
+        }
         self.active = index;
         true
     }
@@ -424,6 +472,44 @@ mod tests {
         assert_eq!(tabs.active().id(), id);
         assert_eq!(tabs.active().doc.text(), "#");
         assert_eq!(tabs.active().doc.cursor_char_range(), 1..1);
+    }
+
+    #[test]
+    fn viewer_mode_switches_and_binary_stays_readonly() {
+        let mut tabs = Tabs::new();
+        let big = Document::from_bytes(
+            Some("big.log".into()),
+            "가
+나
+다"
+            .as_bytes(),
+            true,
+            None,
+        )
+        .unwrap();
+        tabs.open_document(big, false);
+        tabs.active_mut().apply_open_mode(OpenMode::Viewer);
+        assert!(tabs.active().viewer.is_some());
+        tabs.active_mut().switch_to_editor();
+        assert!(tabs.active().viewer.is_none());
+        assert!(!tabs.active().doc.is_readonly());
+
+        // 1~5MB: 안내 막대 → 읽기 전용으로 보기
+        tabs.new_untitled();
+        tabs.active_mut().apply_open_mode(OpenMode::EditWithNotice);
+        assert!(tabs.active().size_notice);
+        tabs.active_mut().switch_to_viewer();
+        assert!(!tabs.active().size_notice);
+        assert!(tabs.active().viewer.is_some());
+
+        // 바이너리는 편집 모드로 바꿔도 읽기 전용
+        let bin = Document::from_bytes(Some("x.dat".into()), b"abc", true, None).unwrap();
+        tabs.open_document(bin, false);
+        let tab = tabs.active_mut();
+        tab.binary = true;
+        tab.apply_open_mode(OpenMode::Viewer);
+        tab.switch_to_editor();
+        assert!(tab.doc.is_readonly());
     }
 
     #[test]
