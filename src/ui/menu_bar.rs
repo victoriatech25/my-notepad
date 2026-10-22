@@ -7,6 +7,9 @@ use eframe::egui::{self, Color32, RichText};
 
 use crate::commands::{Command, EncodingChoice, Keymap, LineEndingChoice, ThemeMode, ViewMode};
 
+/// `창` 메뉴에서 스크롤 없이 보여 줄 열린 탭 바로가기 수.
+const WINDOW_MENU_VISIBLE_TABS: usize = 10;
+
 /// `창` 메뉴 하단 열린 탭 바로가기 목록에 표시할 탭 요약 정보.
 #[derive(Debug, Clone, Copy)]
 pub struct MenuTabEntry<'a> {
@@ -416,8 +419,13 @@ fn window_menu(
     if !state.tabs.is_empty() {
         ui.separator();
         let last_idx = state.tabs.len() - 1;
+        // 탭 바로가기는 최소 10줄까지 스크롤 없이 보이게 한다 (UX-3 피드백).
+        // 최대 높이만 주면 메뉴 팝업이 남은 공간에 맞춰 목록을 줄여 버리므로 최소 높이도 같이 고정한다.
+        let row_height = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+        let list_height = row_height * WINDOW_MENU_VISIBLE_TABS as f32;
         egui::ScrollArea::vertical()
-            .max_height(280.0)
+            .max_height(list_height)
+            .min_scrolled_height(list_height)
             .show(ui, |ui| {
                 for (idx, tab) in state.tabs.iter().enumerate() {
                     let shortcut_text = if idx < 8 {
@@ -459,5 +467,73 @@ fn help_menu(ui: &mut egui::Ui, triggered: &mut Option<Command>) {
             *triggered = Some(cmd);
             ui.close();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::RawInput;
+
+    /// 좁은 공간(메뉴 팝업처럼)에서 창 메뉴를 그렸을 때 탭 목록 영역의 높이.
+    fn tab_list_height(tab_count: usize, available_height: f32) -> (f32, f32) {
+        let titles: Vec<String> = (0..tab_count).map(|i| format!("note-{i}.txt")).collect();
+        let tabs: Vec<MenuTabEntry<'_>> = titles
+            .iter()
+            .map(|t| MenuTabEntry {
+                title: t,
+                path_hint: "",
+                modified: false,
+            })
+            .collect();
+        let state = MenuBarState {
+            sidebar_open: false,
+            word_wrap: true,
+            is_markdown: false,
+            view_mode: ViewMode::Source,
+            scroll_sync: false,
+            theme: ThemeMode::System,
+            encoding: EncodingChoice::Utf8,
+            line_ending: LineEndingChoice::Lf,
+            mixed_line_endings: false,
+            recent_files: &[],
+            tabs: &tabs,
+            active_tab: 0,
+            modified_marker_color: Color32::WHITE,
+        };
+        let keymap = Keymap::for_os(false);
+        let ctx = egui::Context::default();
+        let mut result = (0.0, 0.0);
+        for _ in 0..2 {
+            let raw = RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 1200.0),
+                )),
+                ..Default::default()
+            };
+            let mut full = ctx.run_ui(raw, |ui| {
+                ui.allocate_ui(egui::vec2(400.0, available_height), |ui| {
+                    ui.set_max_height(available_height);
+                    let top = ui.cursor().top();
+                    window_menu(ui, &ui.ctx().clone(), &keymap, &state, &mut None);
+                    let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+                    result = (ui.min_rect().bottom() - top, row);
+                });
+            });
+            full.textures_delta.clear();
+        }
+        result
+    }
+
+    #[test]
+    fn window_menu_shows_ten_tabs_without_scrolling() {
+        let (few, row) = tab_list_height(3, 450.0);
+        let (many, _) = tab_list_height(15, 450.0);
+        // 탭이 많으면 목록 영역이 최소 10줄 높이까지 늘어나야 한다 (3줄일 때보다 7줄 이상 큼).
+        assert!(
+            many - few >= row * 7.0 - 1.0,
+            "3개: {few}, 15개: {many}, 줄 높이: {row}"
+        );
     }
 }
