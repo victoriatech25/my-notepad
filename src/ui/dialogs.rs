@@ -95,6 +95,21 @@ pub enum DialogOutcome {
 const UNMAPPABLE_ROWS: usize = 12;
 
 impl Dialog {
+    /// 대화상자 영역 ID. 종류마다 달라야 앞서 띄운 다른 대화상자의 크기를 물려받지 않는다
+    /// (예: 창 목록 다음에 뜬 저장 확인이 창 목록 크기로 그려지던 문제).
+    pub fn area_id(&self) -> egui::Id {
+        let kind = match self {
+            Self::Message { .. } => "message",
+            Self::ConfirmBinary(_) => "confirm-binary",
+            Self::Unsaved { .. } => "unsaved",
+            Self::WindowList { .. } => "window-list",
+            Self::Unmappable { .. } => "unmappable",
+            Self::DamagedSave { .. } => "damaged-save",
+            Self::ConfirmReopen { .. } => "confirm-reopen",
+        };
+        egui::Id::unique(("app-dialog", kind))
+    }
+
     pub fn message(title: impl Into<String>, body: impl Into<String>) -> Self {
         Self::Message {
             title: title.into(),
@@ -119,7 +134,7 @@ pub fn show(
     let mut outcome = None;
     let mut open_binary = false;
 
-    let modal = egui::Modal::new(egui::Id::unique("app-dialog")).show(ctx, |ui| match current {
+    let modal = egui::Modal::new(current.area_id()).show(ctx, |ui| match current {
         Dialog::Message { title, body } => {
             ui.set_width(420.0);
             ui.heading(title.as_str());
@@ -321,8 +336,12 @@ fn short_name(encoding: TextEncoding) -> &'static str {
     }
 }
 
+/// 버튼 한 줄을 오른쪽 정렬로 그린다 (먼저 추가한 버튼이 가장 오른쪽).
+///
+/// `with_layout`은 남은 공간 전체를 차지해 대화상자가 화면 높이만큼 늘어나므로, 버튼 한 줄 높이만 할당한다.
 fn buttons_right(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
+    let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), add);
 }
 
 /// Enter로 눌리는 기본 버튼 (굵게 + 키보드 포커스).
@@ -564,6 +583,56 @@ mod tests {
             matches!(outcome, Some(DialogOutcome::Dismissed)),
             "{outcome:?}"
         );
+    }
+
+    /// 대화상자가 내용 크기만큼만 그려지는지. 실제 앱처럼 하나의 화면에서 큰 창 목록을 먼저 띄운 뒤
+    /// 다른 대화상자를 띄워도 앞 대화상자 크기를 물려받지 않아야 한다.
+    #[test]
+    fn dialogs_fit_their_content_after_larger_dialog() {
+        let mut tabs = Tabs::new();
+        for _ in 0..15 {
+            tabs.new_untitled();
+        }
+        let id = tabs.active().id();
+        let ctx = egui::Context::default();
+        let dialogs = [
+            Dialog::window_list(),
+            Dialog::message("제목", "본문"),
+            Dialog::Unsaved {
+                tab_id: id,
+                title: "cp949.txt".into(),
+                remaining: 1,
+            },
+            Dialog::DamagedSave {
+                tab_id: id,
+                target: None,
+            },
+            Dialog::ConfirmReopen {
+                tab_id: id,
+                title: "cp949.txt".into(),
+                encoding: TextEncoding::Utf8,
+            },
+            Dialog::Unmappable {
+                tab_id: id,
+                target: None,
+                encoding: TextEncoding::EucKr,
+                chars: Vec::new(),
+            },
+        ];
+        for dialog in dialogs {
+            let is_list = matches!(dialog, Dialog::WindowList { .. });
+            let name = format!("{dialog:?}");
+            let area = dialog.area_id();
+            let mut dialog = Some(dialog);
+            for _ in 0..3 {
+                frame(&ctx, &mut dialog, &tabs, vec![]);
+            }
+            let rect = ctx.memory(|m| m.area_rect(area)).expect("대화상자 영역");
+            if !is_list {
+                assert!(rect.height() < 200.0, "{name}: 높이 {}", rect.height());
+                assert!(rect.width() < 520.0, "{name}: 폭 {}", rect.width());
+            }
+        }
     }
 
     #[test]
