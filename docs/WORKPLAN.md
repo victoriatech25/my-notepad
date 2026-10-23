@@ -79,7 +79,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | :--- | :--- |
 | 원격 저장소 | <https://github.com/victoriatech25/my-notepad> (기준 브랜치 `main`) |
 | 장비 1 | Windows 11 Home PC — 작업 경로 `C:\devel\My-Notepad` |
-| 장비 2 | MacBook Pro — 작업 경로 `~/devel/my-notepad` (권장) · 칩 종류(Apple Silicon / Intel) 기록 필요: `______` |
+| 장비 2 | MacBook Pro — 작업 경로 `~/devel/my-notepad` (권장) · 칩 종류: **Apple M1 Pro** (Apple Silicon, macOS 26.6.2, 2026-10-23 확인) |
 | 작업 방식 | 사용자가 **두 장비를 오가며** 개발. 코드 동기화는 **GitHub 저장소만** 사용 (USB·클라우드 드라이브 동기화로 폴더를 공유하지 않음) |
 | CI | GitHub Actions — Windows·macOS 러너에서 fmt·clippy·test (P1-01). 비공개 저장소라면 macOS 러너 사용 시간이 크게 차감되므로 push·PR 시에만 실행 |
 | 검증 역할 | Windows PC: 👤/🎨 Windows 항목 · MacBook Pro: 🍎 항목 + 🎨 macOS 의견 |
@@ -1075,6 +1075,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-22 | P1-13 | 👤 | 통과 | Windows: 명령줄 파일 2개 인자 실행, 탐색기 여러 파일 드래그, "연결 프로그램 → 다른 앱 선택" 열기 3개 항목 사용자 확인 (커밋 `f003e31`). 사용자 요청으로 탐색기 우클릭 메뉴 "My-Notepad로 편집"을 P5-02에 추가 (PLAN.md v0.4) | |
 | 2026-10-22 | P1-14 | 🤖 | 통과 | `src/ui/viewer.rs` 보이는 줄만 그리는 읽기 전용 뷰어(가상 스크롤·고정 줄 번호·캐럿/선택·복사·긴 줄 4000자 제한), 1~5MB 안내 막대, 큰 파일 편집 모드 경고, 테스트 7개(줄 색인 CRLF/LF/Mixed·끝 개행·멀티바이트, 캐럿 이동, 20만 줄 렌더·모두 선택·복사, 탭 모드 전환). `cargo xtask measure --viewer` (Windows, 3회 평균): 10MB 첫 화면 335ms · 스크롤 2ms(최대 4) · 138MB / 50MB 520ms · 2ms(최대 3) · 221MB — §1.3 목표 충족 | |
 | 2026-10-22 | P1-14 | 🎨/👤 | 통과 | Windows: 10MB·50MB 열기·스크롤바 드래그, 드래그 선택·복사(한글), 상태 표시줄·읽기 전용 표시, 편집 모드 경고 후 전환, 1MB 안내 막대 → 뷰어 전환 5개 항목 및 UX 2개 항목 사용자 확인 (커밋 `d23071a`) | |
+| 2026-10-23 | P1-MAC 0단계 (P0-00 🍎) | 🍎 | 일부 | MacBook Pro(Apple M1 Pro, macOS 26.6.2): 0-1 `cargo xtask doctor` 통과(rustc 1.98.0, CRLF 픽스처 바이트 보존), 0-2 칩 종류 기록. 0-3 장비 전환 연습은 이 기록 커밋을 Windows에서 `git pull`로 확인하는 것으로 진행 중 (커밋 `58632d6` 기준) | |
 
 ### 9.3 측정 결과 기록표
 

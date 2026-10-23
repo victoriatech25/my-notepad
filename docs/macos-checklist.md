@@ -30,8 +30,8 @@ cargo xtask doctor
 sysctl -n machdep.cpu.brand_string
 ```
 
-- [ ] **0-1** `cargo xtask doctor`가 "개발 환경 점검 통과"를 출력한다 (CRLF 픽스처 바이트 보존 포함)
-- [ ] **0-2** 칩 종류: `Apple M__` / `Intel` ← 회신
+- [x] **0-1** `cargo xtask doctor`가 "개발 환경 점검 통과"를 출력한다 (CRLF 픽스처 바이트 보존 포함) — 2026-10-23 통과
+- [x] **0-2** 칩 종류: `Apple M1 Pro` (macOS 26.6.2)
 - [ ] **0-3** 장비 전환 연습: Mac에서 아무 파일(예: `docs/macos-checklist.md` 맨 아래 메모 줄)을 고쳐 커밋·`git push` → Windows에서 `git pull`로 반영 확인
 
 ## 1. Phase 0 일괄 검증 (P1-MAC) — G1 전까지 필수
@@ -107,3 +107,4 @@ cargo xtask try md            # Markdown 분할 동기화·렌더러
 
 ---
 메모 (장비 전환 연습용):
+- 2026-10-23 MacBook Pro(Apple M1 Pro)에서 커밋·push. Windows에서 `git pull`로 이 줄이 보이면 0-3 통과.
