@@ -12,7 +12,7 @@
 | 수정 | upstream PR [winit#4744](https://github.com/rust-windowing/winit/pull/4744)를 0.30 구조에 맞춰 백포트. 첫 키가 정확히 낱자 한 글자의 `insertText`로만 처리되면 같은 키 이벤트를 IME에 한 번 더 해석시킨다 |
 | 바뀐 파일 | `src/platform_impl/macos/ime_startup.rs`(신규, 판정 로직 + 테스트 7개), `src/platform_impl/macos/mod.rs`, `src/platform_impl/macos/view.rs` |
 | 0.30 대응 | master의 `ime_capabilities`는 0.30의 `ime_allowed`, `enable_ime`/`disable_ime` 초기화는 `set_ime_allowed`, `ModifiersState::META`는 `SUPER`로 옮겼다. 0.30에는 `pending_commit`이 없어 그 조건은 뺐다 (0.30은 키 처리 안에서 `Committed` 상태를 바로 정리한다) |
-| 제거 조건 | eframe이 쓰는 winit 배포판에 #4744(또는 같은 수정)가 들어오면 사본과 `[patch.crates-io]`를 지운다. 단 아래 수정 2·3이 upstream에 없으면 그것만 남긴 사본을 유지하거나 앱 쪽 대안을 다시 찾는다 |
+| 제거 조건 | eframe이 쓰는 winit 배포판에 #4744(또는 같은 수정)가 들어오면 사본과 `[patch.crates-io]`를 지운다. 단 아래 수정 2~4가 upstream에 없으면 그것만 남긴 사본을 유지하거나 앱 쪽 대안을 다시 찾는다 |
 
 ### 수정 2 — 조합 중 `Cmd`/`Ctrl` 단축키 전달 (자체 수정, upstream 없음)
 
@@ -29,6 +29,14 @@
 | :--- | :--- |
 | 결함 | 앱이 조합을 끊으면(egui `interrupt_ime` → `set_ime_allowed(false)`) winit은 자기 쪽 조합 텍스트만 비우고 입력기에는 알리지 않는다. 입력기 안에 남은 `ㅍ`가 다음 키와 합쳐져 `파`가 된다 (`Cmd+K` 다음 `V` 후 `k`) |
 | 수정 | `view.rs` `set_ime_allowed(false)`: 조합 텍스트가 있으면 `NSTextInputContext::discardMarkedText()`를 호출한다 (`unmarkText`가 이미 쓰는 방식) |
+
+### 수정 4 — `Cmd+Q`·Dock 종료를 창 닫기 요청으로 바꿈 (자체 수정, upstream 없음)
+
+| 항목 | 내용 |
+| :--- | :--- |
+| 결함 | `Cmd+Q`(winit 기본 앱 메뉴 Quit)·Dock 우클릭 종료·로그아웃은 `NSApplication terminate:`로 가는데, 앱 델리게이트에 `applicationShouldTerminate:`가 없어 macOS가 즉시 종료한다. 저장하지 않은 문서 확인을 건너뛴다 (P1-MAC 1-6a·c, P1-11 🍎). 빨간 닫기 버튼은 `windowShouldClose:` → `CloseRequested`라 가로채진다 |
+| 기준 | macOS 텍스트 편집기는 저장하지 않은 문서가 있으면 `Cmd+Q`·Dock 종료에서 확인을 받는다 |
+| 수정 | `app_state.rs`: `applicationShouldTerminate:` 구현. winit 창이 있으면 창마다 `CloseRequested`를 보내고(빨간 버튼과 같은 경로) `NSTerminateCancel`을 돌려준다. winit 창이 없으면 `NSTerminateNow`. 앱이 종료를 승인하면 이벤트 루프는 `stop:`으로 끝나므로 `terminate:`를 다시 거치지 않는다 |
 
 원본과의 차이는 다음으로 확인한다.
 

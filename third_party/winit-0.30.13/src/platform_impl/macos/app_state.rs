@@ -6,13 +6,15 @@ use std::time::Instant;
 use objc2::rc::Retained;
 use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSRunningApplication,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSApplicationTerminateReply, NSRunningApplication,
 };
 use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProtocol};
 
 use super::event_handler::EventHandler;
 use super::event_loop::{notify_windows_of_exit, stop_app_immediately, ActiveEventLoop, PanicInfo};
 use super::observer::{EventLoopWaker, RunLoop};
+use super::window::WinitWindow;
 use super::{menu, WindowId, DEVICE_ID};
 use crate::event::{DeviceEvent, Event, StartCause, WindowEvent};
 use crate::event_loop::{ActiveEventLoop as RootActiveEventLoop, ControlFlow};
@@ -69,6 +71,11 @@ declare_class!(
         #[method(applicationWillTerminate:)]
         fn app_will_terminate(&self, notification: &NSNotification) {
             self.will_terminate(notification)
+        }
+
+        #[method(applicationShouldTerminate:)]
+        fn app_should_terminate(&self, sender: &NSApplication) -> NSApplicationTerminateReply {
+            self.should_terminate(sender)
         }
     }
 );
@@ -161,6 +168,28 @@ impl ApplicationDelegate {
             let app = NSApplication::sharedApplication(mtm);
             stop_app_immediately(&app);
         }
+    }
+
+    /// My-Notepad: `Cmd+Q` (app menu Quit), Dock "Quit" and logout all go through
+    /// `terminate:`, which previously quit at once and skipped the app's unsaved-changes check.
+    /// Turn it into a `CloseRequested` per window, exactly like the red close button, and let the
+    /// app decide. Exiting the event loop afterwards uses `stop:`, not `terminate:`, so this
+    /// never blocks the app's own exit.
+    fn should_terminate(&self, sender: &NSApplication) -> NSApplicationTerminateReply {
+        trace_scope!("applicationShouldTerminate:");
+        let window_ids: Vec<WindowId> = sender
+            .windows()
+            .into_iter()
+            .filter(|window| window.is_kind_of::<WinitWindow>())
+            .map(|window| WindowId(Retained::as_ptr(&window) as usize))
+            .collect();
+        if window_ids.is_empty() {
+            return NSApplicationTerminateReply::NSTerminateNow;
+        }
+        for window_id in window_ids {
+            self.maybe_queue_window_event(window_id, WindowEvent::CloseRequested);
+        }
+        NSApplicationTerminateReply::NSTerminateCancel
     }
 
     fn will_terminate(&self, _notification: &NSNotification) {
