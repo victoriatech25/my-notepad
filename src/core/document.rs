@@ -903,8 +903,9 @@ mod tests {
         assert_eq!(doc.revision(), 1);
 
         // 2. 저장 완료 처리 -> modified = false 초기화, 경로 반영
+        // 경로 구분자가 OS마다 달라 `C:\docs\memo.txt` 같은 리터럴은 macOS에서 파일 이름 전체가 된다.
         doc.mark_saved(
-            Some(PathBuf::from("C:\\docs\\memo.txt")),
+            Some(PathBuf::from("docs").join("memo.txt")),
             Some(DiskMetadata {
                 modified_time: None,
                 byte_len: 30,
