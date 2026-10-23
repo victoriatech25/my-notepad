@@ -550,8 +550,8 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 - **선행**: MacBook Pro 사용 가능 시점 (Phase 1 진행 중 아무 때나) · 절차: [macos-checklist.md](macos-checklist.md)
 - 🍎 **macOS 검증**
   - [ ] P0-00 준비 체크리스트·칩 종류 기록·장비 전환 흐름 연습
-  - [ ] P0-01~02: Retina 선명도, `.ttc` 폰트(Menlo, Apple SD 산돌고딕 Neo) 한글·굵게
-  - [ ] **P0-03: macOS 2벌식 한글 IME 전 항목** (불합격 시 ADR 0001·프레임워크 재검토)
+  - [x] P0-01~02: Retina 선명도, `.ttc` 폰트(Menlo, Apple SD 산돌고딕 Neo) 한글·굵게 — 2026-10-23 통과
+  - [x] **P0-03: macOS 2벌식 한글 IME 전 항목** (불합격 시 ADR 0001·프레임워크 재검토) — 2026-10-23 통과 (전환 직후 첫 키는 winit 백포트로 수정)
   - [ ] P0-04~05: `Cmd` 단축키 선처리, `Cmd+Q`·빨간 버튼·Dock 종료 가로채기
   - [ ] P0-07: glow로 RSS·기동 시간 측정 (`cargo xtask measure`)
   - [ ] 완료된 Phase 1 WU의 🍎 항목
@@ -1076,6 +1076,13 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-22 | P1-14 | 🤖 | 통과 | `src/ui/viewer.rs` 보이는 줄만 그리는 읽기 전용 뷰어(가상 스크롤·고정 줄 번호·캐럿/선택·복사·긴 줄 4000자 제한), 1~5MB 안내 막대, 큰 파일 편집 모드 경고, 테스트 7개(줄 색인 CRLF/LF/Mixed·끝 개행·멀티바이트, 캐럿 이동, 20만 줄 렌더·모두 선택·복사, 탭 모드 전환). `cargo xtask measure --viewer` (Windows, 3회 평균): 10MB 첫 화면 335ms · 스크롤 2ms(최대 4) · 138MB / 50MB 520ms · 2ms(최대 3) · 221MB — §1.3 목표 충족 | |
 | 2026-10-22 | P1-14 | 🎨/👤 | 통과 | Windows: 10MB·50MB 열기·스크롤바 드래그, 드래그 선택·복사(한글), 상태 표시줄·읽기 전용 표시, 편집 모드 경고 후 전환, 1MB 안내 막대 → 뷰어 전환 5개 항목 및 UX 2개 항목 사용자 확인 (커밋 `d23071a`) | |
 | 2026-10-23 | P1-MAC 0단계 (P0-00 🍎) | 🍎 | 일부 | MacBook Pro(Apple M1 Pro, macOS 26.6.2): 0-1 `cargo xtask doctor` 통과(rustc 1.98.0, CRLF 픽스처 바이트 보존), 0-2 칩 종류 기록. 0-3 장비 전환 연습은 이 기록 커밋을 Windows에서 `git pull`로 확인하는 것으로 진행 중 (커밋 `58632d6` 기준) | |
+| 2026-10-23 | P1-01 (CI macOS) | 🤖 | 실패 → 수정 | `main`의 CI macOS 작업이 `922590f`(2026-10-21)부터 실패. 원인: `document.rs` 테스트가 저장 경로를 `C:\docs\memo.txt` 리터럴로 써서 macOS에서는 `\`가 구분자가 아니라 파일 이름 전체가 됨 (앱 코드 문제 아님, Windows 작업은 통과). 테스트 경로를 `PathBuf::from("docs").join("memo.txt")`로 바꿔 macOS에서 fmt·clippy·test 전체 통과 | |
+| 2026-10-23 | P1-MAC 1-2 | 🍎 | 통과 | `font-report`(스파이크·본 앱): Menlo face 0, Apple SD 산돌고딕 Neo Regular face 0·Bold face 6(굵기 700) 로드 실패 없음, 합계 약 1.8ms. 참고: face 이름이 `"?"`로 표시됨 — Apple 폰트의 이름 레코드가 Mac 플랫폼 인코딩이라 `is_unicode()` 필터에 걸림 (선택은 굵기 기준이라 동작 영향 없음, 보고서 표시만) | |
+| 2026-10-23 | P1-MAC 1-7a | 🍎 | 일부 미달 | §9.3 측정 결과 참조. 빈 문서·기동 시간·뷰어 첫 화면·스크롤은 충족, **10MB 뷰어 메모리 162MB(목표 ≤150MB) 미달**. 스파이크 glow 빈 문서 121MB(목표 ≤120MB)는 근소 초과지만 본 앱 빈 문서는 114MB로 충족 | |
+| 2026-10-23 | P1-MAC 1-4g | 🍎 | 실패 → 수정 → **재검증 통과** | `abc` → 한/영 → `김` 입력 시 첫 키가 조합 없이 낱자로 확정되어 `abcㄱㅏ…`. IME 로그: 첫 키 `KEY R → TEXT "ㄱ"`(Preedit 없음), 둘째 키부터 Preedit 정상. 같은 Mac에서 메모·텍스트 편집기는 정상 → winit 0.30.13 결함(winit#3095). upstream 미병합 PR winit#4744를 0.30.13에 백포트해 `[patch.crates-io]`로 적용 (`third_party/winit-0.30.13`, 브랜치 `wu/P1-MAC-korean-ime-first-key`, 커밋 `72b08b7`). 판정 로직 테스트 7개·워크스페이스 fmt·clippy·test 통과. 사용자 재검증: `abc` → 한/영 → `김` 정상 조합 | 2026-10-23 |
+| 2026-10-23 | P1-MAC 1-1·1-3·1-4 (P0-01~03 🍎) | 🍎 | **통과** | MacBook Pro(M1 Pro, macOS 26.6.2, 기본 2벌식): Retina 선명도, 한글·고정폭 정렬·비례폭·굵게, **IME 1-4a~h 전 항목 통과** (1-4g는 winit 백포트 `72b08b7` 적용 빌드 기준). G0에서 수용한 macOS IME 리스크 해소 | |
+| 2026-10-24 | P1-MAC 1-5 (P0-04 🍎) | 🍎 | 1-5c 실패 → 수정 → **통과** | `Cmd` 단축키 선처리·`Cmd+H` 앱 가리기 통과. 1-5c: 한글 조합 중 `Cmd+K` → `V`가 `ㅍ`로 입력됨. 원인 ① 조합 중 `Cmd+K`는 입력기가 조합만 확정하고 winit이 키 이벤트를 보내지 않음 ② `V`는 키 이벤트 없이 `Preedit("ㅍ")`로만 옴 ③ 앱이 조합을 끊어도 입력기 안의 `ㅍ`가 남아 다음 키와 합쳐짐(`파`). 수정: winit 사본 수정 2(조합 중 `Cmd`/`Ctrl` 키 전달)·수정 3(조합 끊기 시 `discardMarkedText`), `commands.rs`(대기 중 `ㅍ` 조합을 V로 인식·제거·조합 끊기, V가 아닌 조합은 대기 해제, 테스트 2개). 본 앱에서 조합 중 `Cmd+K` → `V` → `k` = `ㅏ`만 입력 확인. 부수 효과: 조합 중 `Cmd+S` 등 단축키도 실행됨 | 2026-10-24 |
+| 2026-10-24 | P1-MAC 1-6 (P0-05 🍎) | 🍎 | a·c 실패 → 수정 → **a·b·c 통과** (d 보류) | 1-6b 빨간 닫기 버튼 → 확인 대화상자 통과. 1-6a `Cmd+Q`·1-6c Dock 우클릭 → 종료는 확인 없이 바로 종료. 원인: 두 경로 모두 `NSApplication terminate:`로 가는데 winit 0.30.13 앱 델리게이트가 `applicationShouldTerminate:`를 구현하지 않아 macOS가 즉시 종료함 (빨간 버튼은 `windowShouldClose:` → `CloseRequested`로 가로채짐). 1-6d(취소·저장 안 함 동작)는 사용자 보류. 수정: winit 사본 수정 4(`applicationShouldTerminate:` → 창마다 `CloseRequested`, `NSTerminateCancel`). 재검증: `Cmd+Q`·Dock 종료 모두 확인 대화상자 표시 | 2026-10-24 (a·c) |
 
 ### 9.3 측정 결과 기록표
 
@@ -1092,6 +1099,10 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-20 | 실행 파일 크기 | editor-spike, glow+wgpu 포함 | 13.89MB | ≤ 15MB | 충족 |
 | 2026-10-20 | Markdown 미리보기 스크롤 | 1MB .md(1,980블록), 창 없이 60프레임 | 전체 26.0ms · **가상 1.4ms** | 60fps | 가상 스크롤로 충족 |
 | 2026-10-21 | 실행 파일 크기 (본 앱 P1-01) | `my-notepad.exe`, Windows x86_64, `glow` 단독(`wgpu` 제외), LTO thin + strip | **7.06MB** (7,406,592 B) | ≤ 15MB | 충족 |
+| 2026-10-23 | 실행 파일 크기 (본 앱) | `my-notepad`, macOS aarch64 (M1 Pro), `glow` 단독, LTO thin + strip | 7.73MB | ≤ 15MB | 충족 |
+| 2026-10-23 | 메모리 (빈 문서, 본 앱) | macOS RSS, 릴리스, 창 1개·빈 탭 1개, 기동 2.5초 뒤, 5회 | 114MB (113~115) | ≤ 120MB | 충족 |
+| 2026-10-23 | 메모리·기동 시간 (스파이크, P0-07 macOS) | `cargo xtask measure --runs 10`, RSS, 한글 폰트 직접 구성 | glow 빈 문서 225ms · 121MB / wgpu 258ms · 111MB · 10MB 문서(방식 A) glow 2,820ms · 2,188MB | warm ≤ 400ms · ≤ 120MB | 기동 충족 · 메모리 근소 초과 (본 앱은 114MB 충족). macOS는 Windows와 달리 wgpu가 glow보다 약간 적음 |
+| 2026-10-23 | 대용량 뷰어 (P1-14 macOS) | `cargo xtask measure --viewer`, 5회 평균, RSS | 10MB 첫 화면 240ms · 스크롤 2ms(최대 2) · **162MB** / 50MB 372ms · 2ms(최대 2) · 325MB | 첫 화면 ≤ 1s(10MB)·≤ 2s(50MB), 스크롤 ≤ 16ms, 10MB 메모리 ≤ 150MB | 시간 충족 · **10MB 메모리 미달** (Windows 138MB) |
 
 ### 9.4 UX 백로그
 
