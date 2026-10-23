@@ -12,7 +12,23 @@
 | 수정 | upstream PR [winit#4744](https://github.com/rust-windowing/winit/pull/4744)를 0.30 구조에 맞춰 백포트. 첫 키가 정확히 낱자 한 글자의 `insertText`로만 처리되면 같은 키 이벤트를 IME에 한 번 더 해석시킨다 |
 | 바뀐 파일 | `src/platform_impl/macos/ime_startup.rs`(신규, 판정 로직 + 테스트 7개), `src/platform_impl/macos/mod.rs`, `src/platform_impl/macos/view.rs` |
 | 0.30 대응 | master의 `ime_capabilities`는 0.30의 `ime_allowed`, `enable_ime`/`disable_ime` 초기화는 `set_ime_allowed`, `ModifiersState::META`는 `SUPER`로 옮겼다. 0.30에는 `pending_commit`이 없어 그 조건은 뺐다 (0.30은 키 처리 안에서 `Committed` 상태를 바로 정리한다) |
-| 제거 조건 | eframe이 쓰는 winit 배포판에 #4744(또는 같은 수정)가 들어오면 사본과 `[patch.crates-io]`를 지운다 |
+| 제거 조건 | eframe이 쓰는 winit 배포판에 #4744(또는 같은 수정)가 들어오면 사본과 `[patch.crates-io]`를 지운다. 단 아래 수정 2·3이 upstream에 없으면 그것만 남긴 사본을 유지하거나 앱 쪽 대안을 다시 찾는다 |
+
+### 수정 2 — 조합 중 `Cmd`/`Ctrl` 단축키 전달 (자체 수정, upstream 없음)
+
+| 항목 | 내용 |
+| :--- | :--- |
+| 결함 | 한글 조합 중 `Cmd+K`·`Cmd+S` 같은 단축키를 누르면 입력기가 조합만 확정(`Commit`)하고 winit이 키 이벤트를 앱에 보내지 않는다. 그래서 단축키가 실행되지 않는다 (P1-MAC 1-5c: `Cmd+K` 다음 `V`가 `ㅍ`로 입력됨) |
+| 확인 | 본 앱 임시 로그: `Key(SuperLeft)` → `Preedit "마"` → `Commit("마")`, `K [Cmd]` 키 이벤트 없음 |
+| 기준 | macOS 텍스트 편집기는 조합 중 `Cmd+S`를 누르면 조합을 확정하고 저장한다 |
+| 수정 | `view.rs` `keyDown`: `Cmd`·`Ctrl`이 눌린 키는 입력기가 조합을 확정했어도 `KeyboardInput`을 함께 보낸다. `Cmd` 조합은 egui-winit이 글자로 만들지 않으므로 단축키로만 처리된다 |
+
+### 수정 3 — 조합 끊기 시 입력기 조합도 버림 (자체 수정, upstream 없음)
+
+| 항목 | 내용 |
+| :--- | :--- |
+| 결함 | 앱이 조합을 끊으면(egui `interrupt_ime` → `set_ime_allowed(false)`) winit은 자기 쪽 조합 텍스트만 비우고 입력기에는 알리지 않는다. 입력기 안에 남은 `ㅍ`가 다음 키와 합쳐져 `파`가 된다 (`Cmd+K` 다음 `V` 후 `k`) |
+| 수정 | `view.rs` `set_ime_allowed(false)`: 조합 텍스트가 있으면 `NSTextInputContext::discardMarkedText()`를 호출한다 (`unmarkText`가 이미 쓰는 방식) |
 
 원본과의 차이는 다음으로 확인한다.
 

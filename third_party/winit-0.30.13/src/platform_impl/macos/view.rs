@@ -522,7 +522,12 @@ declare_class!(
                 _ => old_ime_state != self.ivars().ime_state.get(),
             };
 
-            if !had_ime_input || self.ivars().forward_key_to_app.get() {
+            // My-Notepad: a Cmd/Ctrl chord is never text input. When it arrives during a
+            // composition the IME commits the preedit and nothing is forwarded, so the app never
+            // sees the shortcut (e.g. Cmd+K, Cmd+S while typing Hangul). Forward it after the
+            // commit, like NSTextView does.
+            let is_shortcut = modifiers.intersects(ModifiersState::SUPER | ModifiersState::CONTROL);
+            if !had_ime_input || self.ivars().forward_key_to_app.get() || is_shortcut {
                 let key_event = create_key_event(&event, true, unsafe { event.isARepeat() });
                 self.queue_event(WindowEvent::KeyboardInput {
                     device_id: DEVICE_ID,
@@ -927,6 +932,13 @@ impl WinitView {
         self.ivars().ime_allowed.set(ime_allowed);
         if self.ivars().ime_allowed.get() {
             return;
+        }
+
+        // My-Notepad: also make the input method drop its own composition. Clearing only our
+        // marked text leaves e.g. a Hangul 'ㅍ' inside the IME, which then reappears combined
+        // with the next key ('파') after the app interrupted the composition.
+        if unsafe { self.hasMarkedText() } {
+            self.inputContext().expect("input context").discardMarkedText();
         }
 
         // Clear markedText

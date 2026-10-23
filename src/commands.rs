@@ -453,7 +453,7 @@ impl KeyDispatcher {
     pub fn dispatch(&mut self, ctx: &egui::Context, keymap: &Keymap) -> Option<Command> {
         // 1. 이전 프레임에서 Ctrl/Cmd+K가 눌려 대기 중이면 V 키를 먼저 확인한다.
         if self.chord_k_pending {
-            let (v_pressed, any_other_key) = ctx.input_mut(|i| {
+            let (v_pressed, v_from_ime, any_other_key) = ctx.input_mut(|i| {
                 // 한글 입력 상태에서는 논리 키가 `V`가 아닐 수 있으므로 물리 키도 확인한다.
                 // `Shift`는 허용(대문자 입력), `Ctrl`/`Cmd`/`Alt`가 눌린 경우는 다른 단축키로 본다.
                 let position = i.events.iter().position(|e| {
@@ -464,9 +464,18 @@ impl KeyDispatcher {
                             && !modifiers.command
                             && !modifiers.mac_cmd)
                 });
-                let pressed = position.is_some();
+                // macOS에서 한글 입력기가 조합 중일 때 누른 V는 winit이 키 이벤트 없이
+                // 조합(`Preedit("ㅍ")`)으로만 보낸다 (P1-MAC 1-5c). 이 조합 시작도 V로 본다.
+                let from_ime = position.is_none()
+                    && i.events.iter().any(|e| {
+                        matches!(e, Event::Ime(ImeEvent::Preedit { text, .. })
+                            if CHORD_V_TEXTS.contains(&text.as_str()))
+                    });
+                let pressed = position.is_some() || from_ime;
                 if let Some(position) = position {
                     i.events.remove(position);
+                }
+                if pressed {
                     // 키 이벤트와 같은 프레임에 들어온 문자 입력·IME 조합('v'/'V'/'ㅍ')까지 지워야
                     // TextEdit에 글자가 입력되지 않는다 (P0-04 검증 패턴).
                     i.events.retain(|e| match e {
@@ -478,13 +487,22 @@ impl KeyDispatcher {
                         _ => true,
                     });
                 }
-                let other = i
-                    .events
-                    .iter()
-                    .any(|e| matches!(e, Event::Key { pressed: true, .. }));
-                (pressed, other)
+                // macOS 입력기가 처리한 다른 키도 키 이벤트 없이 조합으로만 오므로, 글자가 있는 조합도
+                // "다른 키"로 보고 대기를 푼다 (뒤늦은 'ㅍ'가 분할 보기로 처리되지 않게).
+                let other = i.events.iter().any(|e| match e {
+                    Event::Key { pressed: true, .. } => true,
+                    Event::Ime(ImeEvent::Preedit { text, .. } | ImeEvent::Commit(text)) => {
+                        !text.is_empty()
+                    }
+                    _ => false,
+                });
+                (pressed, from_ime, other)
             });
 
+            if v_from_ime {
+                // 입력기 쪽 조합('ㅍ')도 끊어야 다음 모음과 합쳐져 글자가 되살아나지 않는다.
+                ctx.memory_mut(|m| m.interrupt_ime());
+            }
             if v_pressed {
                 self.chord_k_pending = false;
                 return Some(Command::ToggleMdSplit);
@@ -908,6 +926,35 @@ mod tests {
             assert!(!pending);
             assert_eq!(remaining, 0, "'ㅍ' 문자·IME 이벤트가 제거되어야 함");
         }
+    }
+
+    #[test]
+    fn chord_k_then_v_as_macos_hangul_preedit_only_dispatches_and_strips() {
+        // macOS 한글 입력기가 조합 중일 때: V 키 이벤트 없이 Preedit("ㅍ")만 들어온다 (P1-MAC 1-5c).
+        let (cmd, pending, remaining) = simulate_chord(
+            true,
+            vec![Event::Ime(ImeEvent::Preedit {
+                text: "ㅍ".to_owned(),
+                active_range_chars: Some(1..1),
+            })],
+        );
+        assert_eq!(cmd, Some(Command::ToggleMdSplit));
+        assert!(!pending);
+        assert_eq!(remaining, 0, "'ㅍ' 조합 이벤트가 제거되어야 함");
+    }
+
+    #[test]
+    fn chord_k_then_other_hangul_preedit_cancels_and_keeps_composition() {
+        let (cmd, pending, remaining) = simulate_chord(
+            true,
+            vec![Event::Ime(ImeEvent::Preedit {
+                text: "ㅎ".to_owned(),
+                active_range_chars: Some(1..1),
+            })],
+        );
+        assert_eq!(cmd, None);
+        assert!(!pending, "V가 아닌 조합이 시작되면 대기가 풀려야 함");
+        assert_eq!(remaining, 1, "V가 아닌 조합은 그대로 남아야 함");
     }
 
     #[test]
