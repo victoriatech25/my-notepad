@@ -334,6 +334,45 @@ pub fn decode_bytes_with_default(bytes: &[u8], default_encoding: TextEncoding) -
     }
 }
 
+/// [`decode_bytes_with_default`]와 같지만 바이트 소유권을 넘겨받아, 유효한 UTF-8이면 복사하지 않고
+/// 그대로 `String`으로 바꾼다 (BOM은 제자리에서 지움). 큰 파일을 열 때 본문 복사본을 하나 줄인다
+/// (P1-MAC 1-7a 뷰어 메모리 조사). 바이너리로 판정되면 받은 바이트를 `Err`로 돌려준다.
+pub fn decode_owned_with_default(
+    bytes: Vec<u8>,
+    default_encoding: TextEncoding,
+) -> Result<DecodedDocument, Vec<u8>> {
+    let detected = match detect_encoding_with_default(&bytes, default_encoding) {
+        DetectionOutcome::Binary => return Err(bytes),
+        DetectionOutcome::Text(detected) => detected,
+    };
+    let mut doc = match detected.encoding {
+        TextEncoding::Utf8 | TextEncoding::Utf8Bom => {
+            let mut bytes = bytes;
+            let had_bom = bytes.starts_with(UTF8_BOM);
+            if had_bom {
+                bytes.drain(..UTF8_BOM.len());
+            }
+            match String::from_utf8(bytes) {
+                Ok(text) => DecodedDocument {
+                    text,
+                    encoding: detected.encoding,
+                    has_bom: had_bom,
+                    estimated: false,
+                    fallback_from: None,
+                    damaged: false,
+                },
+                // 잘못된 바이트가 있으면 기존 경로로 `U+FFFD` 치환 디코딩한다 (BOM 여부는 아래에서 감지 결과로 덮음).
+                Err(err) => decode_with_encoding(err.as_bytes(), detected.encoding),
+            }
+        }
+        encoding => decode_with_encoding(&bytes, encoding),
+    };
+    doc.has_bom = detected.has_bom;
+    doc.estimated = detected.estimated;
+    doc.fallback_from = detected.fallback_from;
+    Ok(doc)
+}
+
 /// 지정한 [`TextEncoding`]으로 바이트 슬라이스를 강제 디코딩한다.
 ///
 /// - "인코딩으로 다시 읽기"(`Command::ReopenWithEncoding`)나 바이너리 파일을 읽기 전용으로 열 때 사용한다.
@@ -884,6 +923,35 @@ The quick brown fox jumps over the lazy dog 0123456789.\r\n";
         assert!(doc.damaged);
         assert!(doc.text.contains(char::REPLACEMENT_CHARACTER));
         assert!(doc.text.starts_with('A'));
+    }
+
+    #[test]
+    fn decode_owned_matches_borrowed_decode_for_all_fixtures() {
+        let mut fixtures: Vec<(String, Vec<u8>)> = fs::read_dir(fixtures_dir())
+            .expect("픽스처 폴더")
+            .map(|entry| {
+                let name = entry.expect("픽스처 항목").file_name();
+                let name = name.to_string_lossy().into_owned();
+                let bytes = read_fixture(&name);
+                (name, bytes)
+            })
+            .collect();
+        // 잘못된 UTF-8 + BOM: 소유 경로의 `U+FFFD` 대체 분기
+        fixtures.push((
+            "utf8_bom_damaged".to_owned(),
+            vec![0xEF, 0xBB, 0xBF, b'a', 0xFF, b'b'],
+        ));
+        for (name, bytes) in fixtures {
+            for default in [TextEncoding::Utf8, TextEncoding::EucKr] {
+                let borrowed = decode_bytes_with_default(&bytes, default);
+                let owned = decode_owned_with_default(bytes.clone(), default);
+                match (borrowed, owned) {
+                    (DecodeOutcome::Text(b), Ok(o)) => assert_eq!(b, o, "{name}"),
+                    (DecodeOutcome::Binary, Err(back)) => assert_eq!(back, bytes, "{name}"),
+                    (b, o) => panic!("{name}: 판정이 다름 {b:?} / {o:?}"),
+                }
+            }
+        }
     }
 
     fn decode_text(bytes: &[u8]) -> DecodedDocument {
