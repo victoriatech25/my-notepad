@@ -238,11 +238,20 @@ pub fn analyze_and_normalize_with_default(
     text: &str,
     default_line_ending: LineEnding,
 ) -> NormalizedDocumentText {
-    let detection = detect_line_ending_with_default(text, default_line_ending);
+    analyze_and_normalize_owned(text.to_owned(), default_line_ending)
+}
+
+/// [`analyze_and_normalize_with_default`]와 같지만 텍스트 소유권을 넘겨받아, `CR`이 없으면(LF 전용 파일)
+/// 복사하지 않고 그대로 돌려준다 (P1-MAC 1-7a 뷰어 메모리 조사).
+pub fn analyze_and_normalize_owned(
+    text: String,
+    default_line_ending: LineEnding,
+) -> NormalizedDocumentText {
+    let detection = detect_line_ending_with_default(&text, default_line_ending);
     let normalized = if detection.counts.crlf == 0 && detection.counts.cr == 0 {
-        text.to_owned()
+        text
     } else {
-        normalize_to_lf(text)
+        normalize_to_lf(&text)
     };
 
     NormalizedDocumentText {

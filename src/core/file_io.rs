@@ -235,22 +235,35 @@ pub fn open_document(
     default_encoding: TextEncoding,
     default_line_ending: LineEnding,
 ) -> Result<OpenOutcome, FileIoError> {
-    let loaded = read_file(path, policy)?;
-    let readonly = loaded.readonly || loaded.open_mode == OpenMode::Viewer;
-    match Document::from_bytes_with_defaults(
-        Some(loaded.path.clone()),
-        &loaded.bytes,
+    let LoadedFile {
+        path,
+        bytes,
+        metadata,
+        readonly: file_readonly,
+        open_mode,
+    } = read_file(path, policy)?;
+    let readonly = file_readonly || open_mode == OpenMode::Viewer;
+    // 바이트 소유권을 넘겨 본문 복사를 줄인다 (10MB 파일에서 열기 중 최대 사용량 40MB → 약 10MB).
+    match Document::from_owned_bytes_with_defaults(
+        Some(path.clone()),
+        bytes,
         default_encoding,
         default_line_ending,
         readonly,
-        Some(loaded.metadata),
+        Some(metadata),
     ) {
         Ok(document) => Ok(OpenOutcome::Opened(Box::new(OpenedDocument {
             document,
-            open_mode: loaded.open_mode,
-            file_readonly: loaded.readonly,
+            open_mode,
+            file_readonly,
         }))),
-        Err(_) => Ok(OpenOutcome::Binary(Box::new(loaded))),
+        Err(bytes) => Ok(OpenOutcome::Binary(Box::new(LoadedFile {
+            path,
+            bytes,
+            metadata,
+            readonly: file_readonly,
+            open_mode,
+        }))),
     }
 }
 

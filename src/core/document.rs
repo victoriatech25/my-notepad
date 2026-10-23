@@ -20,11 +20,11 @@ use std::time::SystemTime;
 use crate::core::buffer::{LineIndex, StringBuffer, TextBuffer, byte_to_char_offset};
 use crate::core::encoding::{
     DecodeOutcome, DecodedDocument, TextEncoding, UnmappableChar, UnmappableError,
-    decode_bytes_with_default, encode_text_lossy_with_bom, encode_text_with_bom,
-    find_unmappable_chars,
+    decode_bytes_with_default, decode_owned_with_default, encode_text_lossy_with_bom,
+    encode_text_with_bom, find_unmappable_chars,
 };
 use crate::core::line_ending::{
-    LineEnding, analyze_and_normalize_with_default, apply_line_ending, normalize_to_lf,
+    LineEnding, analyze_and_normalize_owned, apply_line_ending, normalize_to_lf,
 };
 
 /// 탭별 Undo/Redo 스택의 기본 최대 보관 단계 수.
@@ -114,12 +114,44 @@ impl HistoryEntry {
     }
 }
 
+/// 저장 기준점의 본문 지문 (길이 + 해시).
+///
+/// 본문 전체를 복사해 두면 10MB 문서에서 10MB가 더 든다 (P1-MAC 1-7a 뷰어 메모리 조사).
+/// 길이가 다르면 해시 없이 바로 "다름"으로 판정하므로, 해시는 길이가 같은 편집에서만 계산한다.
+/// 서로 다른 본문이 같은 지문을 가질 확률(약 2⁻⁶⁴)은 무시한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TextFingerprint {
+    len: usize,
+    hash: u64,
+}
+
+impl TextFingerprint {
+    fn of(text: &str) -> Self {
+        Self {
+            len: text.len(),
+            hash: hash_text(text),
+        }
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        self.len == text.len() && self.hash == hash_text(text)
+    }
+}
+
+fn hash_text(text: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hasher};
+    // `DefaultHasher::new()`는 키가 고정이라 같은 프로세스 안에서 같은 본문은 항상 같은 값을 낸다.
+    let mut hasher = DefaultHasher::new();
+    hasher.write(text.as_bytes());
+    hasher.finish()
+}
+
 /// 마지막 저장 시점(또는 최초 로드 시점)의 문서 기준 상태.
 ///
 /// Undo/Redo나 인코딩·줄바꿈 변경 후 문서가 저장 시점 상태와 일치하는지 판정하는 데 사용한다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SavedBaseline {
-    text: String,
+    text: TextFingerprint,
     encoding: TextEncoding,
     has_bom: bool,
     line_ending: LineEnding,
@@ -200,7 +232,7 @@ impl Document {
     ) -> Self {
         let has_bom = !default_encoding.bom_bytes().is_empty();
         let baseline = SavedBaseline {
-            text: String::new(),
+            text: TextFingerprint::of(""),
             encoding: default_encoding,
             has_bom,
             line_ending: default_line_ending,
@@ -244,9 +276,9 @@ impl Document {
         readonly: bool,
         disk_metadata: Option<DiskMetadata>,
     ) -> Self {
-        let norm = analyze_and_normalize_with_default(&decoded.text, default_line_ending);
+        let norm = analyze_and_normalize_owned(decoded.text, default_line_ending);
         let baseline = SavedBaseline {
-            text: norm.text.clone(),
+            text: TextFingerprint::of(&norm.text),
             encoding: decoded.encoding,
             has_bom: decoded.has_bom,
             line_ending: norm.detection.line_ending,
@@ -320,6 +352,26 @@ impl Document {
                 disk_metadata,
             )),
         }
+    }
+
+    /// [`Document::from_bytes_with_defaults`]와 같지만 바이트 소유권을 넘겨받아 본문 복사를 줄인다
+    /// (큰 파일 열기용). 바이너리로 판정되면 받은 바이트를 `Err`로 돌려준다.
+    pub fn from_owned_bytes_with_defaults(
+        path: Option<PathBuf>,
+        bytes: Vec<u8>,
+        default_encoding: TextEncoding,
+        default_line_ending: LineEnding,
+        readonly: bool,
+        disk_metadata: Option<DiskMetadata>,
+    ) -> Result<Self, Vec<u8>> {
+        let decoded = decode_owned_with_default(bytes, default_encoding)?;
+        Ok(Self::from_decoded(
+            path,
+            decoded,
+            default_line_ending,
+            readonly,
+            disk_metadata,
+        ))
     }
 
     // ── 조회자 (Getters) ──
@@ -761,7 +813,7 @@ impl Document {
         self.encoding_fallback_from = None;
         self.typing_group_open = false;
         self.saved_baseline = Some(SavedBaseline {
-            text: self.buffer.as_string().clone(),
+            text: TextFingerprint::of(self.buffer.as_str()),
             encoding: self.encoding,
             has_bom: self.has_bom,
             line_ending: self.line_ending,
@@ -832,7 +884,7 @@ impl Document {
         self.revision = self.revision.wrapping_add(1);
         self.modified = match &self.saved_baseline {
             Some(base) => {
-                self.buffer.as_str() != base.text
+                !base.text.matches(self.buffer.as_str())
                     || self.encoding != base.encoding
                     || self.has_bom != base.has_bom
                     || self.line_ending != base.line_ending
@@ -920,6 +972,50 @@ mod tests {
             std::str::from_utf8(&saved_bytes).unwrap(),
             "첫 번째 줄\r\n두 번째 줄"
         );
+    }
+
+    #[test]
+    fn same_length_edit_is_modified_and_undo_back_is_not() {
+        // 저장 기준점이 본문 대신 지문(길이 + 해시)이므로, 길이가 같은 편집에서 해시 비교가 실제로 쓰인다.
+        let mut doc = Document::from_owned_bytes_with_defaults(
+            None,
+            b"abc\r\ndef\r\n".to_vec(),
+            TextEncoding::Utf8,
+            LineEnding::Lf,
+            false,
+            None,
+        )
+        .expect("텍스트");
+        assert_eq!(doc.text(), "abc\ndef\n");
+        assert!(!doc.is_modified());
+
+        assert!(doc.replace_range(0..1, "x"));
+        assert_eq!(doc.text().len(), "abc\ndef\n".len());
+        assert!(doc.is_modified(), "같은 길이라도 내용이 다르면 수정됨");
+
+        assert!(doc.undo());
+        assert!(!doc.is_modified(), "기준점으로 되돌리면 수정 안 됨");
+
+        // Undo가 아닌 편집으로 원래 내용에 돌아와도 수정 안 됨
+        assert!(doc.replace_range(4..5, "y"));
+        assert!(doc.is_modified());
+        assert!(doc.replace_range(4..5, "d"));
+        assert!(!doc.is_modified(), "내용이 기준점과 같으면 수정 안 됨");
+    }
+
+    #[test]
+    fn owned_bytes_binary_returns_bytes() {
+        let bytes = vec![b'a', 0x00, b'b', 0x00, 0x00, 0x01, 0x02];
+        let back = Document::from_owned_bytes_with_defaults(
+            None,
+            bytes.clone(),
+            TextEncoding::Utf8,
+            LineEnding::Lf,
+            false,
+            None,
+        )
+        .expect_err("바이너리");
+        assert_eq!(back, bytes);
     }
 
     #[test]
