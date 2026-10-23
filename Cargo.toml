@@ -39,6 +39,14 @@ members = [
     "spikes/md-spike",
 ]
 default-members = ["."]
+# 패치한 외부 크레이트 사본은 워크스페이스 멤버가 아니다 (우리 clippy·fmt 규칙을 적용하지 않는다).
+exclude = ["third_party/winit-0.30.13"]
+
+# macOS 한글 2벌식에서 입력 소스 전환 직후 첫 키가 조합되지 않고 낱자로 들어오는 winit 결함(winit#3095)을
+# upstream 수정 winit#4744를 0.30.13에 백포트해 고친다. eframe이 쓰는 winit 배포판에 수정이 들어오면 제거한다.
+# 상세: third_party/README.md
+[patch.crates-io]
+winit = { path = "third_party/winit-0.30.13" }
 
 [workspace.package]
 edition = "2024"
