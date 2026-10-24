@@ -9,12 +9,15 @@
 //! - 붙여넣기 텍스트의 `CRLF`/`CR`은 위젯에 들어가기 전에 `LF`로 바꾼다 (문서 내부는 `LF` 정규화, 커서 위치 어긋남 방지).
 //! - `Tab` 키는 탭 문자를 넣고 포커스를 옮기지 않는다 (`lock_focus`). `Ctrl+Tab`은 전역 단축키(다음 탭)로 먼저 소비된다.
 //! - 커서만 움직이면(입력 없이) 연속 입력 묶음을 끊어, 떨어진 위치의 입력이 한 Undo 단계로 합쳐지지 않게 한다.
+//! - 줄 번호 Gutter는 스크롤 영역 밖 왼쪽에 고정하고 본문만 스크롤한다 (가로 스크롤해도 번호는 제자리, P2-01).
+//!   번호는 `TextEdit`이 그린 레이아웃(galley)의 행에서 **논리 줄의 첫 행**에만 붙인다 (자동 줄바꿈으로 접힌 행은 번호 없음).
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use eframe::egui::{
-    self, Event, FontId, Id, Key, ViewportCommand,
-    text::{CCursor, CCursorRange},
+    self, Event, FontId, Galley, Id, Key, Pos2, Rect, UiBuilder, ViewportCommand,
+    text::{CCursor, CCursorRange, LayoutJob},
     text_edit::TextEditState,
 };
 
@@ -22,6 +25,7 @@ use crate::commands::Command;
 use crate::core::buffer::char_to_byte_offset;
 use crate::core::document::Document;
 use crate::core::line_ending::normalize_to_lf;
+use crate::ui::theme::Palette;
 
 /// 에디터 표시 옵션.
 #[derive(Debug, Clone)]
@@ -148,6 +152,7 @@ impl EditorState {
         ui: &mut egui::Ui,
         doc: &mut Document,
         options: &EditorOptions,
+        palette: &Palette,
     ) -> EditorOutput {
         let ctx = ui.ctx().clone();
 
@@ -184,18 +189,49 @@ impl EditorState {
             scroll = scroll.vertical_scroll_offset(y);
         }
 
+        // 왼쪽 Gutter 칸과 오른쪽 본문(스크롤 영역)으로 나눈다.
+        let char_width = ui.fonts_mut(|f| f.glyph_width(&options.font, '0'));
+        let full = ui.available_rect_before_wrap();
+        let gutter_rect = Rect::from_min_max(
+            full.min,
+            Pos2::new(
+                full.min.x + gutter_width(doc.line_count(), char_width),
+                full.max.y,
+            ),
+        );
+        let text_rect = Rect::from_min_max(Pos2::new(gutter_rect.max.x, full.min.y), full.max);
+
         let readonly = doc.is_readonly();
         let id = self.id;
-        let scroll_output = scroll.show(ui, |ui| {
-            let min_size = ui.available_size();
-            if readonly {
-                // 읽기 전용 문서도 선택·복사는 되도록 `&str`로 그린다.
-                let mut text = self.scratch.as_str();
-                text_edit(&mut text, id, options, min_size).show(ui)
-            } else {
-                text_edit(&mut self.scratch, id, options, min_size).show(ui)
-            }
-        });
+        let scratch = &mut self.scratch;
+        // 기본 레이아웃과 같되, 자동 줄바꿈을 끄면 줄바꿈 폭을 무한대로 한다
+        // (`desired_width(INFINITY)`만으로는 보이는 폭에서 접혀 가로 스크롤이 생기지 않는다).
+        let wrap = options.word_wrap;
+        let font = options.font.clone();
+        let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+            let mut job = LayoutJob::simple(
+                buf.as_str().to_owned(),
+                font.clone(),
+                ui.visuals().text_color(),
+                if wrap { wrap_width } else { f32::INFINITY },
+            );
+            job.keep_trailing_whitespace = true;
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
+        let scroll_output = ui
+            .scope_builder(UiBuilder::new().max_rect(text_rect), |ui| {
+                scroll.show(ui, |ui| {
+                    let min_size = ui.available_size();
+                    if readonly {
+                        // 읽기 전용 문서도 선택·복사는 되도록 `&str`로 그린다.
+                        let mut text = scratch.as_str();
+                        text_edit(&mut text, id, options, min_size, &mut layouter).show(ui)
+                    } else {
+                        text_edit(scratch, id, options, min_size, &mut layouter).show(ui)
+                    }
+                })
+            })
+            .inner;
         doc.set_scroll_offset_y(scroll_output.state.clamped_offset().y);
 
         let output = scroll_output.inner;
@@ -228,6 +264,17 @@ impl EditorState {
         if focused_before && !has_focus {
             doc.break_undo_group();
         }
+
+        let (current_line, _, _) = cursor_status(doc);
+        paint_gutter(
+            ui,
+            gutter_rect,
+            &output.galley,
+            output.galley_pos,
+            current_line,
+            &options.font,
+            palette,
+        );
         EditorOutput { changed, has_focus }
     }
 
@@ -243,10 +290,12 @@ fn text_edit<'t>(
     id: Id,
     options: &EditorOptions,
     min_size: egui::Vec2,
+    layouter: &'t mut dyn FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> Arc<Galley>,
 ) -> egui::TextEdit<'t> {
     egui::TextEdit::multiline(text)
         .id(id)
         .font(options.font.clone())
+        .layouter(layouter)
         .frame(egui::Frame::NONE)
         .margin(egui::Margin::symmetric(6, 4))
         .lock_focus(true)
@@ -256,6 +305,69 @@ fn text_edit<'t>(
             f32::INFINITY
         })
         .min_size(min_size)
+}
+
+/// 줄 번호 Gutter 폭. 최소 3자리이고 줄 수 자릿수(1,000·10,000줄 …)에 맞춰 늘어난다 (뷰어와 같은 폭).
+///
+/// 구성: 왼쪽 여백 1칸 + 번호 + 본문과의 빈 간격 [`gutter_gap`] (구분선 없이 여백으로 구분 — UX-007).
+pub fn gutter_width(line_count: usize, char_width: f32) -> f32 {
+    let digits = line_count.max(1).to_string().len().max(3);
+    (digits + 1) as f32 * char_width + gutter_gap(char_width)
+}
+
+/// 줄 번호 오른쪽 끝과 Gutter 오른쪽 경계 사이의 빈 간격 (본문 글자는 여기에 에디터 안쪽 여백이 더해진 뒤 시작).
+pub fn gutter_gap(char_width: f32) -> f32 {
+    char_width * 2.5
+}
+
+/// 레이아웃 행 중 논리 줄의 첫 행만 `(1-기반 줄 번호, galley 기준 행 영역)`으로 돌려준다
+/// (자동 줄바꿈으로 접힌 행은 건너뜀).
+fn logical_line_rows(galley: &Galley) -> impl Iterator<Item = (usize, Rect)> + '_ {
+    let mut line = 0;
+    let mut starts_line = true;
+    galley.rows.iter().filter_map(move |row| {
+        let numbered = starts_line.then(|| {
+            line += 1;
+            (line, row.rect())
+        });
+        starts_line = row.ends_with_newline;
+        numbered
+    })
+}
+
+/// 본문 레이아웃의 행 위치에 맞춰 Gutter에 줄 번호를 그린다 (보이는 행만).
+fn paint_gutter(
+    ui: &egui::Ui,
+    rect: Rect,
+    galley: &Galley,
+    galley_pos: Pos2,
+    current_line: usize,
+    font: &FontId,
+    palette: &Palette,
+) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, palette.gutter_bg);
+    let number_right = rect.max.x - gutter_gap(painter.fonts_mut(|f| f.glyph_width(font, '0')));
+    for (line, row_rect) in logical_line_rows(galley) {
+        let row_rect = row_rect.translate(galley_pos.to_vec2());
+        if row_rect.max.y < rect.min.y {
+            continue;
+        }
+        if row_rect.min.y > rect.max.y {
+            break;
+        }
+        painter.text(
+            Pos2::new(number_right, row_rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            line.to_string(),
+            font.clone(),
+            if line == current_line {
+                palette.gutter_current
+            } else {
+                palette.gutter_text
+            },
+        );
+    }
 }
 
 /// `TextEdit`에 들어가기 전에 입력 이벤트를 고친다.
@@ -354,7 +466,7 @@ mod tests {
         let mut out = EditorOutput::default();
         let mut full = ctx.run_ui(raw, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                out = editor.show(ui, doc, &options());
+                out = editor.show(ui, doc, &options(), &Palette::light());
             });
         });
         // 렌더러가 없으므로 폰트 텍스처 갱신분을 직접 버린다 (버리지 않으면 디버그 빌드에서 panic).
@@ -601,6 +713,110 @@ mod tests {
         assert_eq!(doc.cursor_char_range(), 5..5);
         frame(&ctx, &mut editor, &mut doc, vec![Event::Text("!".into())]);
         assert_eq!(doc.text(), "a\nb\nc!");
+    }
+
+    /// 헤드리스 프레임 하나를 그리고 Gutter 줄 번호 `(번호, 오른쪽 끝 x, y)`와 본문 글자 도형의 화면 영역을 돌려준다.
+    fn gutter_frame(
+        ctx: &egui::Context,
+        editor: &mut EditorState,
+        doc: &mut Document,
+        word_wrap: bool,
+    ) -> (Vec<(usize, f32, f32)>, egui::Rect) {
+        let raw = RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let options = EditorOptions {
+            word_wrap,
+            font: FontId::monospace(14.0),
+        };
+        let mut full = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                editor.show(ui, doc, &options, &Palette::light());
+            });
+        });
+        full.textures_delta.clear();
+        let mut numbers = Vec::new();
+        let mut body = egui::Rect::NOTHING;
+        for clipped in &full.shapes {
+            if let egui::Shape::Text(t) = &clipped.shape {
+                match t.galley.text().parse::<usize>() {
+                    Ok(n) => numbers.push((n, t.pos.x + t.galley.rect.max.x, t.pos.y)),
+                    Err(_) => body = t.galley.rect.translate(t.pos.to_vec2()),
+                }
+            }
+        }
+        numbers.sort_by_key(|(n, _, _)| *n);
+        (numbers, body)
+    }
+
+    #[test]
+    fn gutter_width_grows_with_line_count_digits() {
+        let w = |lines| gutter_width(lines, 8.0);
+        assert_eq!(w(0), w(999));
+        assert!(w(999) < w(1_000));
+        assert!(w(9_999) < w(10_000));
+        assert!(w(99_999) < w(100_000));
+    }
+
+    #[test]
+    fn wrapped_rows_get_no_line_number() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(10);
+        let long = "가나다라 ".repeat(80);
+        let mut doc =
+            Document::from_bytes(None, format!("짧은 줄\n{long}\n끝").as_bytes(), false, None)
+                .unwrap();
+        gutter_frame(&ctx, &mut editor, &mut doc, true);
+        let (numbers, body) = gutter_frame(&ctx, &mut editor, &mut doc, true);
+        assert!(body.width() < 800.0, "창 폭 안에서 접힘");
+        let lines: Vec<usize> = numbers.iter().map(|(n, _, _)| *n).collect();
+        assert_eq!(lines, [1, 2, 3], "논리 줄마다 번호 하나");
+        // 2번 줄이 여러 행으로 접혔으므로 3번 번호는 2번보다 여러 행 아래에 있다.
+        let row_gap = numbers[1].2 - numbers[0].2;
+        assert!(numbers[2].2 - numbers[1].2 > row_gap * 2.0);
+    }
+
+    /// 자동 줄바꿈을 끄면 긴 줄이 창보다 넓게 한 행으로 놓여(가로 스크롤 대상) 접히지 않고,
+    /// 줄 번호는 스크롤 영역 밖의 Gutter(본문 왼쪽)에 그려진다.
+    #[test]
+    fn no_wrap_keeps_long_line_on_one_row_and_numbers_in_gutter() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(11);
+        let long = "abcdefghij".repeat(40);
+        let mut doc = Document::from_bytes(
+            None,
+            format!(
+                "첫 줄
+{long}
+끝"
+            )
+            .as_bytes(),
+            false,
+            None,
+        )
+        .unwrap();
+        gutter_frame(&ctx, &mut editor, &mut doc, false);
+        let (numbers, body) = gutter_frame(&ctx, &mut editor, &mut doc, false);
+        assert!(
+            body.width() > 800.0 * 2.0,
+            "긴 줄이 접히지 않음 (폭 {})",
+            body.width()
+        );
+        let lines: Vec<usize> = numbers.iter().map(|(n, _, _)| *n).collect();
+        assert_eq!(lines, [1, 2, 3]);
+        // 접히지 않았으므로 줄 간격이 일정하다.
+        assert_eq!(numbers[1].2 - numbers[0].2, numbers[2].2 - numbers[1].2);
+        // 번호와 본문 사이에 2칸 이상 빈 간격 (UX-007)
+        let char_width = ctx.fonts_mut(|f| f.glyph_width(&FontId::monospace(14.0), '0'));
+        assert!(
+            numbers
+                .iter()
+                .all(|(_, right, _)| body.min.x - right >= char_width * 2.0)
+        );
     }
 
     #[test]

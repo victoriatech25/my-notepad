@@ -217,8 +217,10 @@ impl ViewerState {
         let (row_height, char_width) =
             ui.fonts_mut(|f| (f.row_height(font), f.glyph_width(font, '0')));
         self.row_height = row_height;
-        let digits = line_count.to_string().len().max(3);
-        let gutter_width = digits as f32 * char_width + 20.0;
+        let gutter_width = crate::ui::editor::gutter_width(line_count, char_width);
+        // 본문은 에디터와 같은 간격(Gutter 간격 + 에디터 안쪽 여백 6px) 뒤에서 시작한다.
+        let number_right = gutter_width - crate::ui::editor::gutter_gap(char_width);
+        let gutter_width = gutter_width + 6.0;
         let text_color = ui.visuals().text_color();
         let layout = |ui: &egui::Ui, line: usize| -> Option<(Range<usize>, Arc<Galley>)> {
             let range = index.line_byte_range(line, text)?;
@@ -394,6 +396,15 @@ impl ViewerState {
             );
             let text_painter = painter.with_clip_rect(text_clip);
             let gutter_font = font.clone();
+            // Gutter 배경 (에디터와 같이 본문 안쪽 여백 앞까지)
+            painter.rect_filled(
+                Rect::from_min_max(
+                    visible.min,
+                    Pos2::new(gutter_x + gutter_width - 6.0, visible.max.y),
+                ),
+                0.0,
+                palette.gutter_bg,
+            );
 
             for (line, range, galley) in &lines {
                 let y = row_y(*line);
@@ -428,7 +439,7 @@ impl ViewerState {
 
                 // 줄 번호 (가로 스크롤과 상관없이 고정)
                 painter.text(
-                    Pos2::new(gutter_x + gutter_width - 10.0, y + row_height * 0.5),
+                    Pos2::new(gutter_x + number_right, y + row_height * 0.5),
                     egui::Align2::RIGHT_CENTER,
                     (line + 1).to_string(),
                     gutter_font.clone(),
@@ -450,12 +461,6 @@ impl ViewerState {
                     );
                 }
             }
-            // Gutter 배경 경계선
-            painter.vline(
-                gutter_x + gutter_width - 4.0,
-                visible.y_range(),
-                egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-            );
         });
         let _ = output;
         self.width_cache = Some((doc.revision(), max_line_bytes, widest));

@@ -68,6 +68,17 @@ const SCENARIOS: &[Scenario] = &[
         work_files: &[],
     },
     Scenario {
+        name: "gutter",
+        package: "my-notepad",
+        args: &[
+            "spikes/samples/long-lines.txt",
+            "spikes/samples/lines-12k.txt",
+        ],
+        description: "P2-01 줄 번호 Gutter·자동 줄바꿈 (긴 줄 섞인 300줄, 12,000줄 탭 — 샘플: cargo xtask gen-samples)",
+        wait: false,
+        work_files: &[],
+    },
+    Scenario {
         name: "editor",
         package: "my-notepad",
         args: &[],
