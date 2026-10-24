@@ -43,7 +43,7 @@
 | `search_current` | 현재 매치 | 주황 `#FFB347` | 주황 `#B8691A` |
 | `gutter_text` | 줄 번호 | 회색 `#969696` | 회색 `#6E6E6E` |
 | `gutter_current` | 현재 줄 번호 | 본문색 `#1E1E1E` | 본문색 `#DCDCDC` |
-| `gutter_bg` | 줄 번호 Gutter 배경 (본문 배경과 살짝 다르게, UX-007) | `#F0F0F0` (본문 `#F8F8F8`보다 살짝 어둡게) | `#222222` (본문 `#1B1B1B`보다 살짝 밝게) |
+| `gutter_bg` | 줄 번호 Gutter 배경 (본문 배경과 살짝 다르게, UX-007) | `#E8E8E8` (본문 `#F8F8F8`보다 어둡게) | `#2C2C2C` (본문 `#1B1B1B`보다 밝게) |
 | `modified_marker` | 탭 수정 표시 `●` | 강조색 `#1E6FD9` | 강조색 `#6CB4FF` |
 | `status_warning` | 추정됨·Mixed 표시 | 주황 글자 `#C06A00` | 주황 글자 `#FFB040` |
 | `status_error` | 손상 표시 | 빨강 글자 `#C62828` | 빨강 글자 `#FF6B6B` |

@@ -61,7 +61,7 @@ impl Palette {
             gutter_text: Color32::from_gray(110),
             gutter_current: Color32::from_gray(220),
             // 본문 배경(egui 다크 패널 #1B1B1B)보다 살짝 밝게
-            gutter_bg: Color32::from_gray(34),
+            gutter_bg: Color32::from_gray(44),
             modified_marker: Color32::from_rgb(0x6C, 0xB4, 0xFF),
             status_warning: Color32::from_rgb(0xFF, 0xB0, 0x40),
             status_error: Color32::from_rgb(0xFF, 0x6B, 0x6B),
@@ -85,7 +85,7 @@ impl Palette {
             gutter_text: Color32::from_gray(150),
             gutter_current: Color32::from_gray(30),
             // 본문 배경(egui 라이트 패널 #F8F8F8)보다 살짝 어둡게
-            gutter_bg: Color32::from_gray(240),
+            gutter_bg: Color32::from_gray(232),
             modified_marker: Color32::from_rgb(0x1E, 0x6F, 0xD9),
             status_warning: Color32::from_rgb(0xC0, 0x6A, 0x00),
             status_error: Color32::from_rgb(0xC6, 0x28, 0x28),
@@ -144,7 +144,7 @@ mod tests {
         assert_ne!(dark.selection_bg, light.selection_bg);
     }
 
-    /// Gutter 배경은 본문(중앙 패널) 배경과 살짝만 다르다 (UX-007).
+    /// Gutter 배경은 본문(중앙 패널) 배경과 눈에 띄되 과하지 않게 다르다 (UX-007).
     #[test]
     fn gutter_bg_differs_slightly_from_editor_bg() {
         for (palette, visuals) in [
@@ -153,7 +153,7 @@ mod tests {
         ] {
             let bg = visuals.panel_fill;
             let diff = (i16::from(palette.gutter_bg.r()) - i16::from(bg.r())).abs();
-            assert!((4..=12).contains(&diff), "차이 {diff}");
+            assert!((12..=24).contains(&diff), "차이 {diff}");
         }
     }
 
