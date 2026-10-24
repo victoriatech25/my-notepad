@@ -17,6 +17,7 @@ use crate::commands::ViewMode;
 use crate::core::document::{DiskMetadata, Document};
 use crate::core::file_io::{DiskChange, OpenMode, check_disk_change};
 use crate::ui::editor::EditorState;
+use crate::ui::markdown_view::PreviewState;
 use crate::ui::viewer::ViewerState;
 
 /// 열린 탭 하나.
@@ -27,6 +28,8 @@ pub struct Tab {
     pub editor: EditorState,
     /// Markdown 보기 모드 (탭 단위 상태 — ui-spec 탭 바).
     pub view_mode: ViewMode,
+    /// Markdown 미리보기 상태 (파싱 캐시·블록 위치, P3-02)
+    pub preview: PreviewState,
     /// 중복 열기 판정용 정규화 경로.
     path_key: Option<PathBuf>,
     /// 파일 시스템의 읽기 전용 속성 (저장 시 다른 이름으로 저장 유도).
@@ -76,6 +79,7 @@ impl Tab {
             doc,
             editor,
             view_mode,
+            preview: PreviewState::new(id),
             path_key,
             file_readonly: false,
             viewer: None,
@@ -139,6 +143,8 @@ impl Tab {
         doc.set_cursor_char_range(cursor.start.min(len)..cursor.end.min(len));
         doc.set_scroll_offset_y(self.doc.scroll_offset_y());
         self.doc = doc;
+        // 다시 읽은 문서는 버전 번호가 처음부터 다시 시작하므로 파싱 캐시를 버린다.
+        self.preview.invalidate();
         if self.viewer.is_some() {
             self.viewer = Some(ViewerState::new(self.id));
         }
