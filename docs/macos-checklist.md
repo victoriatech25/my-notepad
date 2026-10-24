@@ -32,7 +32,7 @@ sysctl -n machdep.cpu.brand_string
 
 - [x] **0-1** `cargo xtask doctor`가 "개발 환경 점검 통과"를 출력한다 (CRLF 픽스처 바이트 보존 포함) — 2026-10-23 통과
 - [x] **0-2** 칩 종류: `Apple M1 Pro` (macOS 26.6.2)
-- [ ] **0-3** 장비 전환 연습: Mac에서 아무 파일(예: `docs/macos-checklist.md` 맨 아래 메모 줄)을 고쳐 커밋·`git push` → Windows에서 `git pull`로 반영 확인
+- [x] **0-3** 장비 전환 연습: Mac에서 아무 파일(예: `docs/macos-checklist.md` 맨 아래 메모 줄)을 고쳐 커밋·`git push` → Windows에서 `git pull`로 반영 확인 — 2026-10-24 통과 (Windows에서 메모 줄 확인)
 
 ## 1. Phase 0 일괄 검증 (P1-MAC) — G1 전까지 필수
 
@@ -80,17 +80,17 @@ cargo xtask measure --runs 10     # 약 5분, 창이 여러 번 열렸다 닫힘
 cargo xtask try prototype     # 전체 화면 UX 프로토타입
 cargo xtask try md            # Markdown 분할 동기화·렌더러
 ```
-- [ ] **1-8** macOS에서 어색한 점(메뉴 위치, 단축키 표기 `⌘`, 글꼴 크기, 트랙패드 스크롤·동기화 체감 등)이 있으면 의견 회신
+- [x] **1-8** macOS에서 어색한 점(메뉴 위치, 단축키 표기 `⌘`, 글꼴 크기, 트랙패드 스크롤·동기화 체감 등)이 있으면 의견 회신 — 2026-10-24: `prototype`·`md` 모두 macOS라서 어색한 점 없음 (UX 백로그 등록 없음)
 
 ## 2. Phase 1 중 macOS 항목 (해당 WU가 끝난 뒤)
 | WU | 확인 |
 | :--- | :--- |
-| P1-01 | CI의 macOS 작업이 녹색 (GitHub Actions — Mac 작업 불필요, 결과만 확인) |
-| P1-02 | 본 앱에서 1-3 폰트 항목 재확인 |
-| P1-09 | 편집·Undo(`Cmd+Z`/`Cmd+Shift+Z`)·클립보드·모두 선택·Tab 입력을 `Cmd` 단축키로 확인, 1-4 IME 재확인 |
-| P1-10 | 탭·창 메뉴·탭 이동 단축키(`Ctrl+Tab`, `Cmd+Shift+]`/`[`, `Cmd+Option+→`/`←`, `Cmd+1~9`) |
-| P1-11 | `Cmd+Q`로 미저장 확인·여러 탭 일괄 닫기 |
-| P1-14 | 10MB·50MB 파일 뷰어 열기·트랙패드 스크롤·복사 |
+| P1-01 | CI의 macOS 작업이 녹색 (GitHub Actions — Mac 작업 불필요, 결과만 확인) — ✅ 2026-10-24 (브랜치 CI 두 OS 녹색, `main`에 병합) |
+| P1-02 | 본 앱에서 1-3 폰트 항목 재확인 — ✅ 2026-10-24 |
+| P1-09 | 편집·Undo(`Cmd+Z`/`Cmd+Shift+Z`)·클립보드·모두 선택·Tab 입력을 `Cmd` 단축키로 확인, 1-4 IME 재확인 — ✅ 2026-10-24 |
+| P1-10 | 탭·창 메뉴·탭 이동 단축키(`Ctrl+Tab`, `Cmd+Shift+]`/`[`, `Cmd+Option+→`/`←`, `Cmd+1~9`) — ✅ 2026-10-24 |
+| P1-11 | `Cmd+Q`로 미저장 확인·여러 탭 일괄 닫기 — ✅ 2026-10-24 (`Cmd+Q`·Dock 종료는 winit 수정 4 반영) |
+| P1-14 | 10MB·50MB 파일 뷰어 열기·트랙패드 스크롤·복사 — ✅ 2026-10-24 (메모리 개선 `9d439fc` 반영 빌드) |
 
 ## 3. 이후 단계의 macOS 항목 (참고)
 | 단계 | 항목 |
