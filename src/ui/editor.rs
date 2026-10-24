@@ -308,9 +308,16 @@ fn text_edit<'t>(
 }
 
 /// 줄 번호 Gutter 폭. 최소 3자리이고 줄 수 자릿수(1,000·10,000줄 …)에 맞춰 늘어난다 (뷰어와 같은 폭).
+///
+/// 구성: 왼쪽 여백 1칸 + 번호 + 본문과의 빈 간격 [`gutter_gap`] (구분선 없이 여백으로 구분 — UX-007).
 pub fn gutter_width(line_count: usize, char_width: f32) -> f32 {
     let digits = line_count.max(1).to_string().len().max(3);
-    digits as f32 * char_width + 20.0
+    (digits + 1) as f32 * char_width + gutter_gap(char_width)
+}
+
+/// 줄 번호 오른쪽 끝과 Gutter 오른쪽 경계 사이의 빈 간격 (본문 글자는 여기에 에디터 안쪽 여백이 더해진 뒤 시작).
+pub fn gutter_gap(char_width: f32) -> f32 {
+    char_width * 2.5
 }
 
 /// 레이아웃 행 중 논리 줄의 첫 행만 `(1-기반 줄 번호, galley 기준 행 영역)`으로 돌려준다
@@ -339,6 +346,7 @@ fn paint_gutter(
     palette: &Palette,
 ) {
     let painter = ui.painter_at(rect);
+    let number_right = rect.max.x - gutter_gap(painter.fonts_mut(|f| f.glyph_width(font, '0')));
     for (line, row_rect) in logical_line_rows(galley) {
         let row_rect = row_rect.translate(galley_pos.to_vec2());
         if row_rect.max.y < rect.min.y {
@@ -348,7 +356,7 @@ fn paint_gutter(
             break;
         }
         painter.text(
-            Pos2::new(rect.max.x - 10.0, row_rect.center().y),
+            Pos2::new(number_right, row_rect.center().y),
             egui::Align2::RIGHT_CENTER,
             line.to_string(),
             font.clone(),
@@ -359,11 +367,6 @@ fn paint_gutter(
             },
         );
     }
-    painter.vline(
-        rect.max.x - 4.0,
-        rect.y_range(),
-        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-    );
 }
 
 /// `TextEdit`에 들어가기 전에 입력 이벤트를 고친다.
@@ -806,7 +809,13 @@ mod tests {
         assert_eq!(lines, [1, 2, 3]);
         // 접히지 않았으므로 줄 간격이 일정하다.
         assert_eq!(numbers[1].2 - numbers[0].2, numbers[2].2 - numbers[1].2);
-        assert!(numbers.iter().all(|(_, right, _)| *right <= body.min.x));
+        // 번호와 본문 사이에 2칸 이상 빈 간격 (UX-007)
+        let char_width = ctx.fonts_mut(|f| f.glyph_width(&FontId::monospace(14.0), '0'));
+        assert!(
+            numbers
+                .iter()
+                .all(|(_, right, _)| body.min.x - right >= char_width * 2.0)
+        );
     }
 
     #[test]

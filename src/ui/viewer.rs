@@ -218,6 +218,9 @@ impl ViewerState {
             ui.fonts_mut(|f| (f.row_height(font), f.glyph_width(font, '0')));
         self.row_height = row_height;
         let gutter_width = crate::ui::editor::gutter_width(line_count, char_width);
+        // 본문은 에디터와 같은 간격(Gutter 간격 + 에디터 안쪽 여백 6px) 뒤에서 시작한다.
+        let number_right = gutter_width - crate::ui::editor::gutter_gap(char_width);
+        let gutter_width = gutter_width + 6.0;
         let text_color = ui.visuals().text_color();
         let layout = |ui: &egui::Ui, line: usize| -> Option<(Range<usize>, Arc<Galley>)> {
             let range = index.line_byte_range(line, text)?;
@@ -427,7 +430,7 @@ impl ViewerState {
 
                 // 줄 번호 (가로 스크롤과 상관없이 고정)
                 painter.text(
-                    Pos2::new(gutter_x + gutter_width - 10.0, y + row_height * 0.5),
+                    Pos2::new(gutter_x + number_right, y + row_height * 0.5),
                     egui::Align2::RIGHT_CENTER,
                     (line + 1).to_string(),
                     gutter_font.clone(),
@@ -449,12 +452,6 @@ impl ViewerState {
                     );
                 }
             }
-            // Gutter 배경 경계선
-            painter.vline(
-                gutter_x + gutter_width - 4.0,
-                visible.y_range(),
-                egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-            );
         });
         let _ = output;
         self.width_cache = Some((doc.revision(), max_line_bytes, widest));
