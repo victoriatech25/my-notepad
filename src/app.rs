@@ -94,6 +94,12 @@ pub struct NotepadApp {
     sidebar_open: bool,
     sidebar: SidebarState,
     word_wrap: bool,
+    /// 탭 너비 (공백 칸 수, 설정 저장은 P2-08)
+    tab_width: u8,
+    /// `Tab` 키로 공백 넣기
+    tab_spaces: bool,
+    /// 적용 중인 글꼴 정의 (탭 너비를 바꿀 때 다시 적용)
+    font_defs: egui::FontDefinitions,
     zoom: f32,
     scroll_sync: bool,
     /// 선택 단어 일괄 강조 옵션 (설정 저장은 P2-08)
@@ -107,9 +113,11 @@ pub struct NotepadApp {
 impl NotepadApp {
     /// `files`는 명령줄로 받은 파일 경로 — 시작하면서 탭으로 연다.
     pub fn new(cc: &eframe::CreationContext<'_>, files: &[PathBuf]) -> Self {
-        let (defs, report) = fonts::explicit_chain();
-        cc.egui_ctx.set_fonts(defs);
+        let (font_defs, report) = fonts::explicit_chain();
+        cc.egui_ctx.set_fonts(font_defs.clone());
         theme::configure_visuals(&cc.egui_ctx);
+        // `Ctrl/Cmd + +/-/0`은 에디터 글꼴 확대/축소(P2-02)로 쓴다. egui 기본 동작(화면 전체 확대)은 끈다.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
         log::info!(
             "폰트 체인 로드 완료 ({:.2} ms, 성공 {}개, 실패 {}개)",
@@ -140,6 +148,9 @@ impl NotepadApp {
             sidebar_open: true,
             sidebar: SidebarState::default(),
             word_wrap: true,
+            tab_width: 4,
+            tab_spaces: false,
+            font_defs,
             zoom: 1.0,
             scroll_sync: true,
             highlight: HighlightOptions::default(),
@@ -229,6 +240,25 @@ impl NotepadApp {
             }
             Command::ToggleWordWrap => {
                 self.word_wrap = !self.word_wrap;
+            }
+            Command::SetTabWidth(width) => {
+                if self.tab_width != width {
+                    self.tab_width = width;
+                    fonts::set_tab_size(&mut self.font_defs, f32::from(width));
+                    ctx.set_fonts(self.font_defs.clone());
+                }
+            }
+            Command::ToggleTabSpaces => {
+                self.tab_spaces = !self.tab_spaces;
+            }
+            Command::GoToLine => {
+                let tab = self.tabs.active();
+                let line = match &tab.viewer {
+                    Some(viewer) => viewer.cursor_status(&tab.doc).0,
+                    None => editor::cursor_status(&tab.doc).0,
+                };
+                self.dialogs
+                    .push_back(Dialog::go_to_line(tab.id(), tab.doc.line_count(), line));
             }
             Command::ZoomIn => {
                 self.zoom = (self.zoom + 0.1).min(3.0);
@@ -958,6 +988,8 @@ impl eframe::App for NotepadApp {
         let menu_state = MenuBarState {
             sidebar_open: self.sidebar_open,
             word_wrap: self.word_wrap,
+            tab_width: self.tab_width,
+            tab_spaces: self.tab_spaces,
             is_markdown: active.doc.is_markdown(),
             view_mode: active.view_mode,
             scroll_sync: self.scroll_sync,
@@ -1077,6 +1109,8 @@ impl eframe::App for NotepadApp {
             word_wrap: self.word_wrap,
             font: FontId::monospace(font_size),
             highlight: self.highlight,
+            tab_width: usize::from(self.tab_width),
+            tab_spaces: self.tab_spaces,
         };
         let mut switch_to_edit = false;
         let mut edit_large = None;
@@ -1152,6 +1186,16 @@ impl eframe::App for NotepadApp {
                 if let Some(tab) = self.tabs.get_mut(index) {
                     tab.binary = true;
                     tab.apply_open_mode(opened.open_mode);
+                }
+            }
+            Some(DialogOutcome::GoToLine { tab_id, line }) => {
+                if let Some(index) = self.tabs.index_of(tab_id)
+                    && let Some(tab) = self.tabs.get_mut(index)
+                {
+                    match &mut tab.viewer {
+                        Some(viewer) => viewer.go_to_line(&tab.doc, line - 1),
+                        None => tab.editor.go_to_line(&mut tab.doc, line),
+                    }
                 }
             }
             Some(DialogOutcome::OpenEditMode(tab_id)) => {

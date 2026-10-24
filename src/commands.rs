@@ -161,6 +161,10 @@ pub enum Command {
     // ── 보기 (View) ──
     ToggleSidebar,
     ToggleWordWrap,
+    /// 탭 너비 (공백 칸 수, P2-02)
+    SetTabWidth(u8),
+    /// `Tab` 키로 탭 문자 대신 공백 넣기 토글 (P2-02)
+    ToggleTabSpaces,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -227,6 +231,8 @@ impl Command {
 
             Self::ToggleSidebar => "사이드바 토글".to_owned(),
             Self::ToggleWordWrap => "자동 줄바꿈 토글".to_owned(),
+            Self::SetTabWidth(width) => format!("탭 너비: {width}칸"),
+            Self::ToggleTabSpaces => "Tab 키로 공백 넣기 토글".to_owned(),
             Self::ZoomIn => "확대".to_owned(),
             Self::ZoomOut => "축소".to_owned(),
             Self::ZoomReset => "원래 크기".to_owned(),

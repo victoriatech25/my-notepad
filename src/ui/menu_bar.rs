@@ -25,6 +25,10 @@ pub struct MenuTabEntry<'a> {
 pub struct MenuBarState<'a> {
     pub sidebar_open: bool,
     pub word_wrap: bool,
+    /// 탭 너비 (공백 칸 수)
+    pub tab_width: u8,
+    /// `Tab` 키로 공백 넣기
+    pub tab_spaces: bool,
     pub is_markdown: bool,
     pub view_mode: ViewMode,
     pub scroll_sync: bool,
@@ -269,6 +273,31 @@ fn view_menu(
         state.word_wrap,
         "자동 줄바꿈",
         Command::ToggleWordWrap,
+        triggered,
+    );
+
+    ui.separator();
+    ui.label(RichText::new("탭").weak());
+    ui.menu_button("탭 너비", |ui| {
+        for width in [2, 4, 8] {
+            selectable_menu_item(
+                ui,
+                ctx,
+                keymap,
+                state.tab_width == width,
+                &format!("{width}칸"),
+                Command::SetTabWidth(width),
+                triggered,
+            );
+        }
+    });
+    selectable_menu_item(
+        ui,
+        ctx,
+        keymap,
+        state.tab_spaces,
+        "Tab 키로 공백 넣기",
+        Command::ToggleTabSpaces,
         triggered,
     );
 
@@ -554,6 +583,8 @@ mod tests {
         let state = MenuBarState {
             sidebar_open: false,
             word_wrap: true,
+            tab_width: 4,
+            tab_spaces: false,
             is_markdown: false,
             view_mode: ViewMode::Source,
             scroll_sync: false,

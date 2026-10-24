@@ -41,6 +41,10 @@ pub struct EditorOptions {
     pub font: FontId,
     /// 선택 단어 일괄 강조 매칭 옵션.
     pub highlight: HighlightOptions,
+    /// 탭 너비 (공백 칸 수) — `Tab` 키로 공백을 넣을 때 다음 탭 위치 계산에 쓴다.
+    pub tab_width: usize,
+    /// `Tab` 키로 탭 문자 대신 공백을 넣는다.
+    pub tab_spaces: bool,
 }
 
 /// 한 프레임의 에디터 결과.
@@ -77,6 +81,8 @@ pub struct EditorState {
     pending_cursor: Option<Range<usize>>,
     /// 다음 프레임에 복원할 세로 스크롤 위치.
     pending_scroll_y: Option<f32>,
+    /// 다음 프레임에 커서 줄이 화면 가운데에 오도록 스크롤한다 (줄 이동).
+    center_cursor: bool,
     focus_requested: bool,
     highlight: Option<SmartHighlight>,
 }
@@ -90,6 +96,7 @@ impl EditorState {
             synced_revision: None,
             pending_cursor: None,
             pending_scroll_y: None,
+            center_cursor: false,
             focus_requested: false,
             highlight: None,
         }
@@ -114,6 +121,18 @@ impl EditorState {
     pub fn restore_view(&mut self, doc: &Document) {
         self.pending_cursor = Some(doc.cursor_char_range());
         self.pending_scroll_y = Some(doc.scroll_offset_y());
+    }
+
+    /// `line`(1-기반) 줄 처음으로 커서를 옮기고, 그 줄이 화면 가운데에 오도록 스크롤한다 (줄 이동, P2-02).
+    pub fn go_to_line(&mut self, doc: &mut Document, line: usize) {
+        let index = doc.line_index();
+        let line = line.clamp(1, index.line_count().max(1));
+        let start = index.char_of_line_col(doc.text(), line, 1);
+        doc.set_cursor_char_range(start..start);
+        doc.break_undo_group();
+        self.pending_cursor = Some(start..start);
+        self.center_cursor = true;
+        self.focus_requested = true;
     }
 
     /// 에디터가 처리하는 편집 커맨드를 실행한다. 처리했으면 `true`.
@@ -186,6 +205,13 @@ impl EditorState {
         // 이번 프레임에 포커스를 받는 경우(메뉴 `붙여넣기` 직후 등)에도 위젯보다 먼저 입력을 고친다.
         if focused_before || self.focus_requested {
             ctx.input_mut(|i| filter_input_events(&mut i.events));
+            if options.tab_spaces
+                && !doc.is_readonly()
+                && ctx.input(|i| i.events.iter().any(is_plain_tab))
+            {
+                let (_, column, _) = cursor_status(doc);
+                ctx.input_mut(|i| expand_tab_key(&mut i.events, options.tab_width, column - 1));
+            }
         }
 
         if let Some(range) = self.pending_cursor.take() {
@@ -273,6 +299,17 @@ impl EditorState {
             })
             .inner;
         doc.set_scroll_offset_y(scroll_output.state.clamped_offset().y);
+
+        // 줄 이동: 커서 줄이 화면 가운데에 오도록 다음 프레임 스크롤 위치를 정한다.
+        if std::mem::take(&mut self.center_cursor) {
+            let galley = &scroll_output.inner.galley;
+            let cursor = galley.pos_from_cursor(CCursor::new(doc.cursor_char_range().start));
+            let view = scroll_output.inner_rect;
+            let content_y = scroll_output.inner.galley_pos.y + cursor.center().y - view.min.y
+                + scroll_output.state.clamped_offset().y;
+            self.pending_scroll_y = Some((content_y - view.height() / 2.0).max(0.0));
+            ctx.request_repaint();
+        }
 
         let output = scroll_output.inner;
         let cursor = output
@@ -541,6 +578,27 @@ pub fn filter_input_events(events: &mut Vec<Event>) {
     }
 }
 
+/// 수식키 없는 `Tab` 키 누름 (들여쓰기 입력).
+fn is_plain_tab(event: &Event) -> bool {
+    matches!(event, Event::Key { key: Key::Tab, pressed: true, modifiers, .. } if modifiers.is_none())
+}
+
+/// `Tab` 키 누름을 다음 탭 위치까지의 공백 입력으로 바꾼다 (`column`은 커서의 0-기반 문자 열).
+///
+/// 한 프레임에 여러 번 눌렸으면 이어서 계산한다.
+pub fn expand_tab_key(events: &mut [Event], tab_width: usize, mut column: usize) {
+    let width = tab_width.max(1);
+    for event in events.iter_mut() {
+        if is_plain_tab(event) {
+            let spaces = width - column % width;
+            column += spaces;
+            *event = Event::Text(" ".repeat(spaces));
+        } else if let Event::Text(text) = event {
+            column += text.chars().count();
+        }
+    }
+}
+
 /// 상태 표시줄용 `(Ln, Col, 선택 글자 수)` — 모두 문자 단위, `Ln`/`Col`은 1-기반.
 pub fn cursor_status(doc: &Document) -> (usize, usize, usize) {
     let range = doc.cursor_char_range();
@@ -598,6 +656,8 @@ mod tests {
             word_wrap: true,
             font: FontId::monospace(14.0),
             highlight: HighlightOptions::default(),
+            tab_width: 4,
+            tab_spaces: false,
         }
     }
 
@@ -896,6 +956,8 @@ mod tests {
             word_wrap,
             font: FontId::monospace(14.0),
             highlight: HighlightOptions::default(),
+            tab_width: 4,
+            tab_spaces: false,
         };
         let mut full = ctx.run_ui(raw, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
@@ -1207,6 +1269,139 @@ mod tests {
         let two = galley.pos_from_cursor(CCursor::new(ranges[0].end)).min.x
             - galley.pos_from_cursor(CCursor::new(ranges[0].start)).min.x;
         assert!(rects.iter().all(|r| (r.width() - two).abs() < 0.5));
+    }
+
+    #[test]
+    fn go_to_line_moves_cursor_and_centers_line() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(40);
+        let text: String = (1..=1000).map(|i| format!("{i}번째 줄\n")).collect();
+        let mut doc = Document::from_bytes(None, text.as_bytes(), false, None).unwrap();
+        frame(&ctx, &mut editor, &mut doc, vec![]);
+
+        editor.go_to_line(&mut doc, 500);
+        for _ in 0..3 {
+            frame(&ctx, &mut editor, &mut doc, vec![]);
+        }
+        assert_eq!(cursor_status(&doc), (500, 1, 0));
+        // 화면(높이 600px)에 그려진 줄 번호 `500`이 세로 가운데쯤에 있다
+        let (numbers, _) = gutter_frame(&ctx, &mut editor, &mut doc, true);
+        let row = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(14.0)));
+        let y = numbers
+            .iter()
+            .find(|n| n.0 == 500)
+            .expect("500번 줄이 보임")
+            .2
+            + row / 2.0;
+        assert!((y - 300.0).abs() < row * 2.0, "500번 줄 높이 {y}");
+
+        // 범위를 넘으면 마지막 줄로
+        editor.go_to_line(&mut doc, 99_999);
+        frame(&ctx, &mut editor, &mut doc, vec![]);
+        assert_eq!(cursor_status(&doc).0, doc.line_count());
+    }
+
+    #[test]
+    fn tab_key_expands_to_next_tab_stop() {
+        let tab = || key(Key::Tab, Modifiers::NONE);
+        let texts = |events: &[Event]| -> Vec<String> {
+            events
+                .iter()
+                .map(|e| match e {
+                    Event::Text(t) => t.clone(),
+                    other => format!("{other:?}"),
+                })
+                .collect()
+        };
+        let mut events = vec![tab()];
+        expand_tab_key(&mut events, 4, 0);
+        assert_eq!(texts(&events), ["    "]);
+        let mut events = vec![tab(), Event::Text("ab".into()), tab()];
+        expand_tab_key(&mut events, 4, 1);
+        assert_eq!(texts(&events), ["   ", "ab", "  "]);
+        let mut events = vec![tab()];
+        expand_tab_key(&mut events, 8, 8);
+        assert_eq!(texts(&events), ["        "]);
+        // Shift+Tab·Ctrl+Tab은 그대로
+        let mut events = vec![key(Key::Tab, Modifiers::SHIFT)];
+        expand_tab_key(&mut events, 4, 0);
+        assert!(matches!(events[0], Event::Key { .. }));
+    }
+
+    #[test]
+    fn tab_spaces_option_inserts_spaces_in_editor() {
+        let (ctx, mut editor, mut doc) = focused_editor();
+        let spaces = EditorOptions {
+            tab_spaces: true,
+            tab_width: 4,
+            ..options()
+        };
+        frame_with(
+            &ctx,
+            &mut editor,
+            &mut doc,
+            vec![Event::Text("ab".into())],
+            &spaces,
+        );
+        frame_with(
+            &ctx,
+            &mut editor,
+            &mut doc,
+            vec![key(Key::Tab, Modifiers::NONE), Event::Text("c".into())],
+            &spaces,
+        );
+        assert_eq!(doc.text(), "ab  c");
+        // 끄면 탭 문자
+        frame(
+            &ctx,
+            &mut editor,
+            &mut doc,
+            vec![key(Key::Tab, Modifiers::NONE)],
+        );
+        assert_eq!(doc.text(), "ab  c\t");
+    }
+
+    #[test]
+    fn zoomed_font_enlarges_line_numbers() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(41);
+        let mut doc = Document::from_bytes(None, b"a\nb\nc", false, None).unwrap();
+        let number_height = |ctx: &egui::Context,
+                             editor: &mut EditorState,
+                             doc: &mut Document,
+                             size: f32| {
+            let options = EditorOptions {
+                font: FontId::monospace(size),
+                ..options()
+            };
+            frame_with(ctx, editor, doc, vec![], &options);
+            let raw = RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let mut full = ctx.run_ui(raw, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    editor.show(ui, doc, &options, &Palette::light());
+                });
+            });
+            full.textures_delta.clear();
+            full.shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "2" => Some(t.galley.rect.height()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let normal = number_height(&ctx, &mut editor, &mut doc, 14.0);
+        let zoomed = number_height(&ctx, &mut editor, &mut doc, 28.0);
+        assert!(
+            zoomed > normal * 1.8,
+            "줄 번호도 함께 커짐 ({normal} → {zoomed})"
+        );
     }
 
     #[test]
