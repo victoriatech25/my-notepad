@@ -73,7 +73,7 @@ cargo xtask gen-samples
 cargo xtask measure --runs 10     # 약 5분, 창이 여러 번 열렸다 닫힘
 ```
 - [x] **1-7a** 측정 결과표 전체를 복사해 회신 (macOS는 RSS 기준) — 2026-10-23 측정, WORKPLAN §9.3 기록. 10MB 뷰어 메모리 미달(162MB)은 열기 경로 복사 줄여 133MB로 해결 (2026-10-24)
-- [ ] **1-7b** (선택) 재부팅 직후 cold 기동: `./target/release/editor-spike --renderer=glow --measure-out cold.txt` 실행 후 `cat cold.txt`
+- [x] **1-7b** (선택) 재부팅 직후 cold 기동: `./target/release/editor-spike --renderer=glow --measure-out cold.txt` 실행 후 `cat cold.txt` — 2026-10-24 측정: `first_frame_ms=351.2` (재부팅 2분 뒤, 목표 ≤ 800ms 충족)
 
 ### 1-8 (권장) macOS 화면 의견 — 🎨 UX는 두 OS에서 받는다 (§0.7)
 ```bash

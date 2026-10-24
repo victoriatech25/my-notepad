@@ -553,7 +553,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [x] P0-01~02: Retina 선명도, `.ttc` 폰트(Menlo, Apple SD 산돌고딕 Neo) 한글·굵게 — 2026-10-23 통과
   - [x] **P0-03: macOS 2벌식 한글 IME 전 항목** (불합격 시 ADR 0001·프레임워크 재검토) — 2026-10-23 통과 (전환 직후 첫 키는 winit 백포트로 수정)
   - [x] P0-04~05: `Cmd` 단축키 선처리, `Cmd+Q`·빨간 버튼·Dock 종료 가로채기 — 2026-10-24 통과 (winit 사본 수정 2~4 후)
-  - [ ] P0-07: glow로 RSS·기동 시간 측정 (`cargo xtask measure`)
+  - [x] P0-07: glow로 RSS·기동 시간 측정 (`cargo xtask measure`) — 2026-10-23~24 완료 (warm 225ms·cold 351ms, 뷰어 메모리는 열기 복사 줄여 충족)
   - [ ] 완료된 Phase 1 WU의 🍎 항목
 
 #### P1-UX Phase 1 UX 반영 · S~M
@@ -1083,6 +1083,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-23 | P1-MAC 1-1·1-3·1-4 (P0-01~03 🍎) | 🍎 | **통과** | MacBook Pro(M1 Pro, macOS 26.6.2, 기본 2벌식): Retina 선명도, 한글·고정폭 정렬·비례폭·굵게, **IME 1-4a~h 전 항목 통과** (1-4g는 winit 백포트 `72b08b7` 적용 빌드 기준). G0에서 수용한 macOS IME 리스크 해소 | |
 | 2026-10-24 | P1-MAC 1-5 (P0-04 🍎) | 🍎 | 1-5c 실패 → 수정 → **통과** | `Cmd` 단축키 선처리·`Cmd+H` 앱 가리기 통과. 1-5c: 한글 조합 중 `Cmd+K` → `V`가 `ㅍ`로 입력됨. 원인 ① 조합 중 `Cmd+K`는 입력기가 조합만 확정하고 winit이 키 이벤트를 보내지 않음 ② `V`는 키 이벤트 없이 `Preedit("ㅍ")`로만 옴 ③ 앱이 조합을 끊어도 입력기 안의 `ㅍ`가 남아 다음 키와 합쳐짐(`파`). 수정: winit 사본 수정 2(조합 중 `Cmd`/`Ctrl` 키 전달)·수정 3(조합 끊기 시 `discardMarkedText`), `commands.rs`(대기 중 `ㅍ` 조합을 V로 인식·제거·조합 끊기, V가 아닌 조합은 대기 해제, 테스트 2개). 본 앱에서 조합 중 `Cmd+K` → `V` → `k` = `ㅏ`만 입력 확인. 부수 효과: 조합 중 `Cmd+S` 등 단축키도 실행됨 | 2026-10-24 |
 | 2026-10-24 | P1-MAC 1-6 (P0-05 🍎) | 🍎 | a·c 실패 → 수정 → **전 항목 통과** (d는 이후 확인) | 1-6b 빨간 닫기 버튼 → 확인 대화상자 통과. 1-6a `Cmd+Q`·1-6c Dock 우클릭 → 종료는 확인 없이 바로 종료. 원인: 두 경로 모두 `NSApplication terminate:`로 가는데 winit 0.30.13 앱 델리게이트가 `applicationShouldTerminate:`를 구현하지 않아 macOS가 즉시 종료함 (빨간 버튼은 `windowShouldClose:` → `CloseRequested`로 가로채짐). 1-6d(취소·저장 안 함 동작)는 사용자 보류. 수정: winit 사본 수정 4(`applicationShouldTerminate:` → 창마다 `CloseRequested`, `NSTerminateCancel`). 재검증: `Cmd+Q`·Dock 종료 모두 확인 대화상자 표시, 1-6d `취소`·`저장 안 함` 동작 확인 | 2026-10-24 |
+| 2026-10-24 | P1-MAC 1-7b (P0-07 🍎) | 🍎 | **통과** | MacBook Pro(M1 Pro): 재부팅(09:10) 2분 뒤 첫 실행, `editor-spike --renderer=glow` cold 첫 프레임 **351.2ms** (목표 ≤ 800ms, Windows 416.9ms). 측정 빌드 `main` `174fd0d`. 참고: 부팅 직후라 시스템 부하(load average 약 95)가 높은 상태에서 측정 | 2026-10-24 |
 
 ### 9.3 측정 결과 기록표
 
@@ -1104,6 +1105,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-23 | 메모리·기동 시간 (스파이크, P0-07 macOS) | `cargo xtask measure --runs 10`, RSS, 한글 폰트 직접 구성 | glow 빈 문서 225ms · 121MB / wgpu 258ms · 111MB · 10MB 문서(방식 A) glow 2,820ms · 2,188MB | warm ≤ 400ms · ≤ 120MB | 기동 충족 · 메모리 근소 초과 (본 앱은 114MB 충족). macOS는 Windows와 달리 wgpu가 glow보다 약간 적음 |
 | 2026-10-23 | 대용량 뷰어 (P1-14 macOS) | `cargo xtask measure --viewer`, 5회 평균, RSS | 10MB 첫 화면 240ms · 스크롤 2ms(최대 2) · **162MB** / 50MB 372ms · 2ms(최대 2) · 325MB | 첫 화면 ≤ 1s(10MB)·≤ 2s(50MB), 스크롤 ≤ 16ms, 10MB 메모리 ≤ 150MB | 시간 충족 · **10MB 메모리 미달** (Windows 138MB) |
 | 2026-10-24 | 대용량 뷰어 (열기 복사 줄인 뒤, macOS) | `cargo xtask measure --viewer`, 5회 평균, RSS (커밋 `9d439fc`) | 10MB 첫 화면 285ms · 스크롤 2ms · **133MB** / 50MB 428ms · 2ms · **176MB** | 첫 화면 ≤ 1s(10MB)·≤ 2s(50MB), 스크롤 ≤ 16ms, 10MB 메모리 ≤ 150MB | **전 항목 충족**. 메모리 10MB −29MB·50MB −149MB. 첫 화면 증가분 중 해시는 4ms·16ms, 나머지는 실행 간 편차(10MB 251~417ms) |
+| 2026-10-24 | 기동 시간 (cold, macOS) | 재부팅 2분 뒤 `editor-spike --renderer=glow`, 사용자 실행 1회, M1 Pro | **351.2ms** | cold ≤ 800ms | 충족 (Windows 416.9ms) |
 
 ### 9.4 UX 백로그
 
