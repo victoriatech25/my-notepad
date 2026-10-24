@@ -103,6 +103,17 @@ const SCENARIOS: &[Scenario] = &[
         work_files: &["tests/fixtures/editor/tabs.txt"],
     },
     Scenario {
+        name: "external",
+        package: "my-notepad",
+        args: &[],
+        description: "P2-07 외부 변경 감지 (target/try-external/의 문서 사본 2개 — 메모장으로 고치거나 탐색기에서 지워 보기)",
+        wait: false,
+        work_files: &[
+            "tests/fixtures/editor/highlight_ko.txt",
+            "tests/fixtures/editor/tabs.txt",
+        ],
+    },
+    Scenario {
         name: "editor",
         package: "my-notepad",
         args: &[],

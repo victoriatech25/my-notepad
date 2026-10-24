@@ -7,6 +7,8 @@
 //!   수정된 문서를 인코딩으로 다시 읽기 전 확인
 //! - P1-14: 큰 파일(5MB 초과)을 편집 모드로 열기 전 경고 (기본 버튼 `읽기 전용 유지`)
 //! - P2-02: 줄 이동 (줄 번호 입력 → `Enter`/`이동`, 범위 밖이면 대화상자 안에 오류 안내)
+//! - P2-07: 외부 변경 확인 (`다시 불러오기` · `내 버전 유지`, 앱에서도 수정했으면 충돌 안내 + 기본 `내 버전 유지`),
+//!   디스크에서 지워진 파일을 닫을 때 저장 확인에 삭제 안내
 //! - UX-3 피드백: 모든 대화상자를 Notepad++ 형태 공통 모양(제목 띠 + `×` / 본문 / 버튼 띠)으로 통일
 
 use std::collections::HashSet;
@@ -14,6 +16,7 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, RichText};
 
+use crate::core::document::DiskMetadata;
 use crate::core::encoding::{TextEncoding, UnmappableChar};
 use crate::core::file_io::LoadedFile;
 use crate::tabs::Tabs;
@@ -34,6 +37,8 @@ pub enum Dialog {
         title: String,
         /// 이 탭 다음에 이어서 닫을 탭 수
         remaining: usize,
+        /// 디스크에서 지워진 파일 (닫으면 내용이 사라짐)
+        deleted: bool,
     },
     /// 창 목록 (체크한 탭 ID)
     WindowList { checked: HashSet<u64> },
@@ -63,6 +68,14 @@ pub enum Dialog {
         size_bytes: u64,
         /// 권장 편집 크기 (뷰어 경계값)
         limit_bytes: u64,
+    },
+    /// "파일이 다른 프로그램에서 변경되었습니다" (P2-07)
+    ExternalChange {
+        tab_id: u64,
+        title: String,
+        /// 앱에서도 수정한 상태 (충돌)
+        conflict: bool,
+        disk: DiskMetadata,
     },
     /// 줄 이동 (`Ctrl+G` / `Cmd+L`)
     GoToLine {
@@ -116,6 +129,13 @@ pub enum DialogOutcome {
         tab_id: u64,
         line: usize,
     },
+    /// 외부 변경: 디스크 버전을 다시 불러오기
+    ReloadFromDisk(u64),
+    /// 외부 변경: 지금 내용 유지 (이 디스크 버전은 다시 묻지 않음)
+    KeepMine {
+        tab_id: u64,
+        disk: DiskMetadata,
+    },
 }
 
 /// 표현 불가 문자 목록에서 한 번에 보여 줄 최대 줄 수.
@@ -135,6 +155,7 @@ impl Dialog {
             Self::ConfirmReopen { .. } => "confirm-reopen",
             Self::ConfirmEditLarge { .. } => "confirm-edit-large",
             Self::GoToLine { .. } => "go-to-line",
+            Self::ExternalChange { .. } => "external-change",
         };
         egui::Id::unique(("app-dialog", kind))
     }
@@ -232,11 +253,18 @@ pub fn show(
                     tab_id,
                     title,
                     remaining,
+                    deleted,
                 } => {
                     ui.set_width(440.0);
                     close_button = title_bar(ui, &palette, "변경 내용을 저장할까요?");
                     body_area(ui, |ui| {
-                        ui.label(format!("\"{title}\"의 변경 내용이 저장되지 않았습니다."));
+                        if *deleted {
+                            ui.label(format!(
+                                "\"{title}\" 파일이 디스크에서 삭제되었습니다. 저장하지 않고 닫으면 내용이 사라집니다."
+                            ));
+                        } else {
+                            ui.label(format!("\"{title}\"의 변경 내용이 저장되지 않았습니다."));
+                        }
                         if *remaining > 0 {
                             ui.label(
                                 RichText::new(format!(
@@ -400,6 +428,55 @@ pub fn show(
                         }
                     });
                 }
+                Dialog::ExternalChange {
+                    tab_id,
+                    title,
+                    conflict,
+                    disk,
+                } => {
+                    ui.set_width(480.0);
+                    close_button =
+                        title_bar(ui, &palette, "파일이 다른 프로그램에서 변경되었습니다");
+                    body_area(ui, |ui| {
+                        if *conflict {
+                            ui.label(format!(
+                                "\"{title}\"이(가) 디스크에서 변경되었고, 앱에서도 수정한 내용이 있습니다."
+                            ));
+                            ui.label(
+                                RichText::new(
+                                    "디스크 버전을 불러오면 앱에서 수정한 내용은 사라집니다.",
+                                )
+                                .color(palette.status_warning),
+                            );
+                        } else {
+                            ui.label(format!(
+                                "\"{title}\"이(가) 디스크에서 변경되었습니다. 다시 불러올까요?"
+                            ));
+                        }
+                    });
+                    footer(ui, &palette, |ui| {
+                        let keep = DialogOutcome::KeepMine {
+                            tab_id: *tab_id,
+                            disk: *disk,
+                        };
+                        if *conflict {
+                            // 앱에서 수정한 내용을 실수로 잃지 않도록 Enter 기본 버튼은 "내 버전 유지"
+                            if default_button(ui, "내 버전 유지").clicked() {
+                                outcome = Some(keep);
+                            }
+                            if button(ui, "디스크 버전 불러오기").clicked() {
+                                outcome = Some(DialogOutcome::ReloadFromDisk(*tab_id));
+                            }
+                        } else {
+                            if button(ui, "내 버전 유지").clicked() {
+                                outcome = Some(keep);
+                            }
+                            if default_button(ui, "다시 불러오기").clicked() {
+                                outcome = Some(DialogOutcome::ReloadFromDisk(*tab_id));
+                            }
+                        }
+                    });
+                }
                 Dialog::GoToLine {
                     tab_id,
                     line_count,
@@ -455,6 +532,11 @@ pub fn show(
     if outcome.is_none() && !open_binary && (close_button || modal.should_close()) {
         outcome = Some(match current {
             Dialog::Unsaved { .. } => DialogOutcome::CancelClose,
+            // 외부 변경 확인을 그냥 닫으면 지금 내용 유지 (같은 디스크 버전은 다시 묻지 않음)
+            Dialog::ExternalChange { tab_id, disk, .. } => DialogOutcome::KeepMine {
+                tab_id: *tab_id,
+                disk: *disk,
+            },
             _ => DialogOutcome::Dismissed,
         });
     }
@@ -786,7 +868,54 @@ mod tests {
             tab_id,
             title: "회의록.txt".into(),
             remaining: 2,
+            deleted: false,
         })
+    }
+
+    fn external(conflict: bool) -> Option<Dialog> {
+        Some(Dialog::ExternalChange {
+            tab_id: 4,
+            title: "server.log".into(),
+            conflict,
+            disk: DiskMetadata {
+                modified_time: None,
+                byte_len: 10,
+            },
+        })
+    }
+
+    #[test]
+    fn external_change_default_reloads_unless_conflict() {
+        let tabs = Tabs::new();
+        // 수정하지 않은 탭: Enter = 다시 불러오기
+        let ctx = egui::Context::default();
+        let mut dialog = external(false);
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Enter)]);
+        assert!(
+            matches!(out, Some(DialogOutcome::ReloadFromDisk(4))),
+            "{out:?}"
+        );
+
+        // 충돌: Enter = 내 버전 유지
+        let ctx = egui::Context::default();
+        let mut dialog = external(true);
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Enter)]);
+        assert!(
+            matches!(out, Some(DialogOutcome::KeepMine { tab_id: 4, .. })),
+            "{out:?}"
+        );
+
+        // Esc = 내 버전 유지 (다시 묻지 않도록 디스크 버전을 넘긴다)
+        let ctx = egui::Context::default();
+        let mut dialog = external(false);
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Escape)]);
+        assert!(
+            matches!(out, Some(DialogOutcome::KeepMine { disk, .. }) if disk.byte_len == 10),
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -873,6 +1002,7 @@ mod tests {
                 tab_id: id,
                 title: "cp949.txt".into(),
                 remaining: 1,
+                deleted: false,
             },
             Dialog::DamagedSave {
                 tab_id: id,

@@ -11,6 +11,7 @@
 //! - P1-12: 상태 표시줄 인코딩·줄바꿈 팝업, 인코딩으로 다시 읽기(수정 중이면 확인), 변환 저장,
 //!   표현 불가 문자 경고(UTF-8로 저장 · `?`로 바꿔 저장 · 취소), 손상된 문서 저장 경고, 명령줄 파일 인자
 //! - P1-13: 파일을 창에 끌어다 놓아 열기(놓기 전 안내 덧그림), 명령줄 인자 해석은 `cli.rs`
+//! - P2-07: 앱이 포커스를 얻을 때 열린 파일의 외부 변경·삭제를 확인 (다시 불러오기 확인, 삭제된 탭 표시)
 //! - P2-06: 좌측 폴더 탐색 사이드바 — `폴더 열기`·끌어다 놓은 폴더·명령줄 폴더 인자로 열고, 파일 클릭 시 탭으로 연다
 //! - P1-14: 5MB 초과 파일은 읽기 전용 뷰어(`ui::viewer`), 1~5MB는 안내 막대, 뷰어 ↔ 편집 모드 전환(큰 파일은 경고)
 
@@ -27,7 +28,7 @@ use crate::core::file_io::{self, FileIoErrorKind, OpenMode, OpenOutcome, SaveErr
 use crate::core::highlight::HighlightOptions;
 use crate::core::line_ending::LineEnding;
 use crate::fonts;
-use crate::tabs::Tabs;
+use crate::tabs::{ExternalChange, Tabs};
 use crate::ui::{
     dialogs::{self, Dialog, DialogOutcome},
     editor::{self, EditorOptions},
@@ -100,6 +101,8 @@ pub struct NotepadApp {
     tab_spaces: bool,
     /// 적용 중인 글꼴 정의 (탭 너비를 바꿀 때 다시 적용)
     font_defs: egui::FontDefinitions,
+    /// 지난 프레임에 창이 포커스를 가졌는지 (포커스를 다시 얻으면 외부 변경 확인)
+    window_focused: bool,
     zoom: f32,
     scroll_sync: bool,
     /// 선택 단어 일괄 강조 옵션 (설정 저장은 P2-08)
@@ -151,6 +154,7 @@ impl NotepadApp {
             tab_width: 4,
             tab_spaces: false,
             font_defs,
+            window_focused: false,
             zoom: 1.0,
             scroll_sync: true,
             highlight: HighlightOptions::default(),
@@ -370,8 +374,9 @@ impl NotepadApp {
                 continue;
             };
             let tab = self.tabs.get(index).expect("index_of 결과");
-            if tab.doc.is_modified() {
+            if tab.needs_save() {
                 let title = tab.doc.title();
+                let deleted = tab.disk_deleted;
                 // 무엇을 묻는지 보이도록 그 탭으로 이동한다.
                 self.tabs.activate(index);
                 self.close_queue.push_front(id);
@@ -379,6 +384,7 @@ impl NotepadApp {
                     tab_id: id,
                     title,
                     remaining: self.close_queue.len() - 1,
+                    deleted,
                 });
                 return;
             }
@@ -436,7 +442,7 @@ impl NotepadApp {
         let modified: Vec<u64> = self
             .tabs
             .iter()
-            .filter(|t| t.doc.is_modified())
+            .filter(|t| t.needs_save())
             .map(|t| t.id())
             .collect();
         if modified.is_empty() {
@@ -660,6 +666,9 @@ impl NotepadApp {
                     tab.refresh_path_key();
                     tab.file_readonly = false;
                 }
+                // 저장으로 디스크 파일이 다시 생겼고 디스크 버전도 지금 내용과 같아졌다.
+                tab.disk_deleted = false;
+                tab.dismissed_disk = None;
                 let title = tab.doc.title();
                 if eol_notice {
                     tab.doc.mark_line_ending_conversion_notified();
@@ -742,17 +751,92 @@ impl NotepadApp {
         }
     }
 
+    // ── 외부 변경 감지 (P2-07) ──
+
+    /// 창이 포커스를 다시 얻으면 열린 파일의 디스크 상태를 확인한다.
+    fn check_external_changes(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|i| i.focused);
+        let gained = focused && !self.window_focused;
+        self.window_focused = focused;
+        if !gained {
+            return;
+        }
+        for change in self.tabs.check_external_changes() {
+            match change {
+                ExternalChange::Modified {
+                    tab_id,
+                    title,
+                    conflict,
+                    disk,
+                } => self.dialogs.push_back(Dialog::ExternalChange {
+                    tab_id,
+                    title,
+                    conflict,
+                    disk,
+                }),
+                ExternalChange::Deleted { title, .. } => self.show_notice(
+                    ctx,
+                    format!(
+                        "\"{title}\" 파일이 디스크에서 삭제되었습니다. 저장하면 다시 만듭니다."
+                    ),
+                ),
+            }
+        }
+    }
+
+    /// 외부 변경 확인 결과를 처리한다.
+    fn resolve_external_change(&mut self, ctx: &egui::Context, outcome: &DialogOutcome) {
+        match *outcome {
+            DialogOutcome::ReloadFromDisk(tab_id) => {
+                let Some(encoding) = self
+                    .tabs
+                    .index_of(tab_id)
+                    .and_then(|i| self.tabs.get(i))
+                    .map(|t| t.doc.encoding())
+                else {
+                    return;
+                };
+                if self.reload_tab(tab_id, encoding).is_ok() {
+                    self.show_notice(ctx, "디스크의 내용으로 다시 불러왔습니다.");
+                }
+            }
+            DialogOutcome::KeepMine { tab_id, disk } => {
+                if let Some(tab) = self
+                    .tabs
+                    .index_of(tab_id)
+                    .and_then(|i| self.tabs.get_mut(i))
+                {
+                    tab.external_pending = false;
+                    tab.dismissed_disk = Some(disk);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// 디스크의 파일을 지정한 인코딩으로 다시 해석해 같은 탭에 연다.
     fn reopen_tab(&mut self, ctx: &egui::Context, tab_id: u64, encoding: TextEncoding) {
+        if let Ok(damaged) = self.reload_tab(tab_id, encoding) {
+            let mut text = format!("{}(으)로 다시 읽었습니다.", encoding.label());
+            if damaged {
+                text.push_str(" 해석하지 못한 바이트가 있습니다(�).");
+            }
+            self.show_notice(ctx, text);
+        }
+    }
+
+    /// 디스크에서 다시 읽어 같은 탭의 문서를 바꾼다. 해석하지 못한 바이트가 있으면 `Ok(true)`.
+    /// 읽지 못하면 오류 대화상자를 띄우고 `Err(())`.
+    fn reload_tab(&mut self, tab_id: u64, encoding: TextEncoding) -> Result<bool, ()> {
         let Some(tab) = self
             .tabs
             .index_of(tab_id)
             .and_then(|i| self.tabs.get_mut(i))
         else {
-            return;
+            return Err(());
         };
         let Some(path) = tab.doc.path().map(Path::to_path_buf) else {
-            return;
+            return Err(());
         };
         match file_io::read_file(&path, &self.size_policy) {
             Ok(loaded) => {
@@ -768,15 +852,13 @@ impl NotepadApp {
                 let damaged = doc.is_damaged();
                 tab.file_readonly = loaded.readonly;
                 tab.replace_document(doc);
-                let mut text = format!("{}(으)로 다시 읽었습니다.", encoding.label());
-                if damaged {
-                    text.push_str(" 해석하지 못한 바이트가 있습니다(�).");
-                }
-                self.show_notice(ctx, text);
+                Ok(damaged)
             }
             Err(err) => {
+                tab.external_pending = false;
                 self.dialogs
                     .push_back(Dialog::message("다시 읽지 못했습니다", err.to_string()));
+                Err(())
             }
         }
     }
@@ -952,6 +1034,7 @@ impl eframe::App for NotepadApp {
         // 0. 창 닫기 요청 가로채기 (수정된 탭이 있으면 저장 확인), 끌어다 놓은 파일 열기
         self.intercept_close_request(&ctx);
         self.open_dropped_files(&ctx);
+        self.check_external_changes(&ctx);
 
         // 1. 위젯보다 먼저 전역 단축키를 소비·디스패치한다 (PLAN.md §3.5). 대화상자가 떠 있으면 막는다.
         if self.dialogs.is_empty()
@@ -1188,6 +1271,9 @@ impl eframe::App for NotepadApp {
                     tab.apply_open_mode(opened.open_mode);
                 }
             }
+            Some(
+                external @ (DialogOutcome::ReloadFromDisk(_) | DialogOutcome::KeepMine { .. }),
+            ) => self.resolve_external_change(&ctx, &external),
             Some(DialogOutcome::GoToLine { tab_id, line }) => {
                 if let Some(index) = self.tabs.index_of(tab_id)
                     && let Some(tab) = self.tabs.get_mut(index)
