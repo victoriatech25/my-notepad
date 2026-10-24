@@ -266,6 +266,24 @@ pub fn build_chain(slots: &[FontSlot]) -> (FontDefinitions, FontReport) {
     (defs, report)
 }
 
+/// 고정폭 패밀리 글꼴들의 탭 문자 폭을 공백 `spaces`칸으로 바꾼다 (P2-02 탭 너비).
+///
+/// egui는 탭을 "공백 N칸" 고정 폭으로 그린다(`FontTweak::tab_size`). 바꾼 정의는 `Context::set_fonts`로 다시 적용해야 한다.
+pub fn set_tab_size(defs: &mut FontDefinitions, spaces: f32) {
+    let keys = defs
+        .families
+        .get(&FontFamily::Monospace)
+        .cloned()
+        .unwrap_or_default();
+    for key in keys {
+        if let Some(data) = defs.font_data.get_mut(&key)
+            && data.tweak.tab_size != spaces
+        {
+            Arc::make_mut(data).tweak.tab_size = spaces;
+        }
+    }
+}
+
 /// 내장 Phosphor 아이콘 폰트를 `ICON_FAMILY` 패밀리로 등록한다.
 pub fn register_icon_font(defs: &mut FontDefinitions) {
     defs.font_data.insert(
@@ -383,6 +401,28 @@ fn face_name(face: &ttf_parser::Face<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_size_changes_only_monospace_fonts() {
+        let mut defs = FontDefinitions::default();
+        let mono: Vec<String> = defs.families[&FontFamily::Monospace].clone();
+        // 고정폭 글꼴과 데이터를 공유하는 비례폭 전용 글꼴 (같은 `Arc`)
+        let shared = Arc::clone(&defs.font_data[&mono[0]]);
+        defs.font_data.insert("ui-only".to_owned(), shared);
+        defs.families
+            .get_mut(&FontFamily::Proportional)
+            .unwrap()
+            .insert(0, "ui-only".to_owned());
+
+        set_tab_size(&mut defs, 8.0);
+        for key in &mono {
+            assert_eq!(defs.font_data[key].tweak.tab_size, 8.0, "{key}");
+        }
+        assert_eq!(
+            defs.font_data["ui-only"].tweak.tab_size, 4.0,
+            "데이터를 공유해도 비례폭 글꼴은 그대로"
+        );
+    }
 
     #[test]
     fn windows_slots_use_custom_windir() {

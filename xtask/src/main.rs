@@ -95,6 +95,14 @@ const SCENARIOS: &[Scenario] = &[
         work_files: &[],
     },
     Scenario {
+        name: "tabs",
+        package: "my-notepad",
+        args: &["spikes/samples/lines-12k.txt"],
+        description: "P2-02 확대/축소·줄 이동·탭 너비 (12,000줄 + 탭 들여쓰기 문서 사본 — 샘플: cargo xtask gen-samples)",
+        wait: false,
+        work_files: &["tests/fixtures/editor/tabs.txt"],
+    },
+    Scenario {
         name: "editor",
         package: "my-notepad",
         args: &[],

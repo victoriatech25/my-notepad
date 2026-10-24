@@ -122,6 +122,17 @@ impl ViewerState {
         self.pending_top_line = Some(line as f64);
     }
 
+    /// `line`(0-기반) 줄 처음으로 캐럿을 옮기고 그 줄이 화면 가운데쯤 오게 한다 (줄 이동, P2-02).
+    pub fn go_to_line(&mut self, doc: &Document, line: usize) {
+        let index = doc.line_index();
+        let line = line.min(index.line_count().saturating_sub(1));
+        let byte = index.line_start_byte(line).unwrap_or(0);
+        self.set_selection(doc, byte, byte);
+        self.preferred_col = None;
+        self.pending_top_line = Some(line.saturating_sub(self.page_lines() / 2) as f64);
+        self.focus_requested = true;
+    }
+
     /// 지난 프레임의 맨 위 줄 (0-기반, 소수 포함).
     pub fn top_line(&self) -> f64 {
         self.top_line
@@ -814,6 +825,19 @@ mod tests {
             &mut copied,
         );
         assert_eq!(v.cursor_status(&d).2, 0);
+    }
+
+    #[test]
+    fn go_to_line_moves_caret_and_scrolls() {
+        let text: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        let d = doc(&text);
+        let mut v = ViewerState::new(9);
+        v.go_to_line(&d, 499);
+        assert_eq!(v.cursor_status(&d), (500, 1, 0));
+        assert_eq!(v.caret(), d.line_index().line_start_byte(499).unwrap());
+        assert!(v.pending_top_line.is_some_and(|t| t <= 499.0 && t > 400.0));
+        v.go_to_line(&d, 5_000);
+        assert_eq!(v.cursor_status(&d).0, d.line_count());
     }
 
     #[test]

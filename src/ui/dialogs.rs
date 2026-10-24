@@ -6,6 +6,7 @@
 //! - P1-12: 표현 불가 문자 경고(`UTF-8로 저장` · `?`로 바꿔 저장 · 취소), 손상된 문서 저장 경고,
 //!   수정된 문서를 인코딩으로 다시 읽기 전 확인
 //! - P1-14: 큰 파일(5MB 초과)을 편집 모드로 열기 전 경고 (기본 버튼 `읽기 전용 유지`)
+//! - P2-02: 줄 이동 (줄 번호 입력 → `Enter`/`이동`, 범위 밖이면 대화상자 안에 오류 안내)
 //! - UX-3 피드백: 모든 대화상자를 Notepad++ 형태 공통 모양(제목 띠 + `×` / 본문 / 버튼 띠)으로 통일
 
 use std::collections::HashSet;
@@ -63,6 +64,14 @@ pub enum Dialog {
         /// 권장 편집 크기 (뷰어 경계값)
         limit_bytes: u64,
     },
+    /// 줄 이동 (`Ctrl+G` / `Cmd+L`)
+    GoToLine {
+        tab_id: u64,
+        line_count: usize,
+        current_line: usize,
+        input: String,
+        error: Option<String>,
+    },
 }
 
 /// 대화상자를 닫으며 사용자가 고른 결과.
@@ -102,6 +111,11 @@ pub enum DialogOutcome {
         tab_id: u64,
         encoding: TextEncoding,
     },
+    /// 줄 이동: 1-기반 줄 번호
+    GoToLine {
+        tab_id: u64,
+        line: usize,
+    },
 }
 
 /// 표현 불가 문자 목록에서 한 번에 보여 줄 최대 줄 수.
@@ -120,6 +134,7 @@ impl Dialog {
             Self::DamagedSave { .. } => "damaged-save",
             Self::ConfirmReopen { .. } => "confirm-reopen",
             Self::ConfirmEditLarge { .. } => "confirm-edit-large",
+            Self::GoToLine { .. } => "go-to-line",
         };
         egui::Id::unique(("app-dialog", kind))
     }
@@ -128,6 +143,17 @@ impl Dialog {
         Self::Message {
             title: title.into(),
             body: body.into(),
+        }
+    }
+
+    /// 줄 이동 대화상자 (`current_line`은 1-기반, 입력란 안내에 보인다).
+    pub fn go_to_line(tab_id: u64, line_count: usize, current_line: usize) -> Self {
+        Self::GoToLine {
+            tab_id,
+            line_count,
+            current_line,
+            input: String::new(),
+            error: None,
         }
     }
 
@@ -358,7 +384,8 @@ pub fn show(
                     close_button = title_bar(ui, &palette, "큰 파일을 편집 모드로 열까요?");
                     body_area(ui, |ui| {
                         ui.label(format!(
-                            "\"{title}\" ({})는 권장 편집 크기({})를 넘습니다. 편집 모드로 열면 입력과 화면 반응이                              느려지거나 메모리를 많이 쓸 수 있습니다.",
+                            "\"{title}\" ({})는 권장 편집 크기({})를 넘습니다. 편집 모드로 열면 입력과 화면 반응이 \
+                             느려지거나 메모리를 많이 쓸 수 있습니다.",
                             viewer::format_size(*size_bytes),
                             viewer::format_size(*limit_bytes)
                         ));
@@ -372,6 +399,54 @@ pub fn show(
                             outcome = Some(DialogOutcome::OpenEditMode(*tab_id));
                         }
                     });
+                }
+                Dialog::GoToLine {
+                    tab_id,
+                    line_count,
+                    current_line,
+                    input,
+                    error,
+                } => {
+                    ui.set_width(360.0);
+                    close_button = title_bar(ui, &palette, "줄 이동");
+                    let mut submit = false;
+                    body_area(ui, |ui| {
+                        ui.label(format!("줄 번호 (1 – {line_count})"));
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(input)
+                                .hint_text(format!("현재 {current_line}번째 줄"))
+                                .desired_width(f32::INFINITY),
+                        );
+                        // Enter로 입력란이 포커스를 놓은 프레임에는 포커스를 다시 가져오지 않는다
+                        // (가져오면 `lost_focus`가 거짓이 되어 Enter가 무시된다). 오류면 다음 프레임에 돌아온다.
+                        if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            submit = true;
+                        } else {
+                            focus_if_outside(ui, &edit);
+                        }
+                        if let Some(message) = error {
+                            ui.label(RichText::new(message.as_str()).color(palette.status_error));
+                        }
+                    });
+                    footer(ui, &palette, |ui| {
+                        if button(ui, "취소").clicked() {
+                            outcome = Some(DialogOutcome::Dismissed);
+                        }
+                        if strong_button(ui, "이동").clicked() {
+                            submit = true;
+                        }
+                    });
+                    if submit {
+                        match parse_line_number(input, *line_count) {
+                            Ok(line) => {
+                                outcome = Some(DialogOutcome::GoToLine {
+                                    tab_id: *tab_id,
+                                    line,
+                                });
+                            }
+                            Err(message) => *error = Some(message),
+                        }
+                    }
                 }
             }
         });
@@ -495,17 +570,26 @@ fn button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(egui::Button::new(label).min_size(BUTTON_MIN))
 }
 
-/// Enter로 눌리는 기본 버튼 (굵게 + 강조 테두리 + 키보드 포커스).
-///
-/// 포커스가 대화상자 밖(뒤의 에디터 등)에 있거나 없으면 이 버튼으로 가져온다.
-/// 대화상자 안에서 `Tab`으로 다른 버튼에 옮긴 포커스는 빼앗지 않는다.
-fn default_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+/// 굵게 + 강조 테두리 버튼 (주 동작 표시, 포커스는 가져오지 않음).
+fn strong_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let stroke = egui::Stroke::new(1.0, ui.visuals().strong_text_color());
-    let response = ui.add(
+    ui.add(
         egui::Button::new(RichText::new(label).strong())
             .min_size(BUTTON_MIN)
             .stroke(stroke),
-    );
+    )
+}
+
+/// Enter로 눌리는 기본 버튼 (굵게 + 강조 테두리 + 키보드 포커스).
+fn default_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let response = strong_button(ui, label);
+    focus_if_outside(ui, &response);
+    response
+}
+
+/// 포커스가 대화상자 밖(뒤의 에디터 등)에 있거나 없으면 `response`로 가져온다.
+/// 대화상자 안에서 `Tab`으로 다른 위젯에 옮긴 포커스는 빼앗지 않는다.
+fn focus_if_outside(ui: &egui::Ui, response: &egui::Response) {
     let ctx = ui.ctx();
     let focus_in_dialog = ctx
         .memory(|m| m.focused())
@@ -514,7 +598,23 @@ fn default_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     if !focus_in_dialog {
         response.request_focus();
     }
-    response
+}
+
+/// 줄 이동 입력을 1-기반 줄 번호로 읽는다. 범위 밖·숫자가 아니면 안내 문구.
+pub fn parse_line_number(input: &str, line_count: usize) -> Result<usize, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("줄 번호를 입력하세요".to_owned());
+    }
+    let line: usize = input.parse().map_err(|_| "숫자로 입력하세요".to_owned())?;
+    if (1..=line_count.max(1)).contains(&line) {
+        Ok(line)
+    } else {
+        Err(format!(
+            "1부터 {} 사이의 줄 번호를 입력하세요",
+            line_count.max(1)
+        ))
+    }
 }
 
 /// 창 목록 대화상자 (ui-spec §7): 체크박스 · 아이콘 · 이름(현재 창 굵게) · 수정 여부 · 경로 /
@@ -804,6 +904,62 @@ mod tests {
                 assert!(rect.width() < 520.0, "{name}: 폭 {}", rect.width());
             }
         }
+    }
+
+    #[test]
+    fn go_to_line_validates_and_submits_with_enter() {
+        let tabs = Tabs::new();
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::go_to_line(5, 120, 1));
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        // 범위 밖 → 대화상자 유지 + 오류 안내
+        let out = frame(
+            &ctx,
+            &mut dialog,
+            &tabs,
+            vec![Event::Text("500".into()), press(Key::Enter)],
+        );
+        assert!(out.is_none());
+        assert!(matches!(
+            &dialog,
+            Some(Dialog::GoToLine { error: Some(e), .. }) if e.contains("1부터 120")
+        ));
+        // 입력란에 포커스가 돌아와 고쳐 쓸 수 있다
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let out = frame(
+            &ctx,
+            &mut dialog,
+            &tabs,
+            vec![
+                press(Key::Backspace),
+                press(Key::Backspace),
+                press(Key::Backspace),
+                Event::Text("42".into()),
+                press(Key::Enter),
+            ],
+        );
+        assert!(
+            matches!(
+                out,
+                Some(DialogOutcome::GoToLine {
+                    tab_id: 5,
+                    line: 42
+                })
+            ),
+            "{out:?}"
+        );
+        assert!(dialog.is_none());
+    }
+
+    #[test]
+    fn line_number_parsing() {
+        assert_eq!(parse_line_number(" 7 ", 10), Ok(7));
+        assert_eq!(parse_line_number("10", 10), Ok(10));
+        assert!(parse_line_number("0", 10).is_err());
+        assert!(parse_line_number("11", 10).is_err());
+        assert!(parse_line_number("abc", 10).unwrap_err().contains("숫자"));
+        assert!(parse_line_number("", 10).is_err());
+        assert_eq!(parse_line_number("1", 0), Ok(1), "빈 문서도 1번 줄은 있다");
     }
 
     #[test]
