@@ -5,12 +5,13 @@
 //! - `--font-report`: 창을 띄우지 않고 OS 폰트 Fallback 체인 로드 보고서를 출력 (자동 검증용)
 //! - `--log-file <경로>`: 로그 파일 경로 수동 지정 (자동 테스트용)
 //! - 그 밖의 인자는 열 파일 경로 — 탭으로 연다 (`cli.rs`, P1-13: 상대 경로·`--`·탐색기 연결 프로그램)
+//! - 저장된 설정(`config.rs`, P2-08)을 읽어 창 위치·크기를 되살린다. 성능 측정(`--measure-out`) 실행은 설정을 쓰지 않는다
 //! - `eframe` `glow` 렌더러로 네이티브 창 기동
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
-use my_notepad::{app, cli::CliArgs, fonts, logging};
+use my_notepad::{app, cli::CliArgs, config::Settings, fonts, logging};
 
 fn main() -> eframe::Result {
     let started = std::time::Instant::now();
@@ -39,13 +40,34 @@ fn main() -> eframe::Result {
         std::process::exit(if report.has_failures() { 1 } else { 0 });
     }
 
+    // 성능 측정은 저장된 창 크기·사이드바 폴더 등에 영향을 받지 않게 설정 없이 실행한다.
+    let settings_path = if cli.measure_out.is_some() {
+        None
+    } else {
+        Settings::default_path()
+    };
+    let (settings, settings_problem) = match &settings_path {
+        Some(path) => {
+            let loaded = Settings::load(path);
+            (loaded.settings, loaded.problem)
+        }
+        None => (Settings::default(), None),
+    };
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("My-Notepad")
+        .with_inner_size([1200.0, 780.0])
+        .with_min_inner_size([480.0, 320.0])
+        // 탐색기에서 파일을 끌어다 놓아 열기 (P1-13)
+        .with_drag_and_drop(true);
+    if let Some(window) = settings.window {
+        viewport = viewport
+            .with_inner_size([window.width, window.height])
+            .with_position([window.x, window.y])
+            .with_maximized(window.maximized);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("My-Notepad")
-            .with_inner_size([1200.0, 780.0])
-            .with_min_inner_size([480.0, 320.0])
-            // 탐색기에서 파일을 끌어다 놓아 열기 (P1-13)
-            .with_drag_and_drop(true),
+        viewport,
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
@@ -54,7 +76,8 @@ fn main() -> eframe::Result {
         "my-notepad",
         options,
         Box::new(move |cc| {
-            let mut app = app::NotepadApp::new(cc, &cli.files);
+            let mut app =
+                app::NotepadApp::new(cc, &cli.files, settings, settings_path, settings_problem);
             if let Some(out) = cli.measure_out.clone() {
                 app.enable_measure(out, started);
             }

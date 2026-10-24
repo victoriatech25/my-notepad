@@ -99,8 +99,9 @@ impl ViewMode {
     }
 }
 
-/// 앱 테마 설정 (PLAN.md §3.7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// 앱 테마 설정 (PLAN.md §3.7). 설정 파일에는 `"system"`·`"light"`·`"dark"`로 저장한다 (P2-08).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ThemeMode {
     System,
     Light,

@@ -11,6 +11,8 @@
 //! - P1-12: 상태 표시줄 인코딩·줄바꿈 팝업, 인코딩으로 다시 읽기(수정 중이면 확인), 변환 저장,
 //!   표현 불가 문자 경고(UTF-8로 저장 · `?`로 바꿔 저장 · 취소), 손상된 문서 저장 경고, 명령줄 파일 인자
 //! - P1-13: 파일을 창에 끌어다 놓아 열기(놓기 전 안내 덧그림), 명령줄 인자 해석은 `cli.rs`
+//! - P2-08: 설정 영속화(`config.rs` — 창 위치·크기, 사이드바, 글꼴 확대, 줄바꿈, 탭, 강조 옵션, 테마, 최근 파일).
+//!   바뀌면 1초 뒤 자동 저장하고, 종료할 때 한 번 더 저장한다
 //! - P2-07: 앱이 포커스를 얻을 때 열린 파일의 외부 변경·삭제를 확인 (다시 불러오기 확인, 삭제된 탭 표시)
 //! - P2-06: 좌측 폴더 탐색 사이드바 — `폴더 열기`·끌어다 놓은 폴더·명령줄 폴더 인자로 열고, 파일 클릭 시 탭으로 연다
 //! - P1-14: 5MB 초과 파일은 읽기 전용 뷰어(`ui::viewer`), 1~5MB는 안내 막대, 뷰어 ↔ 편집 모드 전환(큰 파일은 경고)
@@ -22,6 +24,7 @@ use std::time::Instant;
 use eframe::egui::{self, FontId, ViewportCommand};
 
 use crate::commands::{Command, KeyDispatcher, Keymap, ThemeMode, ViewMode};
+use crate::config::{Settings, WindowGeometry};
 use crate::core::document::Document;
 use crate::core::encoding::{TextEncoding, decode_with_encoding, find_unmappable_chars};
 use crate::core::file_io::{self, FileIoErrorKind, OpenMode, OpenOutcome, SaveError, SizePolicy};
@@ -39,6 +42,9 @@ use crate::ui::{
     theme::{self, Palette},
     viewer,
 };
+
+/// 설정이 바뀐 뒤 저장까지 기다리는 시간(초) — 창을 끄는 동안 여러 번 쓰지 않게.
+const SETTINGS_SAVE_DELAY: f64 = 1.0;
 
 /// 상태 표시줄 안내 문구를 보여 주는 시간(초).
 const NOTICE_SECONDS: f64 = 4.0;
@@ -95,7 +101,7 @@ pub struct NotepadApp {
     sidebar_open: bool,
     sidebar: SidebarState,
     word_wrap: bool,
-    /// 탭 너비 (공백 칸 수, 설정 저장은 P2-08)
+    /// 탭 너비 (공백 칸 수)
     tab_width: u8,
     /// `Tab` 키로 공백 넣기
     tab_spaces: bool,
@@ -105,20 +111,39 @@ pub struct NotepadApp {
     window_focused: bool,
     zoom: f32,
     scroll_sync: bool,
-    /// 선택 단어 일괄 강조 옵션 (설정 저장은 P2-08)
+    /// 선택 단어 일괄 강조 옵션
     highlight: HighlightOptions,
     theme: ThemeMode,
     last_command: Option<String>,
+
+    // P2-08 설정 영속화
+    /// 설정 파일 경로 (`None`이면 읽지도 저장하지도 않음 — 성능 측정 실행)
+    settings_path: Option<PathBuf>,
+    /// 마지막으로 저장한 설정 (지금 상태와 다르면 저장 대기)
+    saved_settings: Settings,
+    /// 최근 파일·창 위치·사이드바 폭 등 앱 필드로 따로 두지 않는 설정
+    settings: Settings,
+    /// 설정이 처음 바뀐 시각 (1초 뒤 자동 저장)
+    settings_dirty_since: Option<f64>,
 
     measure: Option<MeasureRun>,
 }
 
 impl NotepadApp {
     /// `files`는 명령줄로 받은 파일 경로 — 시작하면서 탭으로 연다.
-    pub fn new(cc: &eframe::CreationContext<'_>, files: &[PathBuf]) -> Self {
-        let (font_defs, report) = fonts::explicit_chain();
+    /// `settings`는 저장된 설정(`settings_path`에서 읽음), `settings_problem`은 설정을 읽지 못한 이유.
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        files: &[PathBuf],
+        settings: Settings,
+        settings_path: Option<PathBuf>,
+        settings_problem: Option<String>,
+    ) -> Self {
+        let (mut font_defs, report) = fonts::explicit_chain();
+        fonts::set_tab_size(&mut font_defs, f32::from(settings.tab_width));
         cc.egui_ctx.set_fonts(font_defs.clone());
         theme::configure_visuals(&cc.egui_ctx);
+        cc.egui_ctx.set_theme(settings.theme.to_egui());
         // `Ctrl/Cmd + +/-/0`은 에디터 글꼴 확대/축소(P2-02)로 쓴다. egui 기본 동작(화면 전체 확대)은 끈다.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
@@ -148,24 +173,147 @@ impl NotepadApp {
             allow_close: false,
             keymap: Keymap::current(),
             key_dispatcher: KeyDispatcher::new(),
-            sidebar_open: true,
+            sidebar_open: settings.sidebar_open,
             sidebar: SidebarState::default(),
-            word_wrap: true,
-            tab_width: 4,
-            tab_spaces: false,
+            word_wrap: settings.word_wrap,
+            tab_width: settings.tab_width,
+            tab_spaces: settings.tab_spaces,
             font_defs,
             window_focused: false,
-            zoom: 1.0,
+            zoom: settings.zoom,
             scroll_sync: true,
-            highlight: HighlightOptions::default(),
-            theme: ThemeMode::System,
+            highlight: HighlightOptions {
+                whole_word: settings.highlight_whole_word,
+                match_case: settings.highlight_match_case,
+                ..HighlightOptions::default()
+            },
+            theme: settings.theme,
             last_command: None,
             measure: None,
+            settings_path,
+            saved_settings: settings.clone(),
+            settings: settings.clone(),
+            settings_dirty_since: None,
         };
+        // 지난번 사이드바 폴더 (없어졌으면 조용히 넘어간다). 명령줄 폴더 인자가 있으면 아래에서 바뀐다.
+        if let Some(folder) = &settings.sidebar_folder
+            && folder.is_dir()
+            && let Err(e) = app.sidebar.open_folder(folder)
+        {
+            log::warn!(
+                "지난번 사이드바 폴더를 열지 못함 ({}): {e}",
+                folder.display()
+            );
+        }
+        if let Some(problem) = settings_problem {
+            app.dialogs
+                .push_back(Dialog::message("설정을 불러오지 못했습니다", problem));
+        }
         for file in files {
             app.open_any(&cc.egui_ctx, file);
         }
         app
+    }
+
+    // ── 설정 영속화 (P2-08) ──
+
+    /// 지금 앱 상태를 설정으로 모은다.
+    fn settings_snapshot(&self) -> Settings {
+        Settings {
+            sidebar_open: self.sidebar_open,
+            sidebar_folder: self.sidebar.folder().map(Path::to_path_buf),
+            zoom: self.zoom,
+            word_wrap: self.word_wrap,
+            tab_width: self.tab_width,
+            tab_spaces: self.tab_spaces,
+            highlight_whole_word: self.highlight.whole_word,
+            highlight_match_case: self.highlight.match_case,
+            theme: self.theme,
+            ..self.settings.clone()
+        }
+    }
+
+    /// 창 위치·크기를 기억한다. 최대화 중에는 최대화 전 크기를 그대로 두고, 최소화 중에는 건드리지 않는다.
+    fn track_window_geometry(&mut self, ctx: &egui::Context) {
+        let (outer, inner, maximized, minimized) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.inner_rect, v.maximized, v.minimized)
+        });
+        if minimized == Some(true) {
+            return;
+        }
+        if maximized == Some(true) {
+            if let Some(geometry) = &mut self.settings.window {
+                geometry.maximized = true;
+            }
+        } else if let (Some(outer), Some(inner)) = (outer, inner) {
+            self.settings.window = Some(WindowGeometry {
+                x: outer.min.x,
+                y: outer.min.y,
+                width: inner.width(),
+                height: inner.height(),
+                maximized: false,
+            });
+        }
+    }
+
+    /// 설정이 바뀌었으면 1초 동안 더 바뀌지 않을 때 저장한다 (창을 끄는 중에도 [`Self::save_settings_now`]).
+    fn autosave_settings(&mut self, ctx: &egui::Context) {
+        if self.settings_path.is_none() {
+            return;
+        }
+        let snapshot = self.settings_snapshot();
+        if snapshot == self.saved_settings {
+            self.settings_dirty_since = None;
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        match self.settings_dirty_since {
+            Some(since) if now - since >= SETTINGS_SAVE_DELAY => self.save_settings_now(),
+            Some(_) => {}
+            None => {
+                self.settings_dirty_since = Some(now);
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    SETTINGS_SAVE_DELAY + 0.05,
+                ));
+            }
+        }
+    }
+
+    /// 지금 설정을 바로 저장한다. 실패하면 로그만 남기고, 같은 내용으로 다시 시도하지 않는다.
+    fn save_settings_now(&mut self) {
+        let Some(path) = &self.settings_path else {
+            return;
+        };
+        let snapshot = self.settings_snapshot();
+        if snapshot == self.saved_settings {
+            return;
+        }
+        match snapshot.save(path) {
+            Ok(()) => log::info!("설정 저장: {}", path.display()),
+            Err(e) => log::warn!("설정 저장 실패 ({}): {e}", path.display()),
+        }
+        self.saved_settings = snapshot;
+        self.settings_dirty_since = None;
+    }
+
+    /// 최근 파일 열기. 파일이 없어졌으면 목록에서 지우고 알린다.
+    fn open_recent(&mut self, ctx: &egui::Context, index: usize) {
+        let Some(path) = self.settings.recent_files.get(index).cloned() else {
+            return;
+        };
+        if path.is_file() {
+            self.open_path(ctx, &path);
+        } else {
+            self.settings.recent_files.remove(index);
+            self.show_notice(
+                ctx,
+                format!(
+                    "\"{}\" 파일이 없어 최근 파일 목록에서 지웠습니다.",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ),
+            );
+        }
     }
 
     fn execute_command(&mut self, ctx: &egui::Context, command: Command, source: &'static str) {
@@ -212,6 +360,8 @@ impl NotepadApp {
                 self.tabs.new_untitled();
             }
             Command::OpenFile => self.open_with_dialog(ctx),
+            Command::OpenRecent(index) => self.open_recent(ctx, index),
+            Command::ClearRecentFiles => self.settings.recent_files.clear(),
             Command::OpenFolder => self.open_folder_with_dialog(),
             Command::Save => {
                 self.save_active(ctx, false);
@@ -549,6 +699,7 @@ impl NotepadApp {
                     document.set_readonly(false);
                 }
                 let index = self.tabs.open_document(document, opened.file_readonly);
+                self.settings.add_recent(path);
                 if let Some(tab) = self.tabs.get_mut(index) {
                     // 5MB 초과는 뷰어, 1~5MB는 안내 막대 (ADR 0001)
                     tab.apply_open_mode(mode);
@@ -662,9 +813,10 @@ impl NotepadApp {
         let line_ending = tab.doc.line_ending().short_label();
         match file_io::save_document(&mut tab.doc, target.as_deref()) {
             Ok(()) => {
-                if target.is_some() {
+                if let Some(new_path) = &target {
                     tab.refresh_path_key();
                     tab.file_readonly = false;
+                    self.settings.add_recent(new_path);
                 }
                 // 저장으로 디스크 파일이 다시 생겼고 디스크 버전도 지금 내용과 같아졌다.
                 tab.disk_deleted = false;
@@ -1059,6 +1211,22 @@ impl eframe::App for NotepadApp {
                 )
             })
             .collect();
+        // 최근 파일: "이름 — 폴더"
+        let recent_strings: Vec<String> = self
+            .settings
+            .recent_files
+            .iter()
+            .map(|p| {
+                let name = p.file_name().unwrap_or_default().to_string_lossy();
+                match p.parent() {
+                    Some(dir) if !dir.as_os_str().is_empty() => {
+                        format!("{name}  —  {}", dir.display())
+                    }
+                    _ => name.into_owned(),
+                }
+            })
+            .collect();
+        let recent_labels: Vec<&str> = recent_strings.iter().map(String::as_str).collect();
         let menu_tabs: Vec<MenuTabEntry<'_>> = tab_infos
             .iter()
             .map(|(title, path_hint, modified)| MenuTabEntry {
@@ -1082,8 +1250,7 @@ impl eframe::App for NotepadApp {
             encoding: active.doc.encoding(),
             line_ending: active.doc.line_ending(),
             mixed_line_endings: active.doc.has_mixed_line_endings(),
-            // 최근 파일 목록은 설정 저장(P5)과 함께 구현
-            recent_files: &[],
+            recent_files: &recent_labels,
             tabs: &menu_tabs,
             active_tab: self.tabs.active_index(),
             modified_marker_color: palette.modified_marker,
@@ -1156,9 +1323,9 @@ impl eframe::App for NotepadApp {
         if self.sidebar_open {
             let current = self.tabs.active().doc.path().map(Path::to_path_buf);
             let mut sidebar_action = None;
-            egui::Panel::left("sidebar")
+            let panel = egui::Panel::left("sidebar")
                 .resizable(true)
-                .default_size(220.0)
+                .default_size(self.settings.sidebar_width)
                 .size_range(140.0..=480.0)
                 .show(ui, |ui| {
                     sidebar_action = sidebar::show(
@@ -1169,6 +1336,7 @@ impl eframe::App for NotepadApp {
                         current.as_deref(),
                     );
                 });
+            self.settings.sidebar_width = panel.response.rect.width().round();
             match sidebar_action {
                 Some(SidebarAction::OpenFile(path)) => self.open_path(&ctx, &path),
                 Some(SidebarAction::OpenFolderDialog) => self.open_folder_with_dialog(),
@@ -1326,5 +1494,13 @@ impl eframe::App for NotepadApp {
         Self::paint_drop_overlay(&ctx);
 
         self.update_window_title(&ctx);
+
+        // 10. 설정 자동 저장 (P2-08)
+        self.track_window_geometry(&ctx);
+        self.autosave_settings(&ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_settings_now();
     }
 }
