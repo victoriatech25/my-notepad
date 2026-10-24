@@ -2061,6 +2061,7 @@ dependencies = [
  "ignore",
  "log",
  "memmap2",
+ "pulldown-cmark",
  "rfd",
  "serde",
  "tempfile",
