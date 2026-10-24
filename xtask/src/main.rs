@@ -79,6 +79,14 @@ const SCENARIOS: &[Scenario] = &[
         work_files: &[],
     },
     Scenario {
+        name: "highlight",
+        package: "my-notepad",
+        args: &["spikes/samples/text-1mb.txt"],
+        description: "P2-04 선택 단어 강조 (한글 확인 문서 사본 + 1MB 로그 — 샘플: cargo xtask gen-samples)",
+        wait: false,
+        work_files: &["tests/fixtures/editor/highlight_ko.txt"],
+    },
+    Scenario {
         name: "editor",
         package: "my-notepad",
         args: &[],

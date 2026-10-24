@@ -11,6 +11,10 @@
 //! - 커서만 움직이면(입력 없이) 연속 입력 묶음을 끊어, 떨어진 위치의 입력이 한 Undo 단계로 합쳐지지 않게 한다.
 //! - 줄 번호 Gutter는 스크롤 영역 밖 왼쪽에 고정하고 본문만 스크롤한다 (가로 스크롤해도 번호는 제자리, P2-01).
 //!   번호는 `TextEdit`이 그린 레이아웃(galley)의 행에서 **논리 줄의 첫 행**에만 붙인다 (자동 줄바꿈으로 접힌 행은 번호 없음).
+//! - 선택 단어 일괄 강조(P2-04): 선택·문서 `revision`·옵션이 바뀔 때만 [`find_matches`]로 다시 계산해 캐시하고,
+//!   **화면에 보이는 매치만** 글자 뒤에 배경 사각형(`smart_highlight`)으로 그린다. 선택 자체는 강조하지 않는다.
+//!   글자 레이아웃(`LayoutJob`)에 배경색 구간을 넣으면 강조가 켜지고 꺼질 때마다 매치가 있는 줄을 모두 다시
+//!   레이아웃해 1MB·2천여 매치에서 한 프레임 50~60ms가 걸렸다. 사각형 방식은 레이아웃 캐시를 건드리지 않는다.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -24,6 +28,7 @@ use eframe::egui::{
 use crate::commands::Command;
 use crate::core::buffer::char_to_byte_offset;
 use crate::core::document::Document;
+use crate::core::highlight::{HighlightOptions, find_matches, target_word};
 use crate::core::line_ending::normalize_to_lf;
 use crate::ui::theme::Palette;
 
@@ -34,6 +39,8 @@ pub struct EditorOptions {
     pub word_wrap: bool,
     /// 본문 글꼴 (확대/축소 반영).
     pub font: FontId,
+    /// 선택 단어 일괄 강조 매칭 옵션.
+    pub highlight: HighlightOptions,
 }
 
 /// 한 프레임의 에디터 결과.
@@ -43,6 +50,19 @@ pub struct EditorOutput {
     pub changed: bool,
     /// 에디터가 키보드 포커스를 가졌는지 여부.
     pub has_focus: bool,
+    /// 이번 프레임에 선택 단어 강조를 다시 계산했는데 매치가 상한을 넘어 강조하지 않았는지 여부.
+    pub highlight_exceeded: bool,
+}
+
+/// 선택 단어 강조 캐시 (선택·문서·옵션이 그대로면 다시 계산하지 않는다).
+#[derive(Debug)]
+struct SmartHighlight {
+    /// 계산 기준: (문서 `revision`, 선택 문자 범위, 옵션)
+    key: (u64, Range<usize>, HighlightOptions),
+    /// 계산 당시 문서 텍스트 길이 — 그릴 때 사본 길이가 다르면(입력 중) 그리지 않는다.
+    text_len: usize,
+    /// 강조할 문자 범위 (오름차순, 선택 자체 제외). 조건 미충족·상한 초과면 비어 있다.
+    ranges: Arc<Vec<Range<usize>>>,
 }
 
 /// 탭별 에디터 위젯 상태 (`TextEdit` 사본, 대기 중인 커서·포커스·스크롤 요청).
@@ -58,6 +78,7 @@ pub struct EditorState {
     /// 다음 프레임에 복원할 세로 스크롤 위치.
     pending_scroll_y: Option<f32>,
     focus_requested: bool,
+    highlight: Option<SmartHighlight>,
 }
 
 impl EditorState {
@@ -70,6 +91,7 @@ impl EditorState {
             pending_cursor: None,
             pending_scroll_y: None,
             focus_requested: false,
+            highlight: None,
         }
     }
 
@@ -203,6 +225,12 @@ impl EditorState {
 
         let readonly = doc.is_readonly();
         let id = self.id;
+        let marks = self
+            .highlight
+            .as_ref()
+            .filter(|h| !h.ranges.is_empty() && h.text_len == self.scratch.len())
+            .map(|h| Arc::clone(&h.ranges));
+        let mark_color = palette.smart_highlight;
         let scratch = &mut self.scratch;
         // 기본 레이아웃과 같되, 자동 줄바꿈을 끄면 줄바꿈 폭을 무한대로 한다
         // (`desired_width(INFINITY)`만으로는 보이는 폭에서 접혀 가로 스크롤이 생기지 않는다).
@@ -221,14 +249,26 @@ impl EditorState {
         let scroll_output = ui
             .scope_builder(UiBuilder::new().max_rect(text_rect), |ui| {
                 scroll.show(ui, |ui| {
+                    // 강조 사각형은 글자보다 먼저(뒤에) 그려지도록 자리를 잡아 두고, 레이아웃이 나온 뒤 채운다.
+                    let marks_slot = ui.painter().add(egui::Shape::Noop);
                     let min_size = ui.available_size();
-                    if readonly {
+                    let output = if readonly {
                         // 읽기 전용 문서도 선택·복사는 되도록 `&str`로 그린다.
                         let mut text = scratch.as_str();
                         text_edit(&mut text, id, options, min_size, &mut layouter).show(ui)
                     } else {
                         text_edit(scratch, id, options, min_size, &mut layouter).show(ui)
+                    };
+                    if let Some(ranges) = &marks {
+                        let origin = output.galley_pos - egui::vec2(output.galley.rect.left(), 0.0);
+                        let shapes =
+                            highlight_rects(&output.galley, origin, ui.clip_rect(), ranges)
+                                .into_iter()
+                                .map(|r| egui::Shape::rect_filled(r, 0.0, mark_color))
+                                .collect();
+                        ui.painter().set(marks_slot, egui::Shape::Vec(shapes));
                     }
+                    output
                 })
             })
             .inner;
@@ -265,6 +305,8 @@ impl EditorState {
             doc.break_undo_group();
         }
 
+        let highlight_exceeded = self.update_highlight(doc, &options.highlight, &ctx);
+
         let (current_line, _, _) = cursor_status(doc);
         paint_gutter(
             ui,
@@ -275,7 +317,59 @@ impl EditorState {
             &options.font,
             palette,
         );
-        EditorOutput { changed, has_focus }
+        EditorOutput {
+            changed,
+            has_focus,
+            highlight_exceeded,
+        }
+    }
+
+    /// 선택 단어 강조를 필요할 때만 다시 계산한다. 상한을 넘어 강조하지 않았으면 `true`.
+    ///
+    /// 결과는 다음 프레임에 그려지므로, 강조가 바뀌면 다시 그리기를 요청한다.
+    fn update_highlight(
+        &mut self,
+        doc: &Document,
+        options: &HighlightOptions,
+        ctx: &egui::Context,
+    ) -> bool {
+        let selection = doc.cursor_char_range();
+        let key = (doc.revision(), selection.clone(), *options);
+        if self.highlight.as_ref().is_some_and(|h| h.key == key) {
+            return false;
+        }
+        let had_marks = self
+            .highlight
+            .as_ref()
+            .is_some_and(|h| !h.ranges.is_empty());
+        let mut exceeded = false;
+        let mut ranges = Vec::new();
+        // 2글자 미만 선택은 텍스트를 훑지 않고 바로 건너뛴다.
+        if selection.len() >= 2 {
+            let selected = selected_byte_range(doc);
+            if let Some(word) = target_word(&doc.text()[selected.clone()]) {
+                let found = find_matches(doc.text(), word, options);
+                exceeded = found.exceeded;
+                ranges = found.ranges;
+                // 선택 자체(앞뒤 공백을 뺀 단어 위치)는 강조하지 않는다.
+                ranges.retain(|r| !(selected.start <= r.start && r.end <= selected.end));
+                ranges = byte_ranges_to_chars(doc.text(), &ranges);
+            }
+        }
+        if had_marks || !ranges.is_empty() {
+            ctx.request_repaint();
+        }
+        self.highlight = Some(SmartHighlight {
+            key,
+            text_len: doc.text().len(),
+            ranges: Arc::new(ranges),
+        });
+        exceeded
+    }
+
+    /// 지금 강조 중인 매치 수 (선택 자체 제외).
+    pub fn highlight_count(&self) -> usize {
+        self.highlight.as_ref().map_or(0, |h| h.ranges.len())
     }
 
     fn sync_from(&mut self, doc: &Document) {
@@ -305,6 +399,64 @@ fn text_edit<'t>(
             f32::INFINITY
         })
         .min_size(min_size)
+}
+
+/// 오름차순 바이트 범위들을 문자 범위로 바꾼다 (텍스트를 한 번만 훑는다).
+fn byte_ranges_to_chars(text: &str, ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    let (mut byte, mut chars) = (0, 0);
+    let mut to_char = |to: usize| {
+        chars += text[byte..to].chars().count();
+        byte = to;
+        chars
+    };
+    ranges
+        .iter()
+        .map(|r| {
+            let start = to_char(r.start);
+            start..to_char(r.end)
+        })
+        .collect()
+}
+
+/// 레이아웃 `galley`(화면 위치 `origin`)에서 `clip` 안에 보이는 매치(문자 범위, 오름차순)의 배경 사각형.
+///
+/// 보이는 첫·끝 글자 위치를 구해 그 사이 매치만 계산하므로 문서 전체 매치 수와 상관없이 가볍다.
+/// 자동 줄바꿈으로 단어가 두 행에 걸치면 두 조각으로 나눠 그린다.
+fn highlight_rects(
+    galley: &Galley,
+    origin: Pos2,
+    clip: Rect,
+    ranges: &[Range<usize>],
+) -> Vec<Rect> {
+    if ranges.is_empty() {
+        return Vec::new();
+    }
+    let index = |pos: Pos2| -> usize { galley.cursor_from_pos(pos - origin).index.into() };
+    let (first, last) = (index(clip.min), index(clip.max));
+    let at = |i: usize| {
+        galley
+            .pos_from_cursor(CCursor::new(i))
+            .translate(origin.to_vec2())
+    };
+    let from = ranges.partition_point(|r| r.end <= first);
+    let mut rects = Vec::new();
+    for range in ranges[from..].iter().take_while(|r| r.start <= last) {
+        let (a, b) = (at(range.start), at(range.end));
+        if (a.min.y - b.min.y).abs() < 0.5 {
+            rects.push(Rect::from_min_max(a.min, Pos2::new(b.min.x, a.max.y)));
+        } else {
+            rects.push(Rect::from_min_max(
+                a.min,
+                Pos2::new(origin.x + galley.rect.right(), a.max.y),
+            ));
+            rects.push(Rect::from_min_max(
+                Pos2::new(origin.x + galley.rect.left(), b.min.y),
+                b.max,
+            ));
+        }
+    }
+    rects.retain(|r| r.width() > 0.0);
+    rects
 }
 
 /// 줄 번호 Gutter 폭. 최소 3자리이고 줄 수 자릿수(1,000·10,000줄 …)에 맞춰 늘어난다 (뷰어와 같은 폭).
@@ -445,6 +597,7 @@ mod tests {
         EditorOptions {
             word_wrap: true,
             font: FontId::monospace(14.0),
+            highlight: HighlightOptions::default(),
         }
     }
 
@@ -454,6 +607,16 @@ mod tests {
         editor: &mut EditorState,
         doc: &mut Document,
         events: Vec<Event>,
+    ) -> EditorOutput {
+        frame_with(ctx, editor, doc, events, &options())
+    }
+
+    fn frame_with(
+        ctx: &egui::Context,
+        editor: &mut EditorState,
+        doc: &mut Document,
+        events: Vec<Event>,
+        options: &EditorOptions,
     ) -> EditorOutput {
         let raw = RawInput {
             events,
@@ -466,7 +629,7 @@ mod tests {
         let mut out = EditorOutput::default();
         let mut full = ctx.run_ui(raw, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                out = editor.show(ui, doc, &options(), &Palette::light());
+                out = editor.show(ui, doc, options, &Palette::light());
             });
         });
         // 렌더러가 없으므로 폰트 텍스처 갱신분을 직접 버린다 (버리지 않으면 디버그 빌드에서 panic).
@@ -732,6 +895,7 @@ mod tests {
         let options = EditorOptions {
             word_wrap,
             font: FontId::monospace(14.0),
+            highlight: HighlightOptions::default(),
         };
         let mut full = ctx.run_ui(raw, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
@@ -817,6 +981,232 @@ mod tests {
                 .iter()
                 .all(|(_, right, _)| body.min.x - right >= char_width * 2.0)
         );
+    }
+
+    /// 문서와 선택(문자 범위)을 정해 에디터를 두 프레임 그린다 (선택 반영 → 강조 계산).
+    fn select(
+        ctx: &egui::Context,
+        editor: &mut EditorState,
+        doc: &mut Document,
+        range: Range<usize>,
+        options: &EditorOptions,
+    ) -> EditorOutput {
+        doc.set_cursor_char_range(range);
+        editor.restore_view(doc);
+        frame_with(ctx, editor, doc, vec![], options);
+        frame_with(ctx, editor, doc, vec![], options)
+    }
+
+    fn highlight_options(whole_word: bool, max_matches: usize) -> EditorOptions {
+        EditorOptions {
+            highlight: HighlightOptions {
+                whole_word,
+                max_matches,
+                ..Default::default()
+            },
+            ..options()
+        }
+    }
+
+    #[test]
+    fn selecting_word_highlights_other_matches_until_deselected() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(20);
+        let mut doc = Document::from_bytes(
+            None,
+            "검색 검색어 검색 결과
+검색"
+                .as_bytes(),
+            false,
+            None,
+        )
+        .unwrap();
+        let whole = highlight_options(true, 10_000);
+        // 첫 `검색` 선택 → 단어 단위: 나머지 `검색` 2개 강조 (선택 자체·`검색어` 제외)
+        select(&ctx, &mut editor, &mut doc, 0..2, &whole);
+        assert_eq!(editor.highlight_count(), 2);
+        // 부분 일치 옵션 → `검색어`도 포함
+        select(
+            &ctx,
+            &mut editor,
+            &mut doc,
+            0..2,
+            &highlight_options(false, 10_000),
+        );
+        assert_eq!(editor.highlight_count(), 3);
+        // 선택 해제 → 강조 없음
+        select(&ctx, &mut editor, &mut doc, 1..1, &whole);
+        assert_eq!(editor.highlight_count(), 0);
+        // 1글자·공백 포함 선택 → 강조 없음
+        select(&ctx, &mut editor, &mut doc, 0..1, &whole);
+        assert_eq!(editor.highlight_count(), 0);
+        select(&ctx, &mut editor, &mut doc, 0..6, &whole);
+        assert_eq!(editor.highlight_count(), 0);
+    }
+
+    #[test]
+    fn highlight_is_cached_until_selection_document_or_options_change() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(21);
+        let mut doc = Document::from_bytes(None, b"abc abc abc", false, None).unwrap();
+        let whole = highlight_options(true, 10_000);
+        select(&ctx, &mut editor, &mut doc, 0..3, &whole);
+        let first = Arc::clone(&editor.highlight.as_ref().unwrap().ranges);
+        frame_with(&ctx, &mut editor, &mut doc, vec![], &whole);
+        frame_with(&ctx, &mut editor, &mut doc, vec![], &whole);
+        assert!(
+            Arc::ptr_eq(&first, &editor.highlight.as_ref().unwrap().ranges),
+            "그대로면 다시 계산하지 않음"
+        );
+        select(&ctx, &mut editor, &mut doc, 4..7, &whole);
+        assert!(!Arc::ptr_eq(
+            &first,
+            &editor.highlight.as_ref().unwrap().ranges
+        ));
+        assert_eq!(editor.highlight_count(), 2);
+    }
+
+    #[test]
+    fn too_many_matches_reports_exceeded_once() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(22);
+        let mut doc = Document::from_bytes(None, "ab ".repeat(20).as_bytes(), false, None).unwrap();
+        let capped = highlight_options(true, 10);
+        doc.set_cursor_char_range(0..2);
+        editor.restore_view(&doc);
+        let out = frame_with(&ctx, &mut editor, &mut doc, vec![], &capped);
+        let again = frame_with(&ctx, &mut editor, &mut doc, vec![], &capped);
+        assert!(out.highlight_exceeded, "상한 초과 → 안내");
+        assert!(!again.highlight_exceeded, "같은 선택이면 다시 알리지 않음");
+        assert_eq!(editor.highlight_count(), 0);
+    }
+
+    /// P2-04 🤖: 1MB 문서에서 선택 단어 강조를 켠 상태의 프레임 시간 (레이아웃 + 테셀레이션 CPU, P0-06과 같은 기준).
+    ///
+    /// 실행: `cargo test --release --lib -- --ignored --nocapture highlight_frame_time_1mb`
+    /// (샘플 `spikes/samples/text-1mb.txt`는 `cargo xtask gen-samples`)
+    #[test]
+    #[ignore = "성능 측정 (릴리스 빌드로 수동 실행)"]
+    fn highlight_frame_time_1mb() {
+        use std::time::Instant;
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/spikes/samples/text-1mb.txt");
+        let bytes = std::fs::read(path).expect("샘플 없음: cargo xtask gen-samples");
+        let mut doc = Document::from_bytes(None, &bytes, false, None).unwrap();
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(30);
+        let options = options();
+
+        // 프레임 하나: 레이아웃(run_ui) + 테셀레이션
+        let timed = |editor: &mut EditorState, doc: &mut Document, events: Vec<Event>| {
+            let started = Instant::now();
+            let raw = RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut full = ctx.run_ui(raw, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    editor.show(ui, doc, &options, &Palette::light());
+                });
+            });
+            full.textures_delta.clear();
+            let _ = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
+            started.elapsed().as_secs_f64() * 1000.0
+        };
+        let stats = |v: &[f64]| {
+            let avg = v.iter().sum::<f64>() / v.len() as f64;
+            let max = v.iter().copied().fold(0.0, f64::max);
+            (avg, max)
+        };
+
+        editor.request_focus();
+        for _ in 0..3 {
+            timed(&mut editor, &mut doc, vec![]);
+        }
+
+        // 자주 나오는 단어를 선택 → 강조가 나타나는 프레임
+        let word = "인코딩";
+        let start = doc.text()[..doc.text().find(word).unwrap()].chars().count();
+        doc.set_cursor_char_range(start..start + word.chars().count());
+        editor.restore_view(&doc);
+        let select_ms = timed(&mut editor, &mut doc, vec![]);
+        let appear_ms = timed(&mut editor, &mut doc, vec![]);
+        let count = editor.highlight_count();
+        let idle: Vec<f64> = (0..10)
+            .map(|_| timed(&mut editor, &mut doc, vec![]))
+            .collect();
+
+        // 강조가 켜진 문서에 입력 (선택이 입력으로 바뀐 뒤 계속 타이핑)
+        let typing: Vec<f64> = (0..30)
+            .map(|i| {
+                let text = if i % 2 == 0 { "가" } else { "a" };
+                timed(&mut editor, &mut doc, vec![Event::Text(text.into())])
+            })
+            .collect();
+
+        let (idle_avg, idle_max) = stats(&idle);
+        let (type_avg, type_max) = stats(&typing);
+        println!(
+            "1MB ({} 줄): 강조 {count}개 · 선택 프레임 {select_ms:.1}ms · 강조 표시 프레임 {appear_ms:.1}ms · \
+             강조 유지 프레임 평균 {idle_avg:.2}ms(최대 {idle_max:.2}) · 입력 프레임 평균 {type_avg:.1}ms(최대 {type_max:.1})",
+            doc.line_count()
+        );
+        assert!(count > 100, "강조 대상이 충분해야 의미 있는 측정");
+    }
+
+    #[test]
+    fn byte_ranges_convert_to_char_ranges() {
+        let text = "한글 abc 한글";
+        assert_eq!(
+            byte_ranges_to_chars(text, &[0..6, 7..10, 11..17]),
+            [0..2, 3..6, 7..9]
+        );
+    }
+
+    #[test]
+    fn highlight_rects_cover_only_visible_matches() {
+        let ctx = egui::Context::default();
+        let lines: Vec<String> = (0..200).map(|i| format!("줄{i} 강조 끝")).collect();
+        let text = lines.join("\n");
+        let mut galley = None;
+        let mut full = ctx.run_ui(RawInput::default(), |ui| {
+            galley = Some(ui.fonts_mut(|f| {
+                f.layout_no_wrap(text.clone(), FontId::monospace(14.0), egui::Color32::WHITE)
+            }));
+        });
+        full.textures_delta.clear();
+        let galley = galley.unwrap();
+        // 줄마다 `강조` 위치 (문자 범위)
+        let mut ranges = Vec::new();
+        let mut line_start = 0;
+        for (i, line) in lines.iter().enumerate() {
+            let col = format!("줄{i} ").chars().count();
+            ranges.push(line_start + col..line_start + col + 2);
+            line_start += line.chars().count() + 1;
+        }
+        let row = galley.rows[0].rect().height();
+        // 10줄 높이만 보이는 영역, 문서는 50줄 위로 스크롤된 상태
+        let origin = Pos2::new(0.0, -50.0 * row);
+        let clip = Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 10.0 * row));
+        let rects = highlight_rects(&galley, origin, clip, &ranges);
+        assert!(
+            (10..=12).contains(&rects.len()),
+            "보이는 줄의 매치만 ({})",
+            rects.len()
+        );
+        assert!(
+            rects
+                .iter()
+                .all(|r| r.max.y >= clip.min.y && r.min.y <= clip.max.y)
+        );
+        // 사각형 폭은 `강조` 두 글자 폭
+        let two = galley.pos_from_cursor(CCursor::new(ranges[0].end)).min.x
+            - galley.pos_from_cursor(CCursor::new(ranges[0].start)).min.x;
+        assert!(rects.iter().all(|r| (r.width() - two).abs() < 0.5));
     }
 
     #[test]
