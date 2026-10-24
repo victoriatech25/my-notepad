@@ -1118,6 +1118,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-24 | P2-08 | 🤖 | 통과 | `src/config.rs`: `settings.toml`(Windows `%APPDATA%\My-Notepad`, macOS `~/Library/Application Support/My-Notepad`) — 창 위치·크기·최대화, 사이드바 열림·폭·마지막 폴더, 글꼴 확대, 자동 줄바꿈, 탭 너비·Tab 공백, 선택 단어 강조 옵션, 테마(기본 OS 따르기), 최근 파일 10개. 없는 항목은 기본값, 범위 밖 값은 보정, 손상 파일은 기본값으로 기동 + `settings.bad.toml`로 보관 + 안내 대화상자, 원자적 저장. 앱: 바뀌면 1초 뒤 자동 저장 + 종료 시 저장, `파일 → 최근 파일`(이름 — 폴더, 없는 파일은 안내 후 목록에서 제거, 목록 지우기), 최근 파일은 열기·다른 이름으로 저장 시 갱신. **결정**: PLAN §3.7의 eframe `persistence` 대신 자체 TOML 파일 (egui 내부 메모리와 분리, 테스트·손상 처리 용이 — PLAN 갱신). 성능 측정(`--measure-out`) 실행은 설정을 읽고 쓰지 않음(측정 재확인: 10MB·50MB 뷰어 목표 충족, 설정 파일 생성 안 됨). 검색 옵션·탭별 보기 모드는 해당 기능(Phase 3·4)과 함께. 테스트 5개(왕복, 없는 파일·항목 기본값, 손상 파일 보관, 범위 보정, 최근 파일 중복·순서·10개). 의존성 `serde` 1.0.229. build·clippy·fmt·test 통과 | |
 | 2026-10-24 | P2-08 | 👤 | 통과 | Windows (`cargo xtask try basic`, 껐다 켜기): 창 크기·위치·사이드바·글꼴 크기·줄바꿈 유지, 최근 파일 표시·열기·삭제된 파일 안내 후 제거, 라이트/다크 전환·기본 OS 따르기 3개 항목 사용자 확인 | 2026-10-24 |
 | 2026-10-24 | P2-UX | 🎨 | 통과 | Phase 2 UX 백로그 UX-007 1건(P2-01에서 반영·재확인 완료), UX-4 전 항목 좋음 — 남은 `필수`·`권장` 0건으로 기록만 정리 | 2026-10-24 |
+| 2026-10-24 | G2 자동 검증 | 🤖 | 통과 | Windows: `cargo build`(경고 0)·`clippy -D warnings`·`fmt --check`·`cargo test --workspace`(본 앱 148개) 전체 통과, CI `main` 병합 커밋 Windows·macOS 녹색. P2-04 기준(1MB 강조 상태 입력 ≤ 16ms) 재측정 충족, §1.3 재측정 전 항목 충족 (§9.3) | |
 
 ### 9.3 측정 결과 기록표
 
@@ -1143,6 +1144,10 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-24 | 메모리·기동 시간 (빈 문서, 본 앱, Windows) | 릴리스 `my-notepad.exe --measure-out`, 창 1개·빈 탭 1개, 첫 프레임 + 2.5초 뒤 Working Set, 10회 (`main` `7d1a6bf`) | warm 첫 프레임 **220ms** (215~226) · **113MB** (112.7~113.3) | warm ≤ 400ms · ≤ 120MB | 충족 (G1) |
 | 2026-10-24 | 대용량 뷰어 (열기 복사 줄인 뒤, Windows) | `cargo xtask measure --viewer --runs 5`, Working Set (`main` `7d1a6bf`, `9d439fc` 반영) | 10MB 첫 화면 290ms · 스크롤 2ms(최대 4) · **126MB** / 50MB 450ms · 2ms(최대 4) · **167MB** | 첫 화면 ≤ 1s(10MB)·≤ 2s(50MB), 스크롤 ≤ 16ms, 10MB 메모리 ≤ 150MB | **전 항목 충족** (G1). 이전 138MB·221MB 대비 −12MB·−54MB |
 | 2026-10-24 | 선택 단어 강조 (1MB, P2-04) | `text-1mb.txt`(10,056줄), `인코딩` 선택 → 강조 2,447개, 레이아웃 + 테셀레이션 CPU, 릴리스 헤드리스 (`cargo test --release --lib -- --ignored --nocapture highlight_frame_time_1mb`) | LayoutJob 배경 방식: 강조 표시 63.5ms · 해제(입력) 최대 48.7ms → **사각형 방식: 강조 표시 1.9ms · 유지 평균 1.9ms · 입력 평균 8.0ms(최대 10.0)** | 입력 ≤ 16ms | 충족 (방식 변경 후) |
+| 2026-10-24 | G2 재측정 — 선택 단어 강조 (1MB) | P2-04와 같은 조건, `main` `5771156` | 강조 표시 3.5ms · 유지 평균 2.0ms · 입력 평균 7.8ms(최대 10.3) | 입력 ≤ 16ms | 충족 |
+| 2026-10-24 | G2 재측정 — 대용량 뷰어 (Windows) | `cargo xtask measure --viewer --runs 5`, Working Set | 10MB 322ms · 스크롤 2ms(최대 5) · 125MB / 50MB 470ms · 2ms(최대 6) · 167MB | 첫 화면 ≤ 1s·≤ 2s, 스크롤 ≤ 16ms, 10MB ≤ 150MB | 충족 |
+| 2026-10-24 | G2 재측정 — 빈 문서 메모리·기동 (Windows, 본 앱) | `--measure-out`, 첫 프레임 + 2.5초 뒤 Working Set, 10회 (설정 파일 미사용) | warm 229ms (221~235) · 113.7MB | warm ≤ 400ms · ≤ 120MB | 충족 (G1 대비 +9ms · +0.7MB) |
+| 2026-10-24 | G2 재측정 — 실행 파일 크기 (Windows) | `my-notepad.exe` 릴리스, `glow` 단독 | 11.26MB (11,258,880 B) | ≤ 15MB | 충족 — P1-01 7.06MB 대비 +4.2MB (Phase 2 의존성 `ignore`·`toml`·`serde`, 사이드바·설정) |
 
 ### 9.4 UX 백로그
 
