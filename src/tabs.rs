@@ -8,12 +8,14 @@
 //! - 파일을 열 때 지금 탭이 손대지 않은 빈 새 문서면 그 탭을 바꿔 쓴다 (첫 실행 직후 열기).
 //! - 마지막 탭을 닫으면 빈 `Untitled-1`을 새로 만든다 (탭이 0개인 상태는 없다).
 //! - 5MB 초과 파일은 편집 위젯 대신 읽기 전용 뷰어로 보여 준다 (ADR 0001, P1-14). 1~5MB는 편집 위젯 위에 안내 막대.
+//! - 외부 변경 감지(P2-07): [`Tabs::check_external_changes`]가 열어 둔 파일의 디스크 상태를 비교한다.
+//!   디스크에서 지워진 파일의 탭은 [`Tab::disk_deleted`]로 표시하고, 닫을 때 수정된 탭처럼 저장 확인을 받는다.
 
 use std::path::{Path, PathBuf};
 
 use crate::commands::ViewMode;
-use crate::core::document::Document;
-use crate::core::file_io::OpenMode;
+use crate::core::document::{DiskMetadata, Document};
+use crate::core::file_io::{DiskChange, OpenMode, check_disk_change};
 use crate::ui::editor::EditorState;
 use crate::ui::viewer::ViewerState;
 
@@ -35,6 +37,26 @@ pub struct Tab {
     pub size_notice: bool,
     /// 바이너리 파일을 확인 후 연 탭 (편집 모드로 바꿔도 읽기 전용 유지)
     pub binary: bool,
+    /// 파일이 디스크에서 지워졌다 (탭에 표시, 닫을 때 저장 확인)
+    pub disk_deleted: bool,
+    /// 외부 변경 확인 대화상자를 띄워 두었다 (중복 방지)
+    pub external_pending: bool,
+    /// 사용자가 "내 버전 유지"를 고른 디스크 버전 — 같은 버전이면 다시 묻지 않는다
+    pub dismissed_disk: Option<DiskMetadata>,
+}
+
+/// 외부 변경 감지 결과 (앱이 대화상자·안내로 알린다).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalChange {
+    /// 다른 프로그램이 파일을 바꿨다. `conflict`면 앱에서도 수정한 상태
+    Modified {
+        tab_id: u64,
+        title: String,
+        conflict: bool,
+        disk: DiskMetadata,
+    },
+    /// 파일이 디스크에서 지워졌다
+    Deleted { tab_id: u64, title: String },
 }
 
 impl Tab {
@@ -59,7 +81,15 @@ impl Tab {
             viewer: None,
             size_notice: false,
             binary: false,
+            disk_deleted: false,
+            external_pending: false,
+            dismissed_disk: None,
         }
+    }
+
+    /// 닫기 전에 저장 확인이 필요한지 (수정됐거나, 디스크에서 지워져 닫으면 내용이 사라지는 탭).
+    pub fn needs_save(&self) -> bool {
+        self.doc.is_modified() || self.disk_deleted
     }
 
     /// 탭 고유 번호 (위젯 ID용, 순서와 무관).
@@ -115,6 +145,9 @@ impl Tab {
         self.editor.invalidate();
         self.editor.restore_view(&self.doc);
         self.refresh_path_key();
+        self.disk_deleted = false;
+        self.external_pending = false;
+        self.dismissed_disk = None;
     }
 
     /// 손대지 않은 빈 새 문서인지 (파일을 열면 이 탭을 바꿔 쓴다).
@@ -289,10 +322,49 @@ impl Tabs {
     pub fn close_unmodified(&mut self, indices: &[usize]) -> usize {
         let skipped = indices
             .iter()
-            .filter(|&&i| self.tabs.get(i).is_some_and(|t| t.doc.is_modified()))
+            .filter(|&&i| self.tabs.get(i).is_some_and(Tab::needs_save))
             .count();
-        self.remove_where(|index, tab| indices.contains(&index) && !tab.doc.is_modified());
+        self.remove_where(|index, tab| indices.contains(&index) && !tab.needs_save());
         skipped
+    }
+
+    /// 열어 둔 파일들의 디스크 상태를 확인한다 (앱이 포커스를 얻을 때).
+    ///
+    /// - 지워졌으면 처음 한 번 [`ExternalChange::Deleted`] (다시 생기면 표시를 지운다)
+    /// - 바뀌었으면 [`ExternalChange::Modified`]. 이미 묻는 중이거나 "내 버전 유지"를 고른 같은 버전이면 건너뛴다
+    pub fn check_external_changes(&mut self) -> Vec<ExternalChange> {
+        let mut changes = Vec::new();
+        for tab in &mut self.tabs {
+            let Some(path) = tab.doc.path() else {
+                continue;
+            };
+            match check_disk_change(path, tab.doc.disk_metadata()) {
+                DiskChange::Unchanged => tab.disk_deleted = false,
+                DiskChange::Deleted => {
+                    if !tab.disk_deleted {
+                        tab.disk_deleted = true;
+                        changes.push(ExternalChange::Deleted {
+                            tab_id: tab.id,
+                            title: tab.doc.title(),
+                        });
+                    }
+                }
+                DiskChange::Modified(disk) => {
+                    tab.disk_deleted = false;
+                    if tab.external_pending || tab.dismissed_disk == Some(disk) {
+                        continue;
+                    }
+                    tab.external_pending = true;
+                    changes.push(ExternalChange::Modified {
+                        tab_id: tab.id,
+                        title: tab.doc.title(),
+                        conflict: tab.doc.is_modified(),
+                        disk,
+                    });
+                }
+            }
+        }
+        changes
     }
 
     /// 지정한 탭을 수정 여부와 상관없이 닫는다. 저장 확인은 호출하는 쪽(닫기 대기열)이 끝낸 뒤여야 한다.
@@ -351,6 +423,112 @@ mod tests {
 
     fn file_doc(path: &Path) -> Document {
         Document::from_bytes(Some(path.to_path_buf()), b"text", false, None).unwrap()
+    }
+
+    /// 디스크 파일을 실제로 만들고 그 메타데이터를 기록한 문서를 탭으로 연다.
+    fn open_on_disk(tabs: &mut Tabs, path: &Path, text: &str) -> u64 {
+        std::fs::write(path, text).unwrap();
+        let meta = DiskMetadata::from_path(path).unwrap();
+        let doc =
+            Document::from_bytes(Some(path.to_path_buf()), text.as_bytes(), false, Some(meta))
+                .unwrap();
+        let index = tabs.open_document(doc, false);
+        tabs.get(index).unwrap().id()
+    }
+
+    #[test]
+    fn external_changes_are_reported_once_and_respect_keep_mine() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.txt");
+        let mut tabs = Tabs::new();
+        let id = open_on_disk(&mut tabs, &path, "처음");
+        assert!(
+            tabs.check_external_changes().is_empty(),
+            "그대로면 알림 없음"
+        );
+
+        std::fs::write(&path, "다른 프로그램이 바꿈").unwrap();
+        let changes = tabs.check_external_changes();
+        let [
+            ExternalChange::Modified {
+                tab_id,
+                conflict,
+                disk,
+                ..
+            },
+        ] = changes.as_slice()
+        else {
+            panic!("{changes:?}");
+        };
+        assert_eq!((*tab_id, *conflict), (id, false));
+        assert!(
+            tabs.check_external_changes().is_empty(),
+            "묻는 중이면 다시 알리지 않음"
+        );
+
+        // 내 버전 유지 → 같은 디스크 버전이면 다시 묻지 않는다
+        let tab = tabs.get_mut(0).unwrap();
+        tab.external_pending = false;
+        tab.dismissed_disk = Some(*disk);
+        assert!(tabs.check_external_changes().is_empty());
+
+        // 앱에서도 수정한 뒤 디스크가 또 바뀌면 충돌로 알린다
+        tabs.get_mut(0).unwrap().doc.replace_range(0..0, "앱 수정 ");
+        std::fs::write(&path, "또 바뀐 디스크 내용입니다").unwrap();
+        let changes = tabs.check_external_changes();
+        assert!(matches!(
+            changes.as_slice(),
+            [ExternalChange::Modified { conflict: true, .. }]
+        ));
+    }
+
+    #[test]
+    fn deleted_file_is_marked_and_needs_save_until_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.txt");
+        let mut tabs = Tabs::new();
+        let id = open_on_disk(&mut tabs, &path, "내용");
+        assert!(!tabs.get(0).unwrap().needs_save());
+
+        std::fs::remove_file(&path).unwrap();
+        let changes = tabs.check_external_changes();
+        assert!(matches!(
+            changes.as_slice(),
+            [ExternalChange::Deleted { tab_id, .. }] if *tab_id == id
+        ));
+        let tab = tabs.get(0).unwrap();
+        assert!(tab.disk_deleted);
+        assert!(tab.needs_save(), "닫으면 내용이 사라지므로 저장 확인");
+        assert!(
+            tabs.check_external_changes().is_empty(),
+            "삭제 알림은 한 번"
+        );
+        // 저장된 탭 닫기에서도 남는다
+        assert_eq!(tabs.close_unmodified(&[0]), 1);
+
+        // 같은 내용으로 다시 생기면 표시를 지운다
+        std::fs::write(&path, "내용").unwrap();
+        let tab = tabs.get_mut(0).unwrap();
+        let meta = DiskMetadata::from_path(&path).unwrap();
+        tab.doc.mark_saved(None, Some(meta));
+        assert!(tabs.check_external_changes().is_empty());
+        assert!(!tabs.get(0).unwrap().disk_deleted);
+    }
+
+    #[test]
+    fn reloading_document_clears_external_state() {
+        let mut tabs = Tabs::new();
+        tabs.open_document(file_doc(Path::new("x.txt")), false);
+        let tab = tabs.active_mut();
+        tab.disk_deleted = true;
+        tab.external_pending = true;
+        tab.dismissed_disk = Some(DiskMetadata {
+            modified_time: None,
+            byte_len: 1,
+        });
+        tab.replace_document(file_doc(Path::new("x.txt")));
+        let tab = tabs.active();
+        assert!(!tab.disk_deleted && !tab.external_pending && tab.dismissed_disk.is_none());
     }
 
     #[test]

@@ -271,14 +271,20 @@ fn tab_widget(
     let shown = frame.show(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         icon_label(ui, tab_icon(tabs, index));
-        let title = RichText::new(tab.doc.title());
+        let mut title = RichText::new(tab.doc.title());
+        let mut hint = path_hint(tabs, index);
+        if tab.disk_deleted {
+            // 디스크에서 지워진 파일 (P2-07): 취소선 + 오류 색
+            title = title.strikethrough().color(palette.status_error);
+            hint.push_str("\n삭제됨 — 디스크에 파일이 없습니다. 저장하면 다시 만듭니다.");
+        }
         let label = ui
             .add(
                 egui::Label::new(if selected { title.strong() } else { title })
                     .selectable(false)
                     .sense(egui::Sense::click()),
             )
-            .on_hover_text(path_hint(tabs, index));
+            .on_hover_text(hint);
         label.context_menu(|ui| {
             if let Some(a) = context_menu(ui, index, tab.doc.path().is_some()) {
                 *action = Some(a);

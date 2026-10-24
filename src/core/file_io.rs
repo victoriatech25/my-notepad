@@ -169,6 +169,33 @@ impl std::error::Error for FileIoError {
     }
 }
 
+/// 열어 둔 파일의 디스크 상태 변화 (외부 변경 감지, PLAN.md §3.6, P2-07).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskChange {
+    /// 기록해 둔 수정 시각·크기와 같다
+    Unchanged,
+    /// 다른 프로그램이 바꿨다 (지금 디스크 메타데이터)
+    Modified(DiskMetadata),
+    /// 파일이 없어졌다
+    Deleted,
+}
+
+/// 파일의 지금 디스크 메타데이터를 열기·저장 때 기록한 `known`과 비교한다.
+///
+/// 수정 시각이나 크기가 다르면 바뀐 것으로 본다. 기록이 없으면(새 문서 등) 비교하지 않는다.
+/// 권한 등으로 메타데이터를 읽지 못하면 바뀌지 않은 것으로 본다 (잘못된 경고보다 조용히 넘어가기).
+pub fn check_disk_change(path: &Path, known: Option<DiskMetadata>) -> DiskChange {
+    let Some(known) = known else {
+        return DiskChange::Unchanged;
+    };
+    match DiskMetadata::from_path(path) {
+        Ok(now) if now == known => DiskChange::Unchanged,
+        Ok(now) => DiskChange::Modified(now),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DiskChange::Deleted,
+        Err(_) => DiskChange::Unchanged,
+    }
+}
+
 /// 디스크에서 읽은 원시 파일 (디코딩 전).
 #[derive(Debug, Clone)]
 pub struct LoadedFile {
@@ -465,6 +492,38 @@ pub fn save_document(doc: &mut Document, target: Option<&Path>) -> Result<(), Sa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_change_detects_modify_delete_and_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memo.txt");
+        fs::write(&path, "처음").unwrap();
+        let known = DiskMetadata::from_path(&path).unwrap();
+        assert_eq!(check_disk_change(&path, Some(known)), DiskChange::Unchanged);
+        assert_eq!(check_disk_change(&path, None), DiskChange::Unchanged);
+
+        // 크기가 바뀜
+        fs::write(&path, "다른 프로그램이 고친 내용").unwrap();
+        let DiskChange::Modified(now) = check_disk_change(&path, Some(known)) else {
+            panic!("바뀐 것으로 봐야 함");
+        };
+        assert_ne!(now.byte_len, known.byte_len);
+
+        // 크기는 같고 수정 시각만 바뀜
+        let same_len = DiskMetadata {
+            modified_time: known
+                .modified_time
+                .map(|t| t - std::time::Duration::from_secs(60)),
+            ..now
+        };
+        assert!(matches!(
+            check_disk_change(&path, Some(same_len)),
+            DiskChange::Modified(_)
+        ));
+
+        fs::remove_file(&path).unwrap();
+        assert_eq!(check_disk_change(&path, Some(known)), DiskChange::Deleted);
+    }
 
     const MB: u64 = 1024 * 1024;
 
