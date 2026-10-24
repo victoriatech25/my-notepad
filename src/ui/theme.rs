@@ -18,6 +18,8 @@ pub struct Palette {
     pub gutter_text: Color32,
     /// 현재 줄 번호 강조 색 (`gutter_current`)
     pub gutter_current: Color32,
+    /// 줄 번호 Gutter 배경 — 본문 배경과 살짝 다르게 (`gutter_bg`, UX-007)
+    pub gutter_bg: Color32,
     /// 탭 수정 표시 `●` (`modified_marker`)
     pub modified_marker: Color32,
     /// 추정됨·Mixed 등 상태 표시줄 경고 (`status_warning`)
@@ -58,6 +60,8 @@ impl Palette {
             search_current: Color32::from_rgb(0xB8, 0x69, 0x1A),
             gutter_text: Color32::from_gray(110),
             gutter_current: Color32::from_gray(220),
+            // 본문 배경(egui 다크 패널 #1B1B1B)보다 살짝 밝게
+            gutter_bg: Color32::from_gray(34),
             modified_marker: Color32::from_rgb(0x6C, 0xB4, 0xFF),
             status_warning: Color32::from_rgb(0xFF, 0xB0, 0x40),
             status_error: Color32::from_rgb(0xFF, 0x6B, 0x6B),
@@ -80,6 +84,8 @@ impl Palette {
             search_current: Color32::from_rgb(0xFF, 0xB3, 0x47),
             gutter_text: Color32::from_gray(150),
             gutter_current: Color32::from_gray(30),
+            // 본문 배경(egui 라이트 패널 #F8F8F8)보다 살짝 어둡게
+            gutter_bg: Color32::from_gray(240),
             modified_marker: Color32::from_rgb(0x1E, 0x6F, 0xD9),
             status_warning: Color32::from_rgb(0xC0, 0x6A, 0x00),
             status_error: Color32::from_rgb(0xC6, 0x28, 0x28),
@@ -136,6 +142,19 @@ mod tests {
         assert_ne!(dark.smart_highlight, light.smart_highlight);
         assert_ne!(dark.search_match, light.search_match);
         assert_ne!(dark.selection_bg, light.selection_bg);
+    }
+
+    /// Gutter 배경은 본문(중앙 패널) 배경과 살짝만 다르다 (UX-007).
+    #[test]
+    fn gutter_bg_differs_slightly_from_editor_bg() {
+        for (palette, visuals) in [
+            (Palette::dark(), dark_visuals()),
+            (Palette::light(), light_visuals()),
+        ] {
+            let bg = visuals.panel_fill;
+            let diff = (i16::from(palette.gutter_bg.r()) - i16::from(bg.r())).abs();
+            assert!((4..=12).contains(&diff), "차이 {diff}");
+        }
     }
 
     #[test]

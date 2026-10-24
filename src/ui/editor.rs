@@ -346,6 +346,7 @@ fn paint_gutter(
     palette: &Palette,
 ) {
     let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, palette.gutter_bg);
     let number_right = rect.max.x - gutter_gap(painter.fonts_mut(|f| f.glyph_width(font, '0')));
     for (line, row_rect) in logical_line_rows(galley) {
         let row_rect = row_rect.translate(galley_pos.to_vec2());

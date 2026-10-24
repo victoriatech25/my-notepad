@@ -396,6 +396,15 @@ impl ViewerState {
             );
             let text_painter = painter.with_clip_rect(text_clip);
             let gutter_font = font.clone();
+            // Gutter 배경 (에디터와 같이 본문 안쪽 여백 앞까지)
+            painter.rect_filled(
+                Rect::from_min_max(
+                    visible.min,
+                    Pos2::new(gutter_x + gutter_width - 6.0, visible.max.y),
+                ),
+                0.0,
+                palette.gutter_bg,
+            );
 
             for (line, range, galley) in &lines {
                 let y = row_y(*line);
