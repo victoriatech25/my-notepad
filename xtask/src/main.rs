@@ -87,6 +87,14 @@ const SCENARIOS: &[Scenario] = &[
         work_files: &["tests/fixtures/editor/highlight_ko.txt"],
     },
     Scenario {
+        name: "sidebar",
+        package: "my-notepad",
+        args: &["."],
+        description: "P2-06 폴더 탐색 사이드바 (이 저장소 폴더를 열기 — .git 숨김, target 흐리게, 아이콘)",
+        wait: false,
+        work_files: &[],
+    },
+    Scenario {
         name: "editor",
         package: "my-notepad",
         args: &[],

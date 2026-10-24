@@ -10,7 +10,8 @@
 //!   `취소`하면 남은 대기열과 종료를 모두 중단. 창 닫기(X·`Alt+F4`·`Cmd+Q`)는 가로채서 같은 대기열로 처리
 //! - P1-12: 상태 표시줄 인코딩·줄바꿈 팝업, 인코딩으로 다시 읽기(수정 중이면 확인), 변환 저장,
 //!   표현 불가 문자 경고(UTF-8로 저장 · `?`로 바꿔 저장 · 취소), 손상된 문서 저장 경고, 명령줄 파일 인자
-//! - P1-13: 파일을 창에 끌어다 놓아 열기(놓기 전 안내 덧그림, 폴더는 건너뜀), 명령줄 인자 해석은 `cli.rs`
+//! - P1-13: 파일을 창에 끌어다 놓아 열기(놓기 전 안내 덧그림), 명령줄 인자 해석은 `cli.rs`
+//! - P2-06: 좌측 폴더 탐색 사이드바 — `폴더 열기`·끌어다 놓은 폴더·명령줄 폴더 인자로 열고, 파일 클릭 시 탭으로 연다
 //! - P1-14: 5MB 초과 파일은 읽기 전용 뷰어(`ui::viewer`), 1~5MB는 안내 막대, 뷰어 ↔ 편집 모드 전환(큰 파일은 경고)
 
 use std::collections::VecDeque;
@@ -31,6 +32,7 @@ use crate::ui::{
     dialogs::{self, Dialog, DialogOutcome},
     editor::{self, EditorOptions},
     menu_bar::{self, MenuBarState, MenuTabEntry},
+    sidebar::{self, SidebarAction, SidebarState},
     status_bar::{self, StatusBarInfo},
     tab_bar::{self, TabAction, TabBarState, UNSAVED_PATH_HINT},
     theme::{self, Palette},
@@ -90,6 +92,7 @@ pub struct NotepadApp {
     keymap: Keymap,
     key_dispatcher: KeyDispatcher,
     sidebar_open: bool,
+    sidebar: SidebarState,
     word_wrap: bool,
     zoom: f32,
     scroll_sync: bool,
@@ -135,6 +138,7 @@ impl NotepadApp {
             keymap: Keymap::current(),
             key_dispatcher: KeyDispatcher::new(),
             sidebar_open: true,
+            sidebar: SidebarState::default(),
             word_wrap: true,
             zoom: 1.0,
             scroll_sync: true,
@@ -144,7 +148,7 @@ impl NotepadApp {
             measure: None,
         };
         for file in files {
-            app.open_path(&cc.egui_ctx, file);
+            app.open_any(&cc.egui_ctx, file);
         }
         app
     }
@@ -193,6 +197,7 @@ impl NotepadApp {
                 self.tabs.new_untitled();
             }
             Command::OpenFile => self.open_with_dialog(ctx),
+            Command::OpenFolder => self.open_folder_with_dialog(),
             Command::Save => {
                 self.save_active(ctx, false);
             }
@@ -449,6 +454,42 @@ impl NotepadApp {
         };
         for path in paths {
             self.open_path(ctx, &path);
+        }
+    }
+
+    /// 폴더 선택 대화상자로 사이드바에 폴더를 연다.
+    fn open_folder_with_dialog(&mut self) {
+        let mut picker = rfd::FileDialog::new().set_title("폴더 열기");
+        if let Some(dir) = self
+            .sidebar
+            .folder()
+            .map(Path::to_path_buf)
+            .or_else(|| self.dialog_directory())
+        {
+            picker = picker.set_directory(dir);
+        }
+        if let Some(folder) = picker.pick_folder() {
+            self.open_folder(&folder);
+        }
+    }
+
+    /// 사이드바에 폴더를 열고 사이드바를 펼친다.
+    pub fn open_folder(&mut self, path: &Path) {
+        match self.sidebar.open_folder(path) {
+            Ok(()) => self.sidebar_open = true,
+            Err(err) => self.dialogs.push_back(Dialog::message(
+                "폴더를 열 수 없습니다",
+                format!("{}\n{err}", path.display()),
+            )),
+        }
+    }
+
+    /// 경로가 폴더면 사이드바에, 파일이면 탭으로 연다 (명령줄 인자).
+    pub fn open_any(&mut self, ctx: &egui::Context, path: &Path) {
+        if path.is_dir() {
+            self.open_folder(path);
+        } else {
+            self.open_path(ctx, path);
         }
     }
 
@@ -788,7 +829,7 @@ done=1
 
     // ── 끌어다 놓기 ──
 
-    /// 창에 끌어다 놓은 파일을 탭으로 연다. 폴더는 아직 열 수 없으므로 건너뛰고 알려 준다 (사이드바는 Phase 2).
+    /// 창에 끌어다 놓은 파일을 탭으로 연다. 폴더는 사이드바에 연다 (여러 개면 첫 폴더만, P2-06).
     fn open_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -800,19 +841,25 @@ done=1
         if dropped.is_empty() {
             return;
         }
-        let mut folders = 0;
+        let mut folders = Vec::new();
         for path in dropped {
             if path.is_dir() {
-                folders += 1;
+                folders.push(path);
             } else {
                 self.open_path(ctx, &path);
             }
         }
-        if folders > 0 {
-            self.show_notice(
-                ctx,
-                format!("폴더 {folders}개는 건너뛰었습니다. 파일을 끌어다 놓아 주세요."),
-            );
+        if let Some(folder) = folders.first() {
+            self.open_folder(folder);
+            if folders.len() > 1 {
+                self.show_notice(
+                    ctx,
+                    format!(
+                        "폴더는 하나만 열 수 있어 \"{}\"를 열었습니다.",
+                        folder.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                );
+            }
         }
         // 다른 앱에서 끌어 온 뒤 바로 입력할 수 있게 창을 앞으로 가져온다.
         ctx.send_viewport_cmd(ViewportCommand::Focus);
@@ -986,7 +1033,45 @@ impl eframe::App for NotepadApp {
             self.execute_command(&ctx, cmd, "상태 표시줄");
         }
 
-        // 5. 본문 영역: 활성 탭 에디터
+        // 5. 좌측 사이드바 (닫혀 있으면 다시 여는 좁은 띠). 패널 폭은 egui가 기억해 닫았다 열어도 유지된다.
+        let toggle_shortcut = self
+            .keymap
+            .format_shortcut_for(Command::ToggleSidebar, &ctx)
+            .unwrap_or_default();
+        if self.sidebar_open {
+            let current = self.tabs.active().doc.path().map(Path::to_path_buf);
+            let mut sidebar_action = None;
+            egui::Panel::left("sidebar")
+                .resizable(true)
+                .default_size(220.0)
+                .size_range(140.0..=480.0)
+                .show(ui, |ui| {
+                    sidebar_action = sidebar::show(
+                        ui,
+                        &mut self.sidebar,
+                        &palette,
+                        &toggle_shortcut,
+                        current.as_deref(),
+                    );
+                });
+            match sidebar_action {
+                Some(SidebarAction::OpenFile(path)) => self.open_path(&ctx, &path),
+                Some(SidebarAction::OpenFolderDialog) => self.open_folder_with_dialog(),
+                Some(SidebarAction::Close) => self.sidebar_open = false,
+                None => {}
+            }
+        } else {
+            let mut open = false;
+            egui::Panel::left("sidebar-rail")
+                .resizable(false)
+                .exact_size(sidebar::RAIL_WIDTH)
+                .show(ui, |ui| open = sidebar::rail(ui, &toggle_shortcut));
+            if open {
+                self.sidebar_open = true;
+            }
+        }
+
+        // 6. 본문 영역: 활성 탭 에디터
         let font_size = ui.style().text_styles[&egui::TextStyle::Monospace].size * self.zoom;
         let options = EditorOptions {
             word_wrap: self.word_wrap,
@@ -1052,7 +1137,7 @@ impl eframe::App for NotepadApp {
             self.dialogs.push_back(dialog);
         }
 
-        // 6. 대화상자 (한 번에 하나씩)
+        // 7. 대화상자 (한 번에 하나씩)
         let mut current = self.dialogs.pop_front();
         let outcome = dialogs::show(&ctx, &mut current, &self.tabs);
         if let Some(dialog) = current {
@@ -1104,10 +1189,10 @@ impl eframe::App for NotepadApp {
             Some(DialogOutcome::Dismissed) | None => {}
         }
 
-        // 7. 닫기 대기열 (대화상자가 없을 때만 진행)
+        // 8. 닫기 대기열 (대화상자가 없을 때만 진행)
         self.process_close_queue(&ctx);
 
-        // 8. 끌어다 놓기 안내 (맨 위에 덧그림)
+        // 9. 끌어다 놓기 안내 (맨 위에 덧그림)
         Self::paint_drop_overlay(&ctx);
 
         self.update_window_title(&ctx);
