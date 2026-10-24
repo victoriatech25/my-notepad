@@ -1,4 +1,4 @@
-//! `cargo xtask gen-samples`: 성능 측정용 샘플 파일 생성 (P0-06, P0-09).
+//! `cargo xtask gen-samples`: 성능 측정용 샘플 파일 생성 (P0-06, P0-09)과 에디터 확인용 샘플 (P2-01).
 //!
 //! 결과는 `spikes/samples/`에 쓰며 `.gitignore` 대상이다. 같은 내용이 나오도록 고정 시드를 쓴다.
 
@@ -113,6 +113,32 @@ pub fn generate(root: &Path) -> Result<(), String> {
         let lines = text.lines().count();
         write(&dir.join(name), &text, lines)?;
     }
+
+    // 에디터 확인용 (P2-01): 줄 번호 Gutter 폭(10,000줄 초과), 자동 줄바꿈 켬/끔
+    let mut text = String::new();
+    for n in 1..=12_000 {
+        text.push_str(&format!("{n}번째 줄 — 번호 확인\n"));
+    }
+    write(&dir.join("lines-12k.txt"), &text, 12_000)?;
+
+    let mut rng = Lcg(0x5EED_0002);
+    let mut text = String::new();
+    for n in 0..300 {
+        if n % 5 == 2 {
+            text.push_str(&format!("[{:>3}] 긴 줄: ", n + 1));
+            for _ in 0..70 {
+                text.push_str(rng.pick(WORDS_KO));
+                text.push(' ');
+                text.push_str(rng.pick(WORDS_EN));
+                text.push(' ');
+            }
+            text.push_str("← 줄 끝\n");
+        } else {
+            text.push_str(&text_line(&mut rng, n));
+        }
+    }
+    write(&dir.join("long-lines.txt"), &text, 300)?;
+
     println!("\n✔ {}", dir.display());
     Ok(())
 }
