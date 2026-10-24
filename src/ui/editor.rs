@@ -26,7 +26,7 @@ use eframe::egui::{
 };
 
 use crate::commands::Command;
-use crate::core::buffer::char_to_byte_offset;
+use crate::core::buffer::{byte_to_char_offset, char_to_byte_offset};
 use crate::core::document::Document;
 use crate::core::highlight::{HighlightOptions, find_matches, target_word};
 use crate::core::line_ending::normalize_to_lf;
@@ -85,6 +85,16 @@ pub struct EditorState {
     center_cursor: bool,
     focus_requested: bool,
     highlight: Option<SmartHighlight>,
+    /// 다음 프레임에 이 소스 줄(0부터, 소수 = 줄 안 위치)이 화면 맨 위에 오게 한다 (보기 모드 전환, P3-06).
+    pending_top_line: Option<f32>,
+    /// 마지막으로 그린 레이아웃과 화면 맨 위의 galley y — 화면 맨 위 줄 계산용.
+    last_view: Option<LastView>,
+}
+
+#[derive(Debug)]
+struct LastView {
+    galley: Arc<Galley>,
+    top_in_galley: f32,
 }
 
 impl EditorState {
@@ -99,6 +109,8 @@ impl EditorState {
             center_cursor: false,
             focus_requested: false,
             highlight: None,
+            pending_top_line: None,
+            last_view: None,
         }
     }
 
@@ -121,6 +133,30 @@ impl EditorState {
     pub fn restore_view(&mut self, doc: &Document) {
         self.pending_cursor = Some(doc.cursor_char_range());
         self.pending_scroll_y = Some(doc.scroll_offset_y());
+    }
+
+    /// 마지막으로 그린 화면 맨 위의 소스 줄 (0부터, 소수 = 줄 안 위치). 아직 그린 적이 없으면 `None`.
+    pub fn top_line(&self, doc: &Document) -> Option<f32> {
+        let view = self.last_view.as_ref()?;
+        let cursor = view
+            .galley
+            .cursor_from_pos(egui::vec2(0.0, view.top_in_galley.max(0.0)));
+        let byte = char_to_byte_offset(doc.text(), cursor.index.0);
+        let line = doc.line_index().line_of_byte(byte);
+        let (top, bottom) = line_span(doc, &view.galley, line);
+        let fraction = if bottom > top {
+            ((view.top_in_galley - top) / (bottom - top)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Some(line as f32 + fraction)
+    }
+
+    /// 다음에 그릴 때 `line`(0부터, 소수 = 줄 안 위치)이 화면 맨 위에 오도록 스크롤한다.
+    ///
+    /// 새 레이아웃(폭이 바뀌었을 수 있다)으로 위치를 계산해야 하므로, 그 프레임은 보이지 않게 그리고 다음 프레임에 맞춘다.
+    pub fn scroll_to_line(&mut self, line: f32) {
+        self.pending_top_line = Some(line.max(0.0));
     }
 
     /// `line`(1-기반) 줄 처음으로 커서를 옮기고, 그 줄이 화면 가운데에 오도록 스크롤한다 (줄 이동, P2-02).
@@ -196,6 +232,9 @@ impl EditorState {
         palette: &Palette,
     ) -> EditorOutput {
         let ctx = ui.ctx().clone();
+        if self.pending_top_line.is_some() {
+            ui.set_invisible();
+        }
 
         if self.synced_revision != Some(doc.revision()) {
             self.sync_from(doc);
@@ -299,6 +338,19 @@ impl EditorState {
             })
             .inner;
         doc.set_scroll_offset_y(scroll_output.state.clamped_offset().y);
+        let view = scroll_output.inner_rect;
+        let galley_pos = scroll_output.inner.galley_pos;
+        self.last_view = Some(LastView {
+            galley: Arc::clone(&scroll_output.inner.galley),
+            top_in_galley: view.min.y - galley_pos.y,
+        });
+        if let Some(line) = self.pending_top_line.take() {
+            let (top, bottom) = line_span(doc, &scroll_output.inner.galley, line.floor() as usize);
+            let y = top + (bottom - top) * line.fract();
+            let content_y = galley_pos.y - view.min.y + scroll_output.state.clamped_offset().y + y;
+            self.pending_scroll_y = Some(content_y.max(0.0));
+            ctx.request_repaint();
+        }
 
         // 줄 이동: 커서 줄이 화면 가운데에 오도록 다음 프레임 스크롤 위치를 정한다.
         if std::mem::take(&mut self.center_cursor) {
@@ -414,6 +466,24 @@ impl EditorState {
         self.scratch.push_str(doc.text());
         self.synced_revision = Some(doc.revision());
     }
+}
+
+/// 소스 줄(0부터)의 galley 안 위·아래 y. 줄이 없으면 galley 끝.
+fn line_span(doc: &Document, galley: &Galley, line: usize) -> (f32, f32) {
+    let index = doc.line_index();
+    let text = doc.text();
+    let y_of = |line: usize| {
+        index
+            .line_start_byte(line)
+            .map_or(galley.rect.bottom(), |b| {
+                galley
+                    .pos_from_cursor(CCursor::new(byte_to_char_offset(text, b)))
+                    .min
+                    .y
+            })
+    };
+    let top = y_of(line);
+    (top, y_of(line + 1).max(top))
 }
 
 fn text_edit<'t>(

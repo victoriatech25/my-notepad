@@ -25,7 +25,7 @@ const MARGIN: i8 = 16;
 pub struct BlockPos {
     pub first_line: usize,
     pub last_line: usize,
-    /// 미리보기 내용 기준 y (스크롤과 무관하게 0부터)
+    /// 스크롤 내용 기준 y (바깥 여백 포함, 스크롤 위치와 무관)
     pub top: f32,
     pub height: f32,
 }
@@ -36,6 +36,12 @@ pub struct PreviewState {
     id: u64,
     cache: MarkdownCache,
     positions: Vec<BlockPos>,
+    /// 마지막 프레임의 세로 스크롤 위치
+    offset_y: f32,
+    /// 다음 프레임에 적용할 세로 스크롤 위치
+    pending_offset: Option<f32>,
+    /// 다음에 그릴 때 이 소스 줄이 화면 맨 위에 오게 한다 (보기 모드 전환, P3-06)
+    pending_top_line: Option<f32>,
 }
 
 impl PreviewState {
@@ -44,7 +50,22 @@ impl PreviewState {
             id,
             cache: MarkdownCache::default(),
             positions: Vec::new(),
+            offset_y: 0.0,
+            pending_offset: None,
+            pending_top_line: None,
         }
+    }
+
+    /// 마지막으로 그린 화면 맨 위의 소스 줄 (0부터, 소수 = 줄 안 위치). 아직 그린 적이 없으면 `None`.
+    pub fn top_line(&self) -> Option<f32> {
+        (!self.positions.is_empty()).then(|| y_to_line(&self.positions, self.offset_y))
+    }
+
+    /// 다음에 그릴 때 `line`이 화면 맨 위에 오도록 스크롤한다.
+    ///
+    /// 블록 위치는 그 폭으로 그려 봐야 알 수 있으므로, 그 프레임은 보이지 않게 그리고 다음 프레임에 맞춘다.
+    pub fn scroll_to_line(&mut self, line: f32) {
+        self.pending_top_line = Some(line.max(0.0));
     }
 
     /// 마지막으로 그린 최상위 블록 위치표.
@@ -66,16 +87,89 @@ impl PreviewState {
     pub fn show(&mut self, ui: &mut egui::Ui, doc: &Document, zoom: f32, palette: &Palette) {
         let parsed = self.cache.get(doc.revision(), doc.text());
         let style = Style::new(ui, zoom, palette);
-        let positions = &mut self.positions;
-        egui::ScrollArea::vertical()
+        if self.pending_top_line.is_some() {
+            ui.set_invisible();
+        }
+        let mut scroll = egui::ScrollArea::vertical()
             .id_salt(("md-preview", self.id))
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                egui::Frame::new().inner_margin(MARGIN).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    *positions = show_blocks(ui, &parsed.blocks, &style);
-                });
+            .auto_shrink(false);
+        if let Some(y) = self.pending_offset.take() {
+            scroll = scroll.vertical_scroll_offset(y);
+        }
+        let positions = &mut self.positions;
+        let output = scroll.show(ui, |ui| {
+            let origin = ui.cursor().top();
+            egui::Frame::new().inner_margin(MARGIN).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let top = ui.cursor().top() - origin;
+                *positions = show_blocks(ui, &parsed.blocks, &style);
+                for p in positions.iter_mut() {
+                    p.top += top;
+                }
             });
+        });
+        self.offset_y = output.state.clamped_offset().y;
+        if let Some(line) = self.pending_top_line.take() {
+            self.pending_offset = Some(line_to_y(&self.positions, line));
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+/// 소스 줄(0부터, 소수 = 줄 안 위치) → 미리보기 스크롤 내용 y.
+///
+/// 블록 안은 줄 비율대로, 블록 사이(빈 줄)는 앞 블록 끝과 다음 블록 위 사이를 선형 보간한다.
+pub fn line_to_y(positions: &[BlockPos], line: f32) -> f32 {
+    let Some(last) = positions.last() else {
+        return 0.0;
+    };
+    let i = positions.partition_point(|p| ((p.last_line + 1) as f32) <= line);
+    let Some(p) = positions.get(i) else {
+        return last.top + last.height;
+    };
+    let first = p.first_line as f32;
+    if line >= first {
+        let lines = (p.last_line + 1 - p.first_line) as f32;
+        return p.top + p.height * (line - first) / lines;
+    }
+    let (gap_line, gap_y) = match i.checked_sub(1).map(|j| positions[j]) {
+        Some(prev) => ((prev.last_line + 1) as f32, prev.top + prev.height),
+        None => (0.0, 0.0),
+    };
+    lerp_gap(line, gap_line, first, gap_y, p.top)
+}
+
+/// 미리보기 스크롤 내용 y → 소스 줄 ([`line_to_y`]의 역).
+pub fn y_to_line(positions: &[BlockPos], y: f32) -> f32 {
+    let Some(last) = positions.last() else {
+        return 0.0;
+    };
+    let i = positions.partition_point(|p| p.top + p.height <= y);
+    let Some(p) = positions.get(i) else {
+        return (last.last_line + 1) as f32;
+    };
+    if y >= p.top {
+        let lines = (p.last_line + 1 - p.first_line) as f32;
+        let ratio = if p.height > 0.0 {
+            (y - p.top) / p.height
+        } else {
+            0.0
+        };
+        return p.first_line as f32 + lines * ratio;
+    }
+    let (gap_line, gap_y) = match i.checked_sub(1).map(|j| positions[j]) {
+        Some(prev) => ((prev.last_line + 1) as f32, prev.top + prev.height),
+        None => (0.0, 0.0),
+    };
+    lerp_gap(y, gap_y, p.top, gap_line, p.first_line as f32)
+}
+
+/// `x`를 `[x0, x1]` → `[y0, y1]`로 선형 변환 (구간 길이가 0이면 `y1`).
+fn lerp_gap(x: f32, x0: f32, x1: f32, y0: f32, y1: f32) -> f32 {
+    if x1 > x0 {
+        y0 + (y1 - y0) * ((x - x0) / (x1 - x0)).clamp(0.0, 1.0)
+    } else {
+        y1
     }
 }
 
@@ -559,6 +653,61 @@ mod tests {
         let texts = frame(&ctx, &mut state, &doc("9. 아홉\n10. 열\n"));
         assert!(texts.iter().any(|t| t == "9."));
         assert!(texts.iter().any(|t| t == "10."));
+    }
+
+    fn pos(first_line: usize, last_line: usize, top: f32, height: f32) -> BlockPos {
+        BlockPos {
+            first_line,
+            last_line,
+            top,
+            height,
+        }
+    }
+
+    #[test]
+    fn line_and_y_mapping_round_trips() {
+        // 줄 0~1 블록(16~56), 빈 줄 2, 줄 3 블록(70~90), 빈 줄 4, 줄 5~9 블록(110~210)
+        let p = [
+            pos(0, 1, 16.0, 40.0),
+            pos(3, 3, 70.0, 20.0),
+            pos(5, 9, 110.0, 100.0),
+        ];
+        assert_eq!(line_to_y(&p, 0.0), 16.0);
+        assert_eq!(line_to_y(&p, 1.0), 36.0);
+        assert_eq!(line_to_y(&p, 2.5), 63.0);
+        assert_eq!(line_to_y(&p, 7.0), 150.0);
+        assert_eq!(line_to_y(&p, 12.0), 210.0);
+        for line in [0.0, 0.5, 1.5, 2.25, 3.0, 4.5, 6.0, 9.9] {
+            let back = y_to_line(&p, line_to_y(&p, line));
+            assert!((back - line).abs() < 1e-3, "{line} → {back}");
+        }
+        // 맨 위 여백(0~16)은 0번 줄
+        assert_eq!(y_to_line(&p, 5.0), 0.0);
+        assert_eq!(y_to_line(&p, 500.0), 10.0);
+        assert_eq!(line_to_y(&[], 3.0), 0.0);
+    }
+
+    #[test]
+    fn scroll_to_line_takes_effect_next_frame() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let text: String = (0..200)
+            .map(|i| {
+                format!(
+                    "문단 {i}
+
+"
+                )
+            })
+            .collect();
+        let d = doc(&text);
+        frame(&ctx, &mut state, &d);
+        assert_eq!(state.top_line(), Some(0.0));
+        state.scroll_to_line(100.0);
+        frame(&ctx, &mut state, &d);
+        frame(&ctx, &mut state, &d);
+        let top = state.top_line().unwrap();
+        assert!((top - 100.0).abs() < 1.0, "맨 위 줄 {top}");
     }
 
     #[test]

@@ -34,6 +34,7 @@ use crate::fonts;
 use crate::tabs::{ExternalChange, Tabs};
 use crate::ui::{
     dialogs::{self, Dialog, DialogOutcome},
+    doc_view,
     editor::{self, EditorOptions},
     menu_bar::{self, MenuBarState, MenuTabEntry},
     sidebar::{self, SidebarAction, SidebarState},
@@ -110,6 +111,8 @@ pub struct NotepadApp {
     /// 지난 프레임에 창이 포커스를 가졌는지 (포커스를 다시 얻으면 외부 변경 확인)
     window_focused: bool,
     zoom: f32,
+    /// Markdown 분할 비율 (P3-06)
+    split_ratio: f32,
     scroll_sync: bool,
     /// 선택 단어 일괄 강조 옵션
     highlight: HighlightOptions,
@@ -181,6 +184,7 @@ impl NotepadApp {
             font_defs,
             window_focused: false,
             zoom: settings.zoom,
+            split_ratio: settings.split_ratio,
             scroll_sync: true,
             highlight: HighlightOptions {
                 whole_word: settings.highlight_whole_word,
@@ -215,6 +219,15 @@ impl NotepadApp {
         app
     }
 
+    /// 활성 탭의 보기 모드를 바꾸고, 파일이면 다음에 열 때 쓰도록 기억한다 (P3-06).
+    fn set_view_mode(&mut self, mode: ViewMode) {
+        let tab = self.tabs.active_mut();
+        tab.view_mode = mode;
+        if let Some(path) = tab.doc.path().map(Path::to_path_buf) {
+            self.settings.remember_view_mode(&path, mode);
+        }
+    }
+
     // ── 설정 영속화 (P2-08) ──
 
     /// 지금 앱 상태를 설정으로 모은다.
@@ -223,6 +236,7 @@ impl NotepadApp {
             sidebar_open: self.sidebar_open,
             sidebar_folder: self.sidebar.folder().map(Path::to_path_buf),
             zoom: self.zoom,
+            split_ratio: self.split_ratio,
             word_wrap: self.word_wrap,
             tab_width: self.tab_width,
             tab_spaces: self.tab_spaces,
@@ -423,24 +437,24 @@ impl NotepadApp {
             Command::ZoomReset => {
                 self.zoom = 1.0;
             }
-            Command::SetViewMode(mode) => {
-                self.tabs.active_mut().view_mode = mode;
-            }
+            Command::SetViewMode(mode) => self.set_view_mode(mode),
             Command::ToggleMdPreview => {
                 let tab = self.tabs.active_mut();
-                tab.view_mode = if tab.view_mode == ViewMode::Preview {
-                    ViewMode::Source
+                if tab.doc_view.is_narrow_split(tab.view_mode) {
+                    // 좁은 창의 분할은 모드를 그대로 두고 보이는 쪽만 바꾼다 (넓히면 분할로 복귀)
+                    tab.doc_view.toggle_narrow_pane();
+                } else if tab.view_mode == ViewMode::Preview {
+                    self.set_view_mode(ViewMode::Source);
                 } else {
-                    ViewMode::Preview
-                };
+                    self.set_view_mode(ViewMode::Preview);
+                }
             }
             Command::ToggleMdSplit => {
-                let tab = self.tabs.active_mut();
-                tab.view_mode = if tab.view_mode == ViewMode::Split {
-                    ViewMode::Source
+                if self.tabs.active().view_mode == ViewMode::Split {
+                    self.set_view_mode(ViewMode::Source);
                 } else {
-                    ViewMode::Split
-                };
+                    self.set_view_mode(ViewMode::Split);
+                }
             }
             Command::ToggleScrollSync => {
                 self.scroll_sync = !self.scroll_sync;
@@ -493,9 +507,7 @@ impl NotepadApp {
                 self.close_tabs(&all);
             }
             TabAction::CopyPath(i) => self.copy_tab_path(ctx, i),
-            TabAction::SetViewMode(mode) => {
-                self.tabs.active_mut().view_mode = mode;
-            }
+            TabAction::SetViewMode(mode) => self.set_view_mode(mode),
         }
     }
 
@@ -703,6 +715,10 @@ impl NotepadApp {
                 if let Some(tab) = self.tabs.get_mut(index) {
                     // 5MB 초과는 뷰어, 1~5MB는 안내 막대 (ADR 0001)
                     tab.apply_open_mode(mode);
+                    // 지난번에 이 파일에서 쓴 보기 모드 (P3-06)
+                    if let Some(view_mode) = self.settings.view_mode_for(path) {
+                        tab.view_mode = view_mode;
+                    }
                 }
                 if mode == OpenMode::Edit && opened.file_readonly {
                     self.show_notice(
@@ -1400,45 +1416,14 @@ impl eframe::App for NotepadApp {
                         }
                     }
                     if tab.viewer.is_none() {
-                        let mode = if tab.doc.is_markdown() {
-                            tab.view_mode
-                        } else {
-                            ViewMode::Source
-                        };
-                        if mode != ViewMode::Preview {
-                            // 분할: 왼쪽 반에 소스. 비율 드래그·좁은 창 전환은 P3-06
-                            let full = ui.available_rect_before_wrap();
-                            let source_rect = if mode == ViewMode::Split {
-                                let mid = full.center().x.round();
-                                ui.painter().vline(
-                                    mid,
-                                    full.y_range(),
-                                    ui.visuals().widgets.noninteractive.bg_stroke,
-                                );
-                                tab.preview.show(
-                                    &mut ui.new_child(egui::UiBuilder::new().max_rect(
-                                        egui::Rect::from_min_max(
-                                            egui::pos2(mid + 1.0, full.top()),
-                                            full.max,
-                                        ),
-                                    )),
-                                    &tab.doc,
-                                    zoom,
-                                    &palette,
-                                );
-                                egui::Rect::from_min_max(full.min, egui::pos2(mid, full.bottom()))
-                            } else {
-                                full
-                            };
-                            let mut source_ui =
-                                ui.new_child(egui::UiBuilder::new().max_rect(source_rect));
-                            highlight_exceeded = tab
-                                .editor
-                                .show(&mut source_ui, &mut tab.doc, &options, &palette)
-                                .highlight_exceeded;
-                        } else {
-                            tab.preview.show(ui, &tab.doc, zoom, &palette);
-                        }
+                        highlight_exceeded = doc_view::show(
+                            ui,
+                            tab,
+                            &mut self.split_ratio,
+                            &options,
+                            zoom,
+                            &palette,
+                        );
                     }
                 }
             });
