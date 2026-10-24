@@ -28,6 +28,10 @@ pub struct MenuBarState<'a> {
     pub is_markdown: bool,
     pub view_mode: ViewMode,
     pub scroll_sync: bool,
+    /// 선택 단어 강조: 단어 단위 일치 (끄면 부분 일치)
+    pub highlight_whole_word: bool,
+    /// 선택 단어 강조: 대소문자 구분
+    pub highlight_match_case: bool,
     pub theme: ThemeMode,
     pub encoding: EncodingChoice,
     pub line_ending: LineEndingChoice,
@@ -51,7 +55,7 @@ pub fn show(ui: &mut egui::Ui, keymap: &Keymap, state: &MenuBarState<'_>) -> Opt
             edit_menu(ui, &ctx, keymap, &mut triggered);
         });
         ui.menu_button("검색", |ui| {
-            search_menu(ui, &ctx, keymap, &mut triggered);
+            search_menu(ui, &ctx, keymap, state, &mut triggered);
         });
         ui.menu_button("보기", |ui| {
             view_menu(ui, &ctx, keymap, state, &mut triggered);
@@ -210,6 +214,7 @@ fn search_menu(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     keymap: &Keymap,
+    state: &MenuBarState<'_>,
     triggered: &mut Option<Command>,
 ) {
     menu_item(ui, ctx, keymap, "찾기…", Command::Find, triggered);
@@ -217,6 +222,28 @@ fn search_menu(
     ui.separator();
     menu_item(ui, ctx, keymap, "다음 찾기", Command::FindNext, triggered);
     menu_item(ui, ctx, keymap, "이전 찾기", Command::FindPrev, triggered);
+
+    // 선택 단어 일괄 강조 옵션 (PLAN.md §3.2-1, P2-04)
+    ui.separator();
+    ui.label(RichText::new("선택 단어 강조").weak());
+    selectable_menu_item(
+        ui,
+        ctx,
+        keymap,
+        state.highlight_whole_word,
+        "단어 단위 일치",
+        Command::ToggleHighlightWholeWord,
+        triggered,
+    );
+    selectable_menu_item(
+        ui,
+        ctx,
+        keymap,
+        state.highlight_match_case,
+        "대소문자 구분",
+        Command::ToggleHighlightMatchCase,
+        triggered,
+    );
 }
 
 fn view_menu(
@@ -530,6 +557,8 @@ mod tests {
             is_markdown: false,
             view_mode: ViewMode::Source,
             scroll_sync: false,
+            highlight_whole_word: true,
+            highlight_match_case: true,
             theme: ThemeMode::System,
             encoding: EncodingChoice::Utf8,
             line_ending: LineEndingChoice::Lf,

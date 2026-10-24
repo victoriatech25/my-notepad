@@ -23,6 +23,7 @@ use crate::commands::{Command, KeyDispatcher, Keymap, ThemeMode, ViewMode};
 use crate::core::document::Document;
 use crate::core::encoding::{TextEncoding, decode_with_encoding, find_unmappable_chars};
 use crate::core::file_io::{self, FileIoErrorKind, OpenMode, OpenOutcome, SaveError, SizePolicy};
+use crate::core::highlight::HighlightOptions;
 use crate::core::line_ending::LineEnding;
 use crate::fonts;
 use crate::tabs::Tabs;
@@ -92,6 +93,8 @@ pub struct NotepadApp {
     word_wrap: bool,
     zoom: f32,
     scroll_sync: bool,
+    /// 선택 단어 일괄 강조 옵션 (설정 저장은 P2-08)
+    highlight: HighlightOptions,
     theme: ThemeMode,
     last_command: Option<String>,
 
@@ -135,6 +138,7 @@ impl NotepadApp {
             word_wrap: true,
             zoom: 1.0,
             scroll_sync: true,
+            highlight: HighlightOptions::default(),
             theme: ThemeMode::System,
             last_command: None,
             measure: None,
@@ -251,6 +255,12 @@ impl NotepadApp {
             }
             Command::ToggleScrollSync => {
                 self.scroll_sync = !self.scroll_sync;
+            }
+            Command::ToggleHighlightWholeWord => {
+                self.highlight.whole_word = !self.highlight.whole_word;
+            }
+            Command::ToggleHighlightMatchCase => {
+                self.highlight.match_case = !self.highlight.match_case;
             }
             Command::SetTheme(theme) => {
                 self.theme = theme;
@@ -904,6 +914,8 @@ impl eframe::App for NotepadApp {
             is_markdown: active.doc.is_markdown(),
             view_mode: active.view_mode,
             scroll_sync: self.scroll_sync,
+            highlight_whole_word: self.highlight.whole_word,
+            highlight_match_case: self.highlight.match_case,
             theme: self.theme,
             encoding: active.doc.encoding(),
             line_ending: active.doc.line_ending(),
@@ -979,9 +991,11 @@ impl eframe::App for NotepadApp {
         let options = EditorOptions {
             word_wrap: self.word_wrap,
             font: FontId::monospace(font_size),
+            highlight: self.highlight,
         };
         let mut switch_to_edit = false;
         let mut edit_large = None;
+        let mut highlight_exceeded = false;
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(ui.style()).inner_margin(0))
             .show(ui, |ui| {
@@ -1015,12 +1029,24 @@ impl eframe::App for NotepadApp {
                         }
                     }
                     if tab.viewer.is_none() {
-                        tab.editor.show(ui, &mut tab.doc, &options, &palette);
+                        highlight_exceeded = tab
+                            .editor
+                            .show(ui, &mut tab.doc, &options, &palette)
+                            .highlight_exceeded;
                     }
                 }
             });
         if switch_to_edit {
             self.tabs.active_mut().switch_to_editor();
+        }
+        if highlight_exceeded {
+            self.show_notice(
+                &ctx,
+                format!(
+                    "같은 단어가 {}개를 넘어 강조하지 않습니다",
+                    self.highlight.max_matches
+                ),
+            );
         }
         if let Some(dialog) = edit_large {
             self.dialogs.push_back(dialog);
