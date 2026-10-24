@@ -27,6 +27,8 @@ log = "0.4.34"
 memmap2 = "0.9.11"
 # 네이티브 파일 열기/저장 대화상자 (PLAN.md §2.2)
 rfd = "0.17.2"
+# 설정 파일 settings.toml 읽기·쓰기 (P2-08)
+serde = { version = "1.0.229", features = ["derive"] }
 # 원자적 저장: 같은 폴더의 임시 파일에 쓰고 rename (PLAN.md §2.2, §3.6)
 tempfile = "3.27.0"
 # 파일·폴더 아이콘 매핑 표 assets/file-icons/icons.toml 읽기 (§3.1-3)
