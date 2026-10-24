@@ -2,8 +2,8 @@
 //!
 //! - [`core::markdown`](crate::core::markdown) 블록 모델을 egui 위젯으로 직접 그린다. 파싱은 탭별
 //!   [`MarkdownCache`]가 문서 버전이 바뀔 때만 한다.
-//! - 화면 규칙은 UX-004(P0-08)에서 정한 A(egui_commonmark) 모양을 따른다: 제목은 본문~Heading 크기 사이의
-//!   단계 크기 + 진한 색, 굵게는 진한 색(굵은 글꼴은 쓰지 않음 — ADR 0002), 블록 사이 한 줄 여백,
+//! - 화면 규칙은 UX-004(P0-08)에서 정한 A(egui_commonmark) 모양을 따른다: 제목은 본문 크기의 단계별 배율
+//!   (H1 = 2배) + 진한 색, 굵게는 진한 색(굵은 글꼴은 쓰지 않음 — ADR 0002), 블록 사이 한 줄 여백,
 //!   인용은 왼쪽 3px 선 + 흐린 글자, 목록 글머리는 공백 4칸 폭 안에 그린다.
 //! - 최상위 블록마다 그려진 위치([`BlockPos`])를 기록한다 — 스크롤 동기화(P3-08)·가상 스크롤(P3-05)의 기반.
 //! - 코드 블록·표(P3-03), 이미지·Front Matter·각주·HTML(P3-04)은 지금은 단순 표시만 한다.
@@ -82,7 +82,6 @@ impl PreviewState {
 /// 크기·색 규칙.
 struct Style {
     body: f32,
-    heading_max: f32,
     line: f32,
     code_bg: Color32,
 }
@@ -94,23 +93,22 @@ impl Style {
         let body = size(TextStyle::Body, 14.0) * zoom;
         Self {
             body,
-            heading_max: size(TextStyle::Heading, 18.0) * zoom,
             line: ui.text_style_height(&TextStyle::Body) * zoom,
             code_bg: palette.preview_code_bg,
         }
     }
 
-    /// A와 같은 제목 크기: H1은 Heading 크기, H2~H6은 본문과 Heading 사이를 단계별로.
+    /// 제목 크기: 본문 크기의 배율 (GitHub 미리보기에 가깝게 H1 = 2배, P3-02 사용자 요청).
     fn heading_size(&self, level: u8) -> f32 {
         let factor = match level {
-            1 => 1.0,
-            2 => 0.835,
-            3 => 0.668,
-            4 => 0.501,
-            5 => 0.334,
-            _ => 0.167,
+            1 => 2.0,
+            2 => 1.6,
+            3 => 1.35,
+            4 => 1.2,
+            5 => 1.1,
+            _ => 1.05,
         };
-        self.body + (self.heading_max - self.body) * factor
+        self.body * factor
     }
 }
 
