@@ -1363,6 +1363,7 @@ impl eframe::App for NotepadApp {
             tab_width: usize::from(self.tab_width),
             tab_spaces: self.tab_spaces,
         };
+        let zoom = self.zoom;
         let mut switch_to_edit = false;
         let mut edit_large = None;
         let mut highlight_exceeded = false;
@@ -1399,10 +1400,45 @@ impl eframe::App for NotepadApp {
                         }
                     }
                     if tab.viewer.is_none() {
-                        highlight_exceeded = tab
-                            .editor
-                            .show(ui, &mut tab.doc, &options, &palette)
-                            .highlight_exceeded;
+                        let mode = if tab.doc.is_markdown() {
+                            tab.view_mode
+                        } else {
+                            ViewMode::Source
+                        };
+                        if mode != ViewMode::Preview {
+                            // 분할: 왼쪽 반에 소스. 비율 드래그·좁은 창 전환은 P3-06
+                            let full = ui.available_rect_before_wrap();
+                            let source_rect = if mode == ViewMode::Split {
+                                let mid = full.center().x.round();
+                                ui.painter().vline(
+                                    mid,
+                                    full.y_range(),
+                                    ui.visuals().widgets.noninteractive.bg_stroke,
+                                );
+                                tab.preview.show(
+                                    &mut ui.new_child(egui::UiBuilder::new().max_rect(
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(mid + 1.0, full.top()),
+                                            full.max,
+                                        ),
+                                    )),
+                                    &tab.doc,
+                                    zoom,
+                                    &palette,
+                                );
+                                egui::Rect::from_min_max(full.min, egui::pos2(mid, full.bottom()))
+                            } else {
+                                full
+                            };
+                            let mut source_ui =
+                                ui.new_child(egui::UiBuilder::new().max_rect(source_rect));
+                            highlight_exceeded = tab
+                                .editor
+                                .show(&mut source_ui, &mut tab.doc, &options, &palette)
+                                .highlight_exceeded;
+                        } else {
+                            tab.preview.show(ui, &tab.doc, zoom, &palette);
+                        }
                     }
                 }
             });

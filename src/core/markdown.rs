@@ -232,7 +232,7 @@ pub fn parse(text: &str) -> Document {
 }
 
 /// 문서 버전 기반 파싱 캐시. 탭(문서)마다 하나씩 둔다.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct MarkdownCache {
     /// 마지막으로 파싱한 (문서 버전, 텍스트 길이). 다시 불러오기로 버전이 초기화되는 경우를 길이로 보완한다.
     key: Option<(u64, usize)>,
