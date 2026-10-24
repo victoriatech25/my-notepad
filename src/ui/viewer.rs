@@ -217,8 +217,7 @@ impl ViewerState {
         let (row_height, char_width) =
             ui.fonts_mut(|f| (f.row_height(font), f.glyph_width(font, '0')));
         self.row_height = row_height;
-        let digits = line_count.to_string().len().max(3);
-        let gutter_width = digits as f32 * char_width + 20.0;
+        let gutter_width = crate::ui::editor::gutter_width(line_count, char_width);
         let text_color = ui.visuals().text_color();
         let layout = |ui: &egui::Ui, line: usize| -> Option<(Range<usize>, Arc<Galley>)> {
             let range = index.line_byte_range(line, text)?;

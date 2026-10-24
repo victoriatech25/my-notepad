@@ -1015,7 +1015,7 @@ impl eframe::App for NotepadApp {
                         }
                     }
                     if tab.viewer.is_none() {
-                        tab.editor.show(ui, &mut tab.doc, &options);
+                        tab.editor.show(ui, &mut tab.doc, &options, &palette);
                     }
                 }
             });
