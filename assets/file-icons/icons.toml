@@ -1,0 +1,88 @@
+# 파일·폴더 아이콘 매핑 표 (PLAN.md §3.1-3, docs/ux/ui-spec.md §6)
+#
+# P0-UX2 A안: Phosphor 단색 아이콘 폰트(phosphor/Phosphor.ttf) + 종류별 색.
+# 결정 순서: 파일 이름 정확히 일치 → 확장자 → 기본. 이름·확장자는 대소문자를 구분하지 않으며 여기에는 소문자로 쓴다.
+# 폴더는 열림/닫힘 글리프를 나누고, 색은 폴더 이름별로 정한다.
+# 이 파일은 실행 파일에 내장된다 (src/core/file_icons.rs). 글리프가 폰트에 실제로 있는지는 테스트가 검사한다.
+
+# 글리프 이름 → Phosphor 코드포인트 (egui-phosphor 0.14.0 codepoints.rs 기준)
+[glyphs]
+file = "E230"
+file-code = "E914"
+file-lock = "E95C"
+file-md = "ED50"
+file-rs = "EB28"
+file-txt = "EB35"
+gear-six = "E272"
+git-branch = "E278"
+info = "E2CE"
+app-window = "E5DA"
+brackets-curly = "E860"
+bug = "E5F4"
+folder = "E24A"
+folder-open = "E256"
+
+# 색 이름 → RGB
+[colors]
+rust = "#DE6A3B"
+blue = "#42A5F5"
+gray = "#9E9E9E"
+yellow = "#F4C430"
+git = "#E64A19"
+green = "#66BB6A"
+teal = "#26A69A"
+red = "#EF5350"
+purple = "#AB47BC"
+folder = "#90A4AE"
+
+[files]
+default = { glyph = "file", color = "gray" }
+
+# ① 파일 이름 정확히 일치
+[files.names]
+"cargo.toml" = { glyph = "gear-six", color = "rust" }
+"cargo.lock" = { glyph = "file-lock", color = "yellow" }
+".gitignore" = { glyph = "git-branch", color = "git" }
+".gitattributes" = { glyph = "git-branch", color = "git" }
+".editorconfig" = { glyph = "gear-six", color = "gray" }
+"readme.md" = { glyph = "info", color = "blue" }
+"rust-toolchain.toml" = { glyph = "file-rs", color = "rust" }
+
+# ② 확장자
+[files.extensions]
+rs = { glyph = "file-rs", color = "rust" }
+md = { glyph = "file-md", color = "blue" }
+markdown = { glyph = "file-md", color = "blue" }
+toml = { glyph = "gear-six", color = "gray" }
+json = { glyph = "brackets-curly", color = "yellow" }
+txt = { glyph = "file-txt", color = "gray" }
+log = { glyph = "file-txt", color = "green" }
+exe = { glyph = "app-window", color = "purple" }
+pdb = { glyph = "bug", color = "gray" }
+png = { glyph = "file-code", color = "green" }
+jpg = { glyph = "file-code", color = "green" }
+jpeg = { glyph = "file-code", color = "green" }
+gif = { glyph = "file-code", color = "green" }
+svg = { glyph = "file-code", color = "green" }
+
+[folders]
+closed = "folder"
+open = "folder-open"
+color = "folder"
+
+# 폴더 이름 → 색
+[folders.names]
+src = "green"
+docs = "blue"
+doc = "blue"
+tests = "teal"
+test = "teal"
+fixtures = "teal"
+target = "red"
+".cargo" = "rust"
+".git" = "git"
+screens = "green"
+images = "green"
+xtask = "yellow"
+scripts = "yellow"
+tools = "yellow"
