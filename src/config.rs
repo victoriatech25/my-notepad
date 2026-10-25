@@ -13,11 +13,20 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::commands::ThemeMode;
+use crate::commands::{ThemeMode, ViewMode};
 use crate::core::file_io;
 
 /// 최근 파일 목록 최대 개수.
 pub const MAX_RECENT_FILES: usize = 10;
+/// 파일별 보기 모드를 기억하는 최대 파일 수.
+pub const MAX_VIEW_MODES: usize = 200;
+
+/// 파일 하나의 마지막 보기 모드 (P3-06).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileViewMode {
+    pub path: PathBuf,
+    pub mode: ViewMode,
+}
 
 /// 창 위치·크기 (논리 픽셀). 최대화했으면 `maximized`이고 크기는 최대화 전 크기.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -47,8 +56,12 @@ pub struct Settings {
     pub highlight_whole_word: bool,
     pub highlight_match_case: bool,
     pub theme: ThemeMode,
+    /// Markdown 분할 비율 (소스 쪽 폭 비율, P3-06)
+    pub split_ratio: f32,
     /// 최근 연 파일 (최근 것이 앞)
     pub recent_files: Vec<PathBuf>,
+    /// 파일별 마지막 보기 모드 (최근 것이 앞, P3-06)
+    pub view_modes: Vec<FileViewMode>,
 }
 
 impl Default for Settings {
@@ -65,7 +78,9 @@ impl Default for Settings {
             highlight_whole_word: true,
             highlight_match_case: true,
             theme: ThemeMode::System,
+            split_ratio: crate::ui::doc_view::DEFAULT_SPLIT_RATIO,
             recent_files: Vec::new(),
+            view_modes: Vec::new(),
         }
     }
 }
@@ -193,6 +208,36 @@ impl Settings {
             self.window = None;
         }
         self.recent_files.truncate(MAX_RECENT_FILES);
+        let range = crate::ui::doc_view::SPLIT_RATIO_RANGE;
+        self.split_ratio = if self.split_ratio.is_finite() {
+            self.split_ratio.clamp(*range.start(), *range.end())
+        } else {
+            crate::ui::doc_view::DEFAULT_SPLIT_RATIO
+        };
+        self.view_modes.truncate(MAX_VIEW_MODES);
+    }
+
+    /// 파일에 마지막으로 쓴 보기 모드.
+    pub fn view_mode_for(&self, path: &Path) -> Option<ViewMode> {
+        let key = same_file_key(path);
+        self.view_modes
+            .iter()
+            .find(|v| same_file_key(&v.path) == key)
+            .map(|v| v.mode)
+    }
+
+    /// 파일의 보기 모드를 기억한다 (맨 앞으로, 최대 [`MAX_VIEW_MODES`]개).
+    pub fn remember_view_mode(&mut self, path: &Path, mode: ViewMode) {
+        let key = same_file_key(path);
+        self.view_modes.retain(|v| same_file_key(&v.path) != key);
+        self.view_modes.insert(
+            0,
+            FileViewMode {
+                path: path.to_path_buf(),
+                mode,
+            },
+        );
+        self.view_modes.truncate(MAX_VIEW_MODES);
     }
 
     /// 최근 파일 맨 앞에 넣는다 (같은 파일은 한 번만, 최대 [`MAX_RECENT_FILES`]개).
@@ -235,7 +280,12 @@ mod tests {
             highlight_whole_word: false,
             highlight_match_case: false,
             theme: ThemeMode::Dark,
+            split_ratio: 0.65,
             recent_files: vec![PathBuf::from("a.txt"), PathBuf::from("한글.md")],
+            view_modes: vec![FileViewMode {
+                path: PathBuf::from("한글.md"),
+                mode: ViewMode::Preview,
+            }],
         };
         settings.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -327,5 +377,36 @@ mod tests {
         }
         assert_eq!(s.recent_files.len(), MAX_RECENT_FILES);
         assert!(s.recent_files[0].ends_with("f14.txt"));
+    }
+
+    #[test]
+    fn view_modes_are_remembered_per_file_and_bounded() {
+        let mut settings = Settings::default();
+        settings.remember_view_mode(Path::new("a.md"), ViewMode::Preview);
+        settings.remember_view_mode(Path::new("b.md"), ViewMode::Source);
+        settings.remember_view_mode(Path::new("a.md"), ViewMode::Split);
+        assert_eq!(
+            settings.view_mode_for(Path::new("a.md")),
+            Some(ViewMode::Split)
+        );
+        assert_eq!(
+            settings.view_mode_for(Path::new("b.md")),
+            Some(ViewMode::Source)
+        );
+        assert_eq!(settings.view_mode_for(Path::new("c.md")), None);
+        assert_eq!(settings.view_modes.len(), 2);
+        assert_eq!(settings.view_modes[0].path, PathBuf::from("a.md"));
+
+        for i in 0..MAX_VIEW_MODES + 5 {
+            settings.remember_view_mode(Path::new(&format!("{i}.md")), ViewMode::Preview);
+        }
+        assert_eq!(settings.view_modes.len(), MAX_VIEW_MODES);
+
+        settings.split_ratio = 5.0;
+        settings.sanitize();
+        assert_eq!(settings.split_ratio, 0.8);
+        settings.split_ratio = f32::NAN;
+        settings.sanitize();
+        assert_eq!(settings.split_ratio, 0.5);
     }
 }

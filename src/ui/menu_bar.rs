@@ -307,8 +307,9 @@ fn view_menu(
     menu_item(ui, ctx, keymap, "원래 크기", Command::ZoomReset, triggered);
 
     ui.separator();
+    // `.md`가 아닌 파일도 보기 메뉴에서 미리보기를 쓸 수 있다 (PLAN.md §3.8-1, P3-06).
     ui.label(RichText::new("Markdown 보기").weak());
-    ui.add_enabled_ui(state.is_markdown, |ui| {
+    ui.scope(|ui| {
         for mode in [ViewMode::Source, ViewMode::Split, ViewMode::Preview] {
             selectable_menu_item(
                 ui,

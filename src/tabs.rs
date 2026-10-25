@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::commands::ViewMode;
 use crate::core::document::{DiskMetadata, Document};
 use crate::core::file_io::{DiskChange, OpenMode, check_disk_change};
+use crate::ui::doc_view::DocViewState;
 use crate::ui::editor::EditorState;
 use crate::ui::markdown_view::PreviewState;
 use crate::ui::viewer::ViewerState;
@@ -30,6 +31,8 @@ pub struct Tab {
     pub view_mode: ViewMode,
     /// Markdown 미리보기 상태 (파싱 캐시·블록 위치, P3-02)
     pub preview: PreviewState,
+    /// 실제로 보이는 화면·좁은 창 대체 상태 (P3-06)
+    pub doc_view: DocViewState,
     /// 중복 열기 판정용 정규화 경로.
     path_key: Option<PathBuf>,
     /// 파일 시스템의 읽기 전용 속성 (저장 시 다른 이름으로 저장 유도).
@@ -80,6 +83,7 @@ impl Tab {
             editor,
             view_mode,
             preview: PreviewState::new(id),
+            doc_view: DocViewState::default(),
             path_key,
             file_readonly: false,
             viewer: None,

@@ -81,8 +81,9 @@ pub use crate::core::encoding::TextEncoding as EncodingChoice;
 /// 줄바꿈 방식 선택지 (PLAN.md §3.4 — `core::line_ending::LineEnding` 재노출).
 pub use crate::core::line_ending::LineEnding as LineEndingChoice;
 
-/// Markdown 문서 보기 모드 (PLAN.md §3.8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Markdown 문서 보기 모드 (PLAN.md §3.8). 설정 파일에는 `"source"`·`"split"`·`"preview"`로 저장한다 (P3-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ViewMode {
     Source,
     Split,
