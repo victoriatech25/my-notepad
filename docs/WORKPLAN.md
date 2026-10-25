@@ -81,7 +81,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 장비 1 | Windows 11 Home PC — 작업 경로 `C:\devel\My-Notepad` |
 | 장비 2 | MacBook Pro — 작업 경로 `~/devel/my-notepad` (권장) · 칩 종류: **Apple M1 Pro** (Apple Silicon, macOS 26.6.2, 2026-10-23 확인) |
 | 작업 방식 | 사용자가 **두 장비를 오가며** 개발. 코드 동기화는 **GitHub 저장소만** 사용 (USB·클라우드 드라이브 동기화로 폴더를 공유하지 않음) |
-| CI | GitHub Actions — Windows·macOS 러너에서 fmt·clippy·test (P1-01). 비공개 저장소라면 macOS 러너 사용 시간이 크게 차감되므로 push·PR 시에만 실행 |
+| CI | GitHub Actions — Windows·macOS 러너에서 fmt·clippy·test (P1-01). **저장소 공개 전환 (2026-10-25)**: 비공개 상태에서 GitHub Free 월 Actions 사용 시간(2,000분, Windows ×2·macOS ×10)을 다 써 작업이 시작되지 않음 → 공개 저장소는 기본 러너 무료·사용 시간 제한 없음 |
 | 검증 역할 | Windows PC: 👤/🎨 Windows 항목 · MacBook Pro: 🍎 항목 + 🎨 macOS 의견 |
 
 **장비 전환 규칙**
@@ -857,6 +857,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [ ] 표·코드·이미지까지 채워진 최종 미리보기의 전체 인상 (GitHub 미리보기 대비)
 
 ### 🚦 게이트 G3 — PLAN.md 분할 보기 시나리오
+- **진행 (2026-10-25)**: P3-UX·G3 확인은 MacBook Pro에서 수행 — 절차 [macos-checklist.md §4](macos-checklist.md) (Phase 3 기능 macOS 확인 겸함). G1-1(메모장 ANSI)만 Windows 전용
 - 🤖 전체 테스트·CI 녹색, §1.3 Markdown 성능 3개 항목 충족 (측정값 기록)
 - 🎨 UX 백로그 `필수` 0건
 - 👤 **통합 시나리오**
@@ -1160,6 +1161,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-25 | P3-10 | 👤 | 통과 | Windows (`cargo xtask try markdown`): 소스 모드 제목·굵게/기울임·코드·링크·목록 기호·인용 색 구분, 구문 색상과 선택 단어 강조 함께 식별, 1MB 이하 `.md` 편집 입력 지연 체감 없음 3개 항목 사용자 확인 | 2026-10-25 |
 | 2026-10-25 | P3-11 | 🤖 | 통과 | `markdown_view.rs`: 본문 최대 폭 `MAX_BODY_WIDTH` 860px, 넓은 창에서는 가운데(좁으면 바깥 여백 16px로 폭을 다 씀), 높이 캐시는 폭 기준이라 자동으로 다시 잼. 미리보기 텍스트 선택·복사는 egui 라벨 선택이 가상 스크롤 블록 자식 UI를 넘어 동작(`Ctrl+C`는 앱이 가로채지 않음) — 테스트로 확인. 미리보기 글꼴은 확대 배율을 따름(2배 → 글자 높이 2배) — 테스트로 확인. 다크 테마는 기존 토큰(`preview_code_bg`·표 테두리·`hyperlink_color`·흐린 인용 글자) 그대로. 테스트 3개(블록을 넘는 드래그 선택 → 복사, 넓은 창 폭 제한·가운데·좁은 창 전체 폭, 확대 연동). build·clippy·fmt·test 통과 | |
 | 2026-10-25 | P3-11 | 👤 | 통과 | Windows (`cargo xtask try markdown`): 미리보기 드래그 선택·복사, 다크 테마 코드 블록·표·인용·링크 식별, 넓은 창 본문 폭 제한, `Ctrl + +/-` 미리보기 글꼴 연동 4개 항목 사용자 확인 | 2026-10-25 |
+| 2026-10-25 | CI 사용 시간 초과 → 저장소 공개 전환 | 🤖 | 해결 | P3-07·P3-09·P3-10·P3-11 브랜치 push 시 두 OS 작업이 단계 0개로 바로 실패 — 주석 "recent account payments have failed or your spending limit needs to be increased". 비공개 저장소의 GitHub Free 월 사용 시간 소진 추정(이번 달 성공 실행만 Windows 248분·macOS 105분 → 배수 적용 약 1,546분/2,000분). 사용자 결정으로 공개 전환(추적 파일 비밀 정보 검사: 없음, 커밋 작성자 이름·주소는 공개됨) → 다시 실행 네 브랜치 두 OS 녹색 → `main`에 차례로 병합(`b6fa239`) | |
 
 ### 9.3 측정 결과 기록표
 
