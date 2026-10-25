@@ -117,8 +117,8 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "markdown",
         package: "my-notepad",
-        args: &[],
-        description: "P3-02~ Markdown 미리보기 (gfm_all.md·korean.md·tables.md·images.md(+images/)·docs/PLAN.md 사본을 분할 모드 탭으로 열기)",
+        args: &["spikes/samples/md-1mb.md"],
+        description: "P3-02~ Markdown 미리보기 (gfm_all.md·korean.md·tables.md·images.md(+images/)·docs/PLAN.md 사본 + 1MB 샘플을 분할 모드 탭으로 열기 — 샘플: cargo xtask gen-samples)",
         wait: false,
         work_files: &[
             "tests/fixtures/markdown/gfm_all.md",
