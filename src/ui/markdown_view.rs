@@ -1476,6 +1476,12 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = PreviewState::new(1);
         let mut texts = Vec::new();
+        // 없는 파일 자리 표시는 첫 프레임부터 보인다
+        texts = galleys_frame(&ctx, &mut state, &d, Vec::new());
+        assert!(
+            texts.iter().any(|t| t.0 == "none.png"),
+            "없는 이미지 자리 표시 (첫 프레임)"
+        );
         for _ in 0..400 {
             texts = galleys_frame(&ctx, &mut state, &d, Vec::new());
             if state.image_texture_count() == 1 {

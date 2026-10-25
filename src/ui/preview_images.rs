@@ -114,10 +114,14 @@ impl ImageCache {
     }
 
     /// 원본 크기 (px). 처음이면 파일 헤더를 읽는다 — SVG는 디코딩이 끝나야 안다.
+    /// 파일이 없으면 디코딩을 기다리지 않고 바로 오류로 기억한다 (첫 프레임부터 자리 표시).
     pub fn size_of(&mut self, path: &Path) -> Option<(u32, u32)> {
         let entry = self.entries.entry(path.to_path_buf()).or_default();
         if entry.size.is_none() && entry.error.is_none() && !entry.loading {
             entry.size = image_load::image_size(path);
+            if entry.size.is_none() && !path.is_file() {
+                entry.error = Some("파일이 없습니다".to_owned());
+            }
         }
         entry.size
     }
@@ -219,6 +223,8 @@ mod tests {
         let mut cache = ImageCache::default();
         let missing = dir.path().join("none.png");
         assert_eq!(cache.size_of(&missing), None);
+        // 없는 파일은 디코딩을 기다리지 않고 바로 안다
+        assert_eq!(cache.error_of(&missing), Some("파일이 없습니다"));
         assert!(matches!(
             wait_loaded(&mut cache, &ctx, &missing),
             TextureState::Failed(_)
