@@ -7,6 +7,7 @@ pub mod doc_view;
 pub mod editor;
 pub mod markdown_view;
 pub mod menu_bar;
+pub mod preview_images;
 pub mod search_bar;
 pub mod sidebar;
 pub mod status_bar;

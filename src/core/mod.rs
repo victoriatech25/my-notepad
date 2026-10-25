@@ -10,6 +10,7 @@ pub mod file_icons;
 pub mod file_io;
 pub mod fs_tree;
 pub mod highlight;
+pub mod image_load;
 pub mod line_ending;
 pub mod markdown;
 pub mod search;

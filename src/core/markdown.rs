@@ -147,6 +147,8 @@ pub struct Document {
     /// 최상위 블록 (소스 순서)
     pub blocks: Vec<Block>,
     pub anchors: Vec<Anchor>,
+    /// 각주 이름 (본문에서 처음 참조한 순서 — 화면 번호는 순서 + 1)
+    pub footnotes: Vec<String>,
     /// 소스 줄 수 (끝 개행 뒤의 빈 줄 포함)
     pub line_count: usize,
 }
@@ -155,6 +157,14 @@ impl Document {
     /// 앵커 슬러그(`#` 없이)에 해당하는 제목의 소스 줄.
     pub fn anchor_line(&self, slug: &str) -> Option<usize> {
         self.anchors.iter().find(|a| a.slug == slug).map(|a| a.line)
+    }
+
+    /// 각주 화면 번호 (1부터, 처음 참조한 순서). 참조가 없는 각주는 `None`.
+    pub fn footnote_number(&self, label: &str) -> Option<usize> {
+        self.footnotes
+            .iter()
+            .position(|l| l == label)
+            .map(|i| i + 1)
     }
 }
 
@@ -222,11 +232,13 @@ pub fn parse(text: &str) -> Document {
         line_starts: &line_starts,
         slugger: Slugger::default(),
         anchors: Vec::new(),
+        footnotes: Vec::new(),
     };
     let blocks = parser.blocks(None);
     Document {
         blocks,
         anchors: parser.anchors,
+        footnotes: parser.footnotes,
         line_count: line_starts.len(),
     }
 }
@@ -272,6 +284,7 @@ struct BlockParser<'e, 'a> {
     line_starts: &'e [usize],
     slugger: Slugger,
     anchors: Vec<Anchor>,
+    footnotes: Vec<String>,
 }
 
 impl BlockParser<'_, '_> {
@@ -483,6 +496,9 @@ impl BlockParser<'_, '_> {
                 Event::HardBreak => push(&mut spans, "\n", SpanKind::Text, style, &link),
                 Event::InlineHtml(t) => push(&mut spans, t, SpanKind::Html, style, &link),
                 Event::FootnoteReference(label) => {
+                    if !self.footnotes.iter().any(|l| l == label.as_ref()) {
+                        self.footnotes.push(label.to_string());
+                    }
                     push(&mut spans, label, SpanKind::FootnoteRef, style, &link);
                 }
                 Event::Start(Tag::Emphasis) => style.emph = true,
