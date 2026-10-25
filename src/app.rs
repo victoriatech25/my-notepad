@@ -36,6 +36,7 @@ use crate::ui::{
     dialogs::{self, Dialog, DialogOutcome},
     doc_view,
     editor::{self, EditorOptions},
+    markdown_view::LinkAction,
     menu_bar::{self, MenuBarState, MenuTabEntry},
     sidebar::{self, SidebarAction, SidebarState},
     status_bar::{self, StatusBarInfo},
@@ -217,6 +218,36 @@ impl NotepadApp {
             app.open_any(&cc.egui_ctx, file);
         }
         app
+    }
+
+    /// 미리보기에서 누른 링크를 처리한다 (PLAN.md §3.8-5, P3-09).
+    fn handle_link(&mut self, ctx: &egui::Context, action: LinkAction) {
+        match action {
+            LinkAction::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
+            LinkAction::OpenFile { path, anchor } => {
+                let text_like = path.extension().is_some_and(|e| {
+                    ["md", "markdown", "txt"]
+                        .iter()
+                        .any(|t| e.eq_ignore_ascii_case(t))
+                });
+                if !text_like || path.is_dir() {
+                    // 문서가 아닌 파일·폴더는 OS 기본 프로그램으로
+                    ctx.open_url(egui::OpenUrl::new_tab(format!(
+                        "file:///{}",
+                        path.display().to_string().replace('\\', "/")
+                    )));
+                    return;
+                }
+                self.open_path(ctx, &path);
+                if let Some(anchor) = anchor {
+                    let tab = self.tabs.active_mut();
+                    if tab.doc.path().is_some_and(|p| self::same_path(p, &path)) {
+                        tab.preview.jump_to_anchor(anchor);
+                    }
+                }
+            }
+            LinkAction::Notice(text) => self.show_notice(ctx, text),
+        }
     }
 
     /// 활성 탭의 보기 모드를 바꾸고, 파일이면 다음에 열 때 쓰도록 기억한다 (P3-06).
@@ -1382,6 +1413,7 @@ impl eframe::App for NotepadApp {
         let zoom = self.zoom;
         let mut switch_to_edit = false;
         let mut switch_to_split = false;
+        let mut link_action = None;
         let mut edit_large = None;
         let mut highlight_exceeded = false;
         egui::CentralPanel::default()
@@ -1428,6 +1460,7 @@ impl eframe::App for NotepadApp {
                         );
                         highlight_exceeded = output.highlight_exceeded;
                         switch_to_split = output.switch_to_split;
+                        link_action = output.link;
                     }
                 }
             });
@@ -1437,6 +1470,9 @@ impl eframe::App for NotepadApp {
         if switch_to_split {
             // 미리보기 블록 더블클릭 → 소스로 이동하므로 분할로 바꾼다 (P3-08)
             self.set_view_mode(ViewMode::Split);
+        }
+        if let Some(action) = link_action {
+            self.handle_link(&ctx, action);
         }
         if highlight_exceeded {
             self.show_notice(
@@ -1531,5 +1567,13 @@ impl eframe::App for NotepadApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_settings_now();
+    }
+}
+
+/// 두 경로가 같은 파일인지 (실제 경로로 비교, 실패하면 그대로 비교).
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }

@@ -117,8 +117,11 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "markdown",
         package: "my-notepad",
-        args: &["spikes/samples/md-1mb.md"],
-        description: "P3-02~ Markdown 미리보기 (gfm_all.md·korean.md·tables.md·images.md(+images/)·docs/PLAN.md 사본 + 1MB 샘플을 분할 모드 탭으로 열기 — 샘플: cargo xtask gen-samples)",
+        args: &[
+            "spikes/samples/md-1mb.md",
+            "target/try-markdown/links/index.md",
+        ],
+        description: "P3-02~ Markdown 미리보기 (gfm_all.md·korean.md·tables.md·images.md(+images/)·links/(index.md 탭)·docs/PLAN.md 사본 + 1MB 샘플을 분할 모드 탭으로 열기 — 샘플: cargo xtask gen-samples)",
         wait: false,
         work_files: &[
             "tests/fixtures/markdown/gfm_all.md",
@@ -126,6 +129,7 @@ const SCENARIOS: &[Scenario] = &[
             "tests/fixtures/markdown/tables.md",
             "tests/fixtures/markdown/images.md",
             "tests/fixtures/markdown/images",
+            "tests/fixtures/markdown/links",
             "docs/PLAN.md",
         ],
     },

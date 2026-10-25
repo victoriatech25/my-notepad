@@ -62,7 +62,7 @@ fn has_drive(s: &str) -> bool {
 }
 
 /// `scheme:`으로 시작하는지 (Windows 드라이브 문자 `C:`는 제외).
-fn has_scheme(s: &str) -> bool {
+pub(crate) fn has_scheme(s: &str) -> bool {
     match s.find(':') {
         Some(i) if i > 1 => s[..i]
             .chars()
@@ -72,7 +72,7 @@ fn has_scheme(s: &str) -> bool {
 }
 
 /// `%XX`를 바이트로 바꾼다 (UTF-8이 아니게 되면 원문 그대로).
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
