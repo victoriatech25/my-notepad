@@ -172,7 +172,7 @@ cargo xtask try basic
 
 ## 4. Phase 3 · G3 macOS 검증 — P3-UX·G3 마무리 조건
 
-> **결과 (2026-10-25): ✅ 전 항목 통과 → P3-UX 완료 · G3 통과.** MacBook Pro(M1 Pro), `main` `d350672`. 4-1a~4-9d 모두 사용자 확인, 4-8a·4-8b 좋음. 4-9a에서 고친 `docs/PLAN.md`·`docs/WORKPLAN.md`는 되돌려 작업 트리 변경 없음. 로그에 panic·오류 없음. **G1-1(메모장 ANSI 한글)은 Windows 보류** — 다음에 Windows를 쓸 때 확인한다.
+> **결과 (2026-10-25): ✅ 전 항목 통과 → P3-UX 완료 · G3 통과.** MacBook Pro(M1 Pro), `main` `d350672`. 4-1a~4-9d 모두 사용자 확인, 4-8a·4-8b 좋음. 4-9a에서 고친 `docs/PLAN.md`·`docs/WORKPLAN.md`는 되돌려 작업 트리 변경 없음. 로그에 panic·오류 없음. G1-1(메모장 ANSI 한글)은 Windows에서 따로 확인해 통과 (2026-10-25).
 
 > Phase 3 기능(P3-01~P3-11)은 Windows에서만 화면 확인했다 (CI는 2026-10-25부터 Windows·macOS 녹색). 이 절을 MacBook Pro에서 한 번 수행하면 Phase 3의 macOS 확인, **P3-UX** 🎨 확인, **G3** 👤 통합 시나리오와 🍎 "Markdown 분할 보기 시나리오 1회"를 함께 끝낸다.
 > G3 통합 시나리오 4(G1·G2 재수행) 중 **G1-1 메모장 ANSI(CP949) 한글 라운드트립만 Windows 전용**이다 — 나머지는 이 절의 4-9d에서 macOS로 수행하고, G1-1은 다음에 Windows를 쓸 때 확인한다 (§4-9d 참고).
