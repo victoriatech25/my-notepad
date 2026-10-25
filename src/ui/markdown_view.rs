@@ -50,6 +50,8 @@ const ICON_CLOUD_SLASH: &str = "\u{E1B6}";
 
 /// 미리보기 본문 바깥 여백(px).
 const MARGIN: i8 = 16;
+/// 미리보기 본문 최대 폭(px) — 넓은 창에서는 이 폭으로 가운데 둔다 (PLAN.md §3.8-7 가독성, P3-11).
+pub const MAX_BODY_WIDTH: f32 = 860.0;
 /// 편집 후 미리보기를 다시 파싱하기까지 기다리는 시간 (초, PLAN.md §3.8-2 "약 150~200ms").
 pub const REFRESH_DEBOUNCE: f64 = 0.15;
 
@@ -275,7 +277,11 @@ impl PreviewState {
         }
         let parsing = self.cache.is_parsing() && parsed.blocks.is_empty();
         // 위치표는 스크롤 영역보다 먼저 만든다 (스크롤바는 내용 위에 떠 있어 폭이 같다)
-        let width = (ui.available_width() - 2.0 * MARGIN as f32).max(1.0);
+        // 넓은 창에서는 본문 폭을 제한하고 가운데 둔다 (P3-11)
+        let width = (ui.available_width() - 2.0 * MARGIN as f32).clamp(1.0, MAX_BODY_WIDTH);
+        let left = ((ui.available_width() - width) / 2.0)
+            .max(MARGIN as f32)
+            .round();
         let mut anchored = false;
         let mut link_action = None;
         let mut jumped_line = None;
@@ -330,7 +336,7 @@ impl PreviewState {
                 ui.label(RichText::new("  큰 문서를 분석하는 중…").weak());
                 return;
             }
-            let content = ui.min_rect().min;
+            let content = ui.min_rect().min + egui::vec2(left - MARGIN as f32, 0.0);
             ui.allocate_space(egui::vec2(ui.available_width(), total));
             let changed = heights.render_visible(
                 ui,
@@ -2471,6 +2477,164 @@ mod tests {
         let line = output.jumped_line.expect("열자마자 앵커로");
         output_frame(&ctx, &mut state, &d, Vec::new());
         assert_heading_on_screen(&state, line);
+    }
+
+    /// 그려진 글자 (글자, 위치, galley).
+    type DrawnTexts = Vec<(String, Pos2, Arc<egui::Galley>)>;
+
+    /// 헤드리스 프레임: 복사된 글자(있으면)와 그려진 글자.
+    fn copy_frame(
+        ctx: &egui::Context,
+        state: &mut PreviewState,
+        doc: &Document,
+        events: Vec<egui::Event>,
+        width: f32,
+    ) -> (Option<String>, DrawnTexts) {
+        let raw = RawInput {
+            events,
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 800.0))),
+            ..Default::default()
+        };
+        let mut full = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                state.show(ui, doc, 1.0, &Palette::light(), None);
+            });
+        });
+        full.textures_delta.clear();
+        let copied = full.platform_output.commands.iter().find_map(|c| match c {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        });
+        let texts = full
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => {
+                    Some((t.galley.text().to_owned(), t.pos, Arc::clone(&t.galley)))
+                }
+                _ => None,
+            })
+            .collect();
+        (copied, texts)
+    }
+
+    #[test]
+    fn drag_selecting_preview_text_copies_it() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let d = doc("# 제목\n\n첫째 문단입니다.\n\n둘째 문단입니다.\n");
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            texts = copy_frame(&ctx, &mut state, &d, Vec::new(), 600.0).1;
+        }
+        let first = texts.iter().find(|t| t.0 == "첫째 문단입니다.").unwrap();
+        let second = texts.iter().find(|t| t.0 == "둘째 문단입니다.").unwrap();
+        let from = first.1 + egui::vec2(1.0, first.2.size().y / 2.0);
+        let to = second.1 + egui::vec2(second.2.size().x - 1.0, second.2.size().y / 2.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        copy_frame(
+            &ctx,
+            &mut state,
+            &d,
+            vec![egui::Event::PointerMoved(from)],
+            600.0,
+        );
+        copy_frame(&ctx, &mut state, &d, vec![button(from, true)], 600.0);
+        for step in 1..=5 {
+            let p = from + (to - from) * (step as f32 / 5.0);
+            copy_frame(
+                &ctx,
+                &mut state,
+                &d,
+                vec![egui::Event::PointerMoved(p)],
+                600.0,
+            );
+        }
+        copy_frame(&ctx, &mut state, &d, vec![button(to, false)], 600.0);
+        let (copied, _) = copy_frame(&ctx, &mut state, &d, vec![egui::Event::Copy], 600.0);
+        let copied = copied.expect("복사되지 않음");
+        assert!(copied.contains("첫째 문단"), "{copied:?}");
+        assert!(
+            copied.contains("둘째 문단"),
+            "블록을 넘어 선택해야 함: {copied:?}"
+        );
+    }
+
+    #[test]
+    fn body_width_is_capped_and_centered_on_wide_windows() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let long = "아주 긴 문단 ".repeat(200);
+        let d = doc(&format!("{long}\n"));
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            texts = copy_frame(&ctx, &mut state, &d, Vec::new(), 2000.0).1;
+        }
+        let (_, pos, galley) = texts.iter().find(|t| t.0.starts_with("아주 긴")).unwrap();
+        assert!(
+            galley.size().x <= MAX_BODY_WIDTH + 1.0,
+            "본문 폭 제한: {}",
+            galley.size().x
+        );
+        // 가운데 정렬: 왼쪽 여백 ≈ 오른쪽 여백
+        let left = pos.x;
+        let right = 2000.0 - (pos.x + MAX_BODY_WIDTH);
+        assert!(
+            (left - right).abs() < 40.0,
+            "가운데가 아님: 왼쪽 {left} 오른쪽 {right}"
+        );
+
+        // 좁은 창에서는 폭을 다 쓴다
+        let mut state = PreviewState::new(2);
+        for _ in 0..3 {
+            texts = copy_frame(&ctx, &mut state, &d, Vec::new(), 600.0).1;
+        }
+        let (_, pos, _) = texts.iter().find(|t| t.0.starts_with("아주 긴")).unwrap();
+        assert!(pos.x < 40.0);
+    }
+
+    #[test]
+    fn preview_text_follows_editor_zoom() {
+        let ctx = egui::Context::default();
+        let d = doc("본문 글자
+");
+        let size_at = |zoom: f32| {
+            let mut state = PreviewState::new(1);
+            let mut height = 0.0;
+            for _ in 0..2 {
+                let raw = RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 800.0))),
+                    ..Default::default()
+                };
+                let mut full = ctx.run_ui(raw, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        state.show(ui, &d, zoom, &Palette::light(), None);
+                    });
+                });
+                full.textures_delta.clear();
+                height = full
+                    .shapes
+                    .iter()
+                    .find_map(|c| match &c.shape {
+                        egui::Shape::Text(t) if t.galley.text() == "본문 글자" => {
+                            Some(t.galley.size().y)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+            }
+            height
+        };
+        let (normal, zoomed) = (size_at(1.0), size_at(2.0));
+        assert!(
+            (zoomed / normal - 2.0).abs() < 0.2,
+            "확대 배율을 따라야 함: {normal} → {zoomed}"
+        );
     }
 
     #[test]
