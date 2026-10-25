@@ -327,6 +327,11 @@ impl MarkdownCache {
         Arc::clone(&self.document)
     }
 
+    /// 마지막 결과가 이 버전의 것인지 (다시 파싱할 필요가 없는지).
+    pub fn is_current(&self, revision: u64, text: &str) -> bool {
+        self.key == Some((revision, text.len()))
+    }
+
     /// 작업 스레드에서 파싱 중인지.
     pub fn is_parsing(&self) -> bool {
         self.job.is_some()

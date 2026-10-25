@@ -141,7 +141,8 @@ pub fn show(
                 tab.editor.go_to_line(&mut tab.doc, line + 1);
             }
             splitter(ui, full, x, split_ratio, palette);
-            let applied = (source_applied, preview_applied);
+            // 미리보기가 위쪽 높이 변화로 스크롤을 옮긴 것(P3-07)도 사용자 조작이 아니다
+            let applied = (source_applied, preview_applied || preview.anchored);
             sync_scroll(ui, tab, right, scroll_sync, applied);
         }
     }
