@@ -6,12 +6,15 @@
 //!   (H1 = 2배) + 진한 색, 굵게는 진한 색(굵은 글꼴은 쓰지 않음 — ADR 0002), 블록 사이 한 줄 여백,
 //!   인용은 왼쪽 3px 선 + 흐린 글자, 목록 글머리는 공백 4칸 폭 안에 그린다.
 //! - 최상위 블록마다 그려진 위치([`BlockPos`])를 기록한다 — 스크롤 동기화(P3-08)·가상 스크롤(P3-05)의 기반.
-//! - 코드 블록·표(P3-03), 이미지·Front Matter·각주·HTML(P3-04)은 지금은 단순 표시만 한다.
+//! - 코드 블록은 줄을 접지 않고 블록 안에서만 가로 스크롤, 표는 내용에 맞춘 열 폭·넘치면 넓은 열부터 줄바꿈·
+//!   그래도 넘치면 표만 가로 스크롤 (P3-03). 이미지·Front Matter·각주·HTML(P3-04)은 지금은 단순 표시만 한다.
 
 use eframe::egui::{
-    self, Align, Color32, FontFamily, FontId, Layout, RichText, Sense, Stroke, TextFormat,
-    TextStyle, text::LayoutJob,
+    self, Align, Color32, FontFamily, FontId, RichText, Sense, Stroke, TextFormat, TextStyle,
+    text::LayoutJob,
 };
+
+use std::sync::Arc;
 
 use crate::core::document::Document;
 use crate::core::markdown::{self, Block, BlockKind, Inlines, ListItem, MarkdownCache, SpanKind};
@@ -376,24 +379,10 @@ fn render_block(ui: &mut egui::Ui, block: &Block, style: &Style, depth: usize) {
         }
         BlockKind::List { start, items } => list(ui, *start, items, style, depth),
         BlockKind::Quote(children) => quote(ui, children, style, depth),
-        BlockKind::Code { lang, text } => {
-            egui::Frame::new()
-                .fill(style.code_bg)
-                .corner_radius(4)
-                .inner_margin(8)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    if !lang.is_empty() {
-                        ui.label(RichText::new(lang).size(style.body * 0.85).weak());
-                    }
-                    egui::ScrollArea::horizontal()
-                        .id_salt(ui.next_auto_id())
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(text).font(FontId::monospace(style.body)));
-                        });
-                });
+        BlockKind::Code { lang, text } => code_block(ui, lang, text, style, block.first_line),
+        BlockKind::Table { align, head, rows } => {
+            table(ui, align, head, rows, style, block.first_line);
         }
-        BlockKind::Table { align, head, rows } => table(ui, align, head, rows, style),
         BlockKind::Rule => {
             ui.add(egui::Separator::default().horizontal());
         }
@@ -562,56 +551,215 @@ fn checkbox(
     }
 }
 
-/// 표: 테두리 틀 + 줄무늬 격자, 넓으면 표 영역만 가로 스크롤 (P3-03에서 다듬는다).
+/// 코드 블록: 고정폭 + 배경, 줄은 접지 않고 긴 줄은 블록 안에서만 가로 스크롤 (P3-03).
+fn code_block(ui: &mut egui::Ui, lang: &str, text: &str, style: &Style, salt: usize) {
+    egui::Frame::new()
+        .fill(style.code_bg)
+        .corner_radius(4)
+        .inner_margin(8)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if !lang.is_empty() {
+                ui.label(RichText::new(lang).size(style.body * 0.85).weak());
+            }
+            // 가로 스크롤바가 마지막 줄을 가리지 않도록 아래 여백을 둔다.
+            ui.spacing_mut().scroll.content_margin.bottom = ui.spacing().scroll.bar_width as i8;
+            egui::ScrollArea::horizontal()
+                .id_salt(("md-code", salt))
+                .show(ui, |ui| {
+                    let color = ui
+                        .visuals()
+                        .override_text_color
+                        .unwrap_or(ui.visuals().text_color());
+                    let job = LayoutJob::simple(
+                        text.to_owned(),
+                        FontId::monospace(style.body),
+                        color,
+                        f32::INFINITY,
+                    );
+                    ui.add(egui::Label::new(job).extend());
+                });
+        });
+}
+
+/// 표 셀 안쪽 여백 (가로, 세로).
+const CELL_PAD: egui::Vec2 = egui::vec2(10.0, 3.0);
+/// 표가 보이는 폭을 넘을 때 열을 좁히는 하한 (이보다 좁히지 않고 가로 스크롤).
+const MIN_COLUMN_WIDTH: f32 = 60.0;
+
+/// 표: 열 폭은 내용에 맞추고, 표가 보이는 폭을 넘으면 열을 내용 폭에 비례해 줄여 줄바꿈한다.
+/// 그래도 넘치면(열이 많을 때) 표 영역만 가로 스크롤한다. 머리글은 배경 + 진한 글자, 본문은 줄무늬, 칸마다 테두리.
 fn table(
     ui: &mut egui::Ui,
     align: &[markdown::Align],
     head: &[Inlines],
     rows: &[Vec<Inlines>],
     style: &Style,
+    salt: usize,
 ) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        // 가로 스크롤바가 마지막 행을 가리지 않도록 아래 여백을 둔다.
-        ui.spacing_mut().scroll.content_margin.bottom = ui.spacing().scroll.bar_width as i8;
-        egui::ScrollArea::horizontal()
-            .id_salt(ui.next_auto_id())
-            .show(ui, |ui| {
-                egui::Grid::new(ui.next_auto_id())
-                    .striped(true)
-                    .show(ui, |ui| {
-                        for (c, cell) in head.iter().enumerate() {
-                            table_cell(ui, cell, align.get(c), true, style);
-                        }
-                        ui.end_row();
-                        for row in rows {
-                            for (c, cell) in row.iter().enumerate() {
-                                table_cell(ui, cell, align.get(c), false, style);
-                            }
-                            ui.end_row();
-                        }
-                    });
-            });
-    });
+    let columns = rows.iter().map(Vec::len).fold(head.len(), usize::max);
+    if columns == 0 {
+        return;
+    }
+    let empty = Inlines::new();
+    // 0번 행 = 머리글
+    let cell = |row: usize, col: usize| -> &Inlines {
+        let cells = if row == 0 { head } else { &rows[row - 1][..] };
+        cells.get(col).unwrap_or(&empty)
+    };
+    let row_count = rows.len() + 1;
+
+    // 열의 내용 폭 = 줄바꿈 없이 가장 넓은 칸
+    let natural: Vec<f32> = (0..columns)
+        .map(|c| {
+            (0..row_count)
+                .map(|r| {
+                    cell_galley(ui, cell(r, c), r == 0, style, f32::INFINITY)
+                        .size()
+                        .x
+                })
+                .fold(0.0, f32::max)
+        })
+        .collect();
+    let caps = column_widths(&natural, ui.available_width(), CELL_PAD.x * 2.0 + 1.0);
+
+    let galleys: Vec<Vec<Arc<egui::Galley>>> = (0..row_count)
+        .map(|r| {
+            (0..columns)
+                .map(|c| cell_galley(ui, cell(r, c), r == 0, style, caps[c]))
+                .collect()
+        })
+        .collect();
+    let widths: Vec<f32> = (0..columns)
+        .map(|c| {
+            let text = galleys
+                .iter()
+                .map(|row| row[c].size().x)
+                .fold(0.0, f32::max);
+            text.min(caps[c]).ceil() + CELL_PAD.x * 2.0
+        })
+        .collect();
+    let heights: Vec<f32> = galleys
+        .iter()
+        .map(|row| {
+            let text = row.iter().map(|g| g.size().y).fold(style.line, f32::max);
+            text.ceil() + CELL_PAD.y * 2.0
+        })
+        .collect();
+    let size = egui::vec2(widths.iter().sum(), heights.iter().sum());
+
+    // 가로 스크롤바가 마지막 행을 가리지 않도록 아래 여백을 둔다.
+    ui.spacing_mut().scroll.content_margin.bottom = ui.spacing().scroll.bar_width as i8;
+    egui::ScrollArea::horizontal()
+        .id_salt(("md-table", salt))
+        .show(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(size + egui::vec2(1.0, 1.0), Sense::hover());
+            let outer = egui::Rect::from_min_size(rect.min, size);
+            let mut y = rect.top();
+            for (r, &h) in heights.iter().enumerate() {
+                let row_rect =
+                    egui::Rect::from_min_size(egui::pos2(rect.left(), y), egui::vec2(size.x, h));
+                if r == 0 {
+                    ui.painter().rect_filled(row_rect, 0.0, style.code_bg);
+                } else if r % 2 == 0 {
+                    let stripe = style.code_bg.gamma_multiply(0.45);
+                    ui.painter().rect_filled(row_rect, 0.0, stripe);
+                }
+                let mut x = rect.left();
+                for (c, &w) in widths.iter().enumerate() {
+                    let galley = &galleys[r][c];
+                    let inner = w - CELL_PAD.x * 2.0;
+                    let dx = align_offset(align.get(c).copied(), inner, galley.size().x);
+                    let pos = egui::pos2(x + CELL_PAD.x + dx, y + CELL_PAD.y);
+                    // 글자는 선택·복사되도록 라벨로 놓는다
+                    ui.put(
+                        egui::Rect::from_min_size(pos, galley.size()),
+                        egui::Label::new(Arc::clone(galley)),
+                    );
+                    x += w;
+                }
+                y += h;
+            }
+            // 테두리: 바깥 틀 + 행·열 구분선
+            let painter = ui.painter();
+            let border = ui.visuals().widgets.noninteractive.bg_stroke;
+            painter.rect_stroke(outer, 0.0, border, egui::StrokeKind::Inside);
+            let mut y = rect.top();
+            for &h in &heights[..heights.len() - 1] {
+                y += h;
+                painter.hline(outer.x_range(), y, border);
+            }
+            let mut x = rect.left();
+            for &w in &widths[..widths.len() - 1] {
+                x += w;
+                painter.vline(x, outer.y_range(), border);
+            }
+        });
 }
 
-fn table_cell(
-    ui: &mut egui::Ui,
+/// 셀 내용 레이아웃. `wrap`은 줄바꿈 폭(무한대면 줄바꿈 없음).
+fn cell_galley(
+    ui: &egui::Ui,
     cell: &Inlines,
-    align: Option<&markdown::Align>,
     head: bool,
     style: &Style,
-) {
-    let layout = match align {
-        Some(markdown::Align::Center) => Layout::top_down(Align::Center),
-        Some(markdown::Align::Right) => Layout::top_down(Align::Max),
-        _ => Layout::top_down(Align::Min),
-    };
-    ui.with_layout(layout, |ui| {
-        let mut job = inline_job(ui, cell, style.body, head, style);
-        // 첫 프레임의 좁은 열 폭에 갇히지 않게 셀 안에서는 줄바꿈하지 않는다.
-        job.wrap.max_width = f32::INFINITY;
-        ui.add(egui::Label::new(job).extend());
-    });
+    wrap: f32,
+) -> Arc<egui::Galley> {
+    let mut job = inline_job(ui, cell, style.body, head, style);
+    job.wrap.max_width = wrap;
+    ui.fonts_mut(|f| f.layout_job(job))
+}
+
+/// 열마다 글자 영역의 최대 폭. 다 들어가면 내용 폭 그대로, 넘치면 **내용 폭에 비례해** 줄인다
+/// (칸마다 접히는 줄 수가 비슷해져 행 높이가 낮다 — 브라우저 자동 표 레이아웃과 같은 방향).
+/// 열 하나는 [`MIN_COLUMN_WIDTH`]와 내용 폭 중 작은 값보다 좁히지 않으며, 그래도 넘치면 가로 스크롤한다.
+/// `extra`는 열마다 더해지는 여백·테두리.
+fn column_widths(natural: &[f32], available: f32, extra: f32) -> Vec<f32> {
+    let n = natural.len();
+    let budget = available - extra * n as f32;
+    if natural.iter().sum::<f32>() <= budget {
+        return natural.to_vec();
+    }
+    let floor = |i: usize| natural[i].min(MIN_COLUMN_WIDTH);
+    // 비례로 줄이면 하한보다 좁아지는 열은 하한에 고정하고, 남은 폭을 나머지 열에 다시 비례 배분한다.
+    let mut fixed = vec![false; n];
+    loop {
+        let fixed_sum: f32 = (0..n).filter(|&i| fixed[i]).map(floor).sum();
+        let free_sum: f32 = (0..n).filter(|&i| !fixed[i]).map(|i| natural[i]).sum();
+        let scale = if free_sum > 0.0 {
+            ((budget - fixed_sum) / free_sum).max(0.0)
+        } else {
+            0.0
+        };
+        let mut changed = false;
+        for i in 0..n {
+            if !fixed[i] && natural[i] * scale < floor(i) {
+                fixed[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return (0..n)
+                .map(|i| {
+                    if fixed[i] {
+                        floor(i)
+                    } else {
+                        natural[i] * scale
+                    }
+                })
+                .collect();
+        }
+    }
+}
+
+/// 셀 안 글자의 왼쪽 여백: 왼쪽·기본 0, 가운데는 남는 폭의 절반, 오른쪽은 남는 폭 전부.
+fn align_offset(align: Option<markdown::Align>, inner: f32, text: f32) -> f32 {
+    let spare = (inner - text).max(0.0);
+    match align {
+        Some(markdown::Align::Center) => (spare / 2.0).round(),
+        Some(markdown::Align::Right) => spare,
+        _ => 0.0,
+    }
 }
 
 /// 인라인 스팬 → `LayoutJob`. `all_strong`이면 전체를 진한 색으로(제목·표 머리글).
@@ -853,6 +1001,140 @@ mod tests {
         // 블록 사이 빈 줄은 강조 없음, 커서 정보가 없어도 없음
         assert_eq!(backgrounds(&mut state, Some(4)), 0);
         assert_eq!(backgrounds(&mut state, None), 0);
+    }
+
+    /// 헤드리스 프레임: 600×800 창에 미리보기를 그리고 그려진 글자를 (글자, 위치, 크기, 줄 수)로 돌려준다.
+    fn text_shapes(ctx: &egui::Context, doc: &Document) -> Vec<(String, Pos2, egui::Vec2, usize)> {
+        let mut state = PreviewState::new(7);
+        let mut shapes = Vec::new();
+        // 첫 프레임은 스크롤 영역 크기를 재느라 위치가 다를 수 있으므로 두 번째 프레임을 본다
+        for _ in 0..2 {
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 800.0))),
+                ..Default::default()
+            };
+            let mut full = ctx.run_ui(raw, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    state.show(ui, doc, 1.0, &Palette::light(), None);
+                });
+            });
+            full.textures_delta.clear();
+            shapes = full
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) => Some((
+                        t.galley.text().to_owned(),
+                        t.pos,
+                        t.galley.size(),
+                        t.galley.rows.len(),
+                    )),
+                    _ => None,
+                })
+                .collect();
+        }
+        shapes
+    }
+
+    fn find<'a>(
+        shapes: &'a [(String, Pos2, egui::Vec2, usize)],
+        text: &str,
+    ) -> &'a (String, Pos2, egui::Vec2, usize) {
+        shapes
+            .iter()
+            .find(|s| s.0 == text)
+            .unwrap_or_else(|| panic!("{text:?} 글자가 없음"))
+    }
+
+    #[test]
+    fn column_widths_fit_or_shrink_in_proportion() {
+        // 다 들어가면 그대로
+        assert_eq!(column_widths(&[50.0, 80.0], 400.0, 21.0), vec![50.0, 80.0]);
+        // 넘치면 내용 폭에 비례: 남은 폭 500 - 63 = 437, 첫 열은 비례로 줄이면 하한(60)보다 좁아져 60에 고정,
+        // 나머지 377을 400 : 900으로 나눈다
+        let w = column_widths(&[60.0, 400.0, 900.0], 500.0, 21.0);
+        assert_eq!(w[0], 60.0);
+        assert!((w[1] - 377.0 * 4.0 / 13.0).abs() < 0.01, "{w:?}");
+        assert!((w[2] - 377.0 * 9.0 / 13.0).abs() < 0.01, "{w:?}");
+        // 하한보다 좁은 내용은 내용 폭 그대로
+        let w = column_widths(&[20.0, 2000.0], 300.0, 21.0);
+        assert_eq!(w[0], 20.0);
+        assert!((w[1] - (300.0 - 42.0 - 20.0)).abs() < 0.01, "{w:?}");
+        // 아무리 좁아도 하한 이하로는 줄이지 않는다 (가로 스크롤)
+        let w = column_widths(&[300.0; 8], 400.0, 21.0);
+        assert!(w.iter().all(|&x| x == MIN_COLUMN_WIDTH), "{w:?}");
+    }
+
+    #[test]
+    fn align_offset_follows_column_alignment() {
+        use markdown::Align as A;
+        assert_eq!(align_offset(Some(A::Left), 100.0, 40.0), 0.0);
+        assert_eq!(align_offset(None, 100.0, 40.0), 0.0);
+        assert_eq!(align_offset(Some(A::Center), 100.0, 40.0), 30.0);
+        assert_eq!(align_offset(Some(A::Right), 100.0, 40.0), 60.0);
+        // 글자가 더 넓으면 여백 없음
+        assert_eq!(align_offset(Some(A::Right), 100.0, 140.0), 0.0);
+    }
+
+    #[test]
+    fn long_code_line_stays_on_one_row() {
+        let ctx = egui::Context::default();
+        let long = "x".repeat(400);
+        let shapes = text_shapes(&ctx, &doc(&format!("```\n{long}\nshort\n```\n")));
+        let code = shapes
+            .iter()
+            .find(|s| s.0.starts_with("xxxx"))
+            .expect("코드 글자가 없음");
+        assert_eq!(code.3, 2, "코드 두 줄이 접히지 않고 두 행이어야 함");
+        assert!(
+            code.2.x > 600.0,
+            "긴 줄이 창 폭보다 넓게 그려져야 함 (가로 스크롤)"
+        );
+    }
+
+    #[test]
+    fn table_cells_follow_column_alignment() {
+        let ctx = egui::Context::default();
+        let shapes = text_shapes(
+            &ctx,
+            &doc(
+                "| 왼쪽 정렬 열 | 가운데 정렬 열 | 오른쪽 정렬 열 |\n| :--- | :---: | ---: |\n| a | b | c |\n",
+            ),
+        );
+        let (h0, h1, h2) = (
+            find(&shapes, "왼쪽 정렬 열"),
+            find(&shapes, "가운데 정렬 열"),
+            find(&shapes, "오른쪽 정렬 열"),
+        );
+        let (a, b, c) = (find(&shapes, "a"), find(&shapes, "b"), find(&shapes, "c"));
+        // 머리글이 열에서 가장 넓으므로 머리글 글자 범위 = 열의 글자 영역
+        assert!((a.1.x - h0.1.x).abs() < 1.0, "왼쪽 정렬");
+        let center = |s: &(String, Pos2, egui::Vec2, usize)| s.1.x + s.2.x / 2.0;
+        assert!((center(b) - center(h1)).abs() < 1.0, "가운데 정렬");
+        let right = |s: &(String, Pos2, egui::Vec2, usize)| s.1.x + s.2.x;
+        assert!((right(c) - right(h2)).abs() < 1.0, "오른쪽 정렬");
+        // 머리글 행이 본문 행보다 위
+        assert!(h0.1.y < a.1.y);
+    }
+
+    #[test]
+    fn wide_table_wraps_long_cells_within_width() {
+        let ctx = egui::Context::default();
+        let long = "아주 긴 설명 문장이 들어가는 열입니다 ".repeat(8);
+        let shapes = text_shapes(
+            &ctx,
+            &doc(&format!(
+                "| 항목 | 설명 |\n| --- | --- |\n| 짧음 | {} |\n",
+                long.trim()
+            )),
+        );
+        let cell = shapes
+            .iter()
+            .find(|s| s.0.starts_with("아주 긴"))
+            .expect("긴 셀이 없음");
+        assert!(cell.3 > 1, "긴 셀은 여러 줄로 접혀야 함");
+        assert!(cell.1.x + cell.2.x <= 600.0, "표가 창 폭 안에 들어와야 함");
+        assert_eq!(find(&shapes, "짧음").3, 1);
     }
 
     #[test]

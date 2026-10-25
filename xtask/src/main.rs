@@ -117,11 +117,12 @@ const SCENARIOS: &[Scenario] = &[
         name: "markdown",
         package: "my-notepad",
         args: &[],
-        description: "P3-02~ Markdown 미리보기 (gfm_all.md·korean.md·docs/PLAN.md 사본을 분할 모드 탭으로 열기)",
+        description: "P3-02~ Markdown 미리보기 (gfm_all.md·korean.md·tables.md·docs/PLAN.md 사본을 분할 모드 탭으로 열기)",
         wait: false,
         work_files: &[
             "tests/fixtures/markdown/gfm_all.md",
             "tests/fixtures/markdown/korean.md",
+            "tests/fixtures/markdown/tables.md",
             "docs/PLAN.md",
         ],
     },
