@@ -275,6 +275,8 @@ fn source_in(
     palette: &Palette,
 ) -> bool {
     let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
+    // `.md` 문서는 소스에 Markdown 구문 색상 (P3-10)
+    tab.editor.set_markdown_syntax(tab.doc.is_markdown());
     tab.editor
         .show(&mut child, &mut tab.doc, options, palette)
         .highlight_exceeded
