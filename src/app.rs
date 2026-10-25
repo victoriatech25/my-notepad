@@ -1381,6 +1381,7 @@ impl eframe::App for NotepadApp {
         };
         let zoom = self.zoom;
         let mut switch_to_edit = false;
+        let mut switch_to_split = false;
         let mut edit_large = None;
         let mut highlight_exceeded = false;
         egui::CentralPanel::default()
@@ -1416,19 +1417,26 @@ impl eframe::App for NotepadApp {
                         }
                     }
                     if tab.viewer.is_none() {
-                        highlight_exceeded = doc_view::show(
+                        let output = doc_view::show(
                             ui,
                             tab,
                             &mut self.split_ratio,
+                            self.scroll_sync,
                             &options,
                             zoom,
                             &palette,
                         );
+                        highlight_exceeded = output.highlight_exceeded;
+                        switch_to_split = output.switch_to_split;
                     }
                 }
             });
         if switch_to_edit {
             self.tabs.active_mut().switch_to_editor();
+        }
+        if switch_to_split {
+            // 미리보기 블록 더블클릭 → 소스로 이동하므로 분할로 바꾼다 (P3-08)
+            self.set_view_mode(ViewMode::Split);
         }
         if highlight_exceeded {
             self.show_notice(
