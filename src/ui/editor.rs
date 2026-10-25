@@ -30,6 +30,7 @@ use crate::core::buffer::{byte_to_char_offset, char_to_byte_offset};
 use crate::core::document::Document;
 use crate::core::highlight::{HighlightOptions, find_matches, target_word};
 use crate::core::line_ending::normalize_to_lf;
+use crate::core::markdown::{EditMap, SyntaxKind, SyntaxSpans, syntax_spans};
 use crate::ui::theme::Palette;
 
 /// 에디터 표시 옵션.
@@ -89,6 +90,40 @@ pub struct EditorState {
     pending_top_line: Option<f32>,
     /// 마지막으로 그린 레이아웃과 화면 맨 위의 galley y — 화면 맨 위 줄 계산용.
     last_view: Option<LastView>,
+    /// Markdown 구문 색상을 칠할지 (`.md` 문서, P3-10)
+    markdown_syntax: bool,
+    /// 마지막으로 계산한 구문 색상과 아직 반영하지 않은 편집이 처음 보인 시각
+    syntax: Option<Arc<SyntaxState>>,
+    syntax_dirty_since: Option<f64>,
+}
+
+/// 구문 색상 구간과 그 기준 텍스트 (편집 중에는 기준 텍스트와의 차이만큼 구간을 옮겨 쓴다).
+#[derive(Debug)]
+struct SyntaxState {
+    revision: u64,
+    text: String,
+    spans: SyntaxSpans,
+}
+
+/// 구문 색상을 다시 계산하기까지 기다리는 시간 (초) — 미리보기 갱신과 같다.
+const SYNTAX_DEBOUNCE: f64 = 0.15;
+/// 이보다 큰 문서는 구문 색상을 칠하지 않는다 (ADR 0001: 1MB 초과 편집은 느림 안내 구간).
+pub const SYNTAX_MAX_BYTES: usize = 1 << 20;
+/// 구문 색상은 지난 프레임에 보인 부분 앞뒤로 이만큼(바이트)만 칠한다 — 구간(섹션)이 많으면 egui가
+/// 레이아웃 캐시를 찾을 때마다 섹션을 모두 훑어 1MB 문서 입력이 느려진다 (P3-10 측정).
+const SYNTAX_WINDOW_MARGIN: usize = 16 * 1024;
+
+/// 구문 색상 종류별 색 (팔레트에서).
+#[derive(Debug, Clone, Copy)]
+struct SyntaxColors {
+    heading: egui::Color32,
+    emphasis: egui::Color32,
+    strong: egui::Color32,
+    code: egui::Color32,
+    link: egui::Color32,
+    list: egui::Color32,
+    quote: egui::Color32,
+    meta: egui::Color32,
 }
 
 #[derive(Debug)]
@@ -115,7 +150,66 @@ impl EditorState {
             highlight: None,
             pending_top_line: None,
             last_view: None,
+            markdown_syntax: false,
+            syntax: None,
+            syntax_dirty_since: None,
         }
+    }
+
+    /// Markdown 구문 색상을 켜고 끈다 (`.md` 문서의 소스 보기에서 켠다).
+    pub fn set_markdown_syntax(&mut self, on: bool) {
+        self.markdown_syntax = on;
+        if !on {
+            self.syntax = None;
+            self.syntax_dirty_since = None;
+        }
+    }
+
+    /// 구문 색상을 칠할 바이트 범위: 지난 프레임에 보인 부분 앞뒤로 [`SYNTAX_WINDOW_MARGIN`]씩.
+    fn syntax_window(&self, doc: &Document) -> Range<usize> {
+        let text = doc.text();
+        let Some(view) = &self.last_view else {
+            return 0..text.len().min(2 * SYNTAX_WINDOW_MARGIN);
+        };
+        let top = view.top_in_galley.max(0.0);
+        let first = view.galley.cursor_from_pos(egui::vec2(0.0, top)).index.0;
+        let last = view
+            .galley
+            .cursor_from_pos(egui::vec2(f32::INFINITY, top + view.view_height))
+            .index
+            .0;
+        let (start, end) = char_range_to_bytes(text, first, last);
+        start.saturating_sub(SYNTAX_WINDOW_MARGIN)..(end + SYNTAX_WINDOW_MARGIN).min(text.len())
+    }
+
+    /// 구문 색상을 문서에 맞춘다. 편집이 멈추고 [`SYNTAX_DEBOUNCE`]가 지나면 다시 계산한다.
+    fn update_syntax(&mut self, doc: &Document, ctx: &egui::Context) -> Option<Arc<SyntaxState>> {
+        if !self.markdown_syntax || doc.text().len() > SYNTAX_MAX_BYTES {
+            self.syntax = None;
+            return None;
+        }
+        let now = ctx.input(|i| i.time);
+        let stale = self
+            .syntax
+            .as_ref()
+            .is_none_or(|s| s.revision != doc.revision());
+        if stale {
+            let since = *self.syntax_dirty_since.get_or_insert(now);
+            let waited = now - since;
+            if self.syntax.is_none() || waited >= SYNTAX_DEBOUNCE {
+                self.syntax = Some(Arc::new(SyntaxState {
+                    revision: doc.revision(),
+                    text: doc.text().to_owned(),
+                    spans: syntax_spans(doc.text()),
+                }));
+                self.syntax_dirty_since = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    SYNTAX_DEBOUNCE - waited,
+                ));
+            }
+        }
+        self.syntax.clone()
     }
 
     /// `TextEdit` 위젯 ID.
@@ -340,18 +434,31 @@ impl EditorState {
             .filter(|h| !h.ranges.is_empty() && h.text_len == self.scratch.len())
             .map(|h| Arc::clone(&h.ranges));
         let mark_color = palette.smart_highlight;
+        let syntax = self.update_syntax(doc, &ctx);
+        let window = self.syntax_window(doc);
         let scratch = &mut self.scratch;
         // 기본 레이아웃과 같되, 자동 줄바꿈을 끄면 줄바꿈 폭을 무한대로 한다
         // (`desired_width(INFINITY)`만으로는 보이는 폭에서 접혀 가로 스크롤이 생기지 않는다).
         let wrap = options.word_wrap;
         let font = options.font.clone();
+        let colors = SyntaxColors {
+            heading: palette.md_heading,
+            emphasis: palette.md_emphasis,
+            strong: palette.md_strong,
+            code: palette.md_code,
+            link: palette.md_link,
+            list: palette.md_list,
+            quote: palette.md_quote,
+            meta: palette.md_meta,
+        };
         let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
-            let mut job = LayoutJob::simple(
-                buf.as_str().to_owned(),
-                font.clone(),
-                ui.visuals().text_color(),
-                if wrap { wrap_width } else { f32::INFINITY },
-            );
+            let text = buf.as_str();
+            let color = ui.visuals().text_color();
+            let mut job = match &syntax {
+                Some(syntax) => syntax_job(text, syntax, &window, &font, color, &colors),
+                None => LayoutJob::simple(text.to_owned(), font.clone(), color, f32::INFINITY),
+            };
+            job.wrap.max_width = if wrap { wrap_width } else { f32::INFINITY };
             job.keep_trailing_whitespace = true;
             ui.fonts_mut(|f| f.layout_job(job))
         };
@@ -512,6 +619,76 @@ impl EditorState {
         self.scratch.push_str(doc.text());
         self.synced_revision = Some(doc.revision());
     }
+}
+
+/// 구문 색상을 칠한 레이아웃 (`window` 바이트 범위 안의 구간만). 텍스트가 계산 기준과 다르면
+/// (아직 다시 계산하기 전의 편집) 구간 위치를 편집에 맞게 옮겨 쓴다.
+fn syntax_job(
+    text: &str,
+    syntax: &SyntaxState,
+    window: &Range<usize>,
+    font: &FontId,
+    color: egui::Color32,
+    colors: &SyntaxColors,
+) -> LayoutJob {
+    let edit = (text != syntax.text).then(|| EditMap::new(&syntax.text, text));
+    let map = |pos: usize| edit.as_ref().map_or(pos, |m| m.map(pos));
+    let base = egui::TextFormat::simple(font.clone(), color);
+    let mut job = LayoutJob::default();
+    let mut pos = 0;
+    let first = syntax
+        .spans
+        .partition_point(|(range, _)| map(range.end) <= window.start);
+    for (range, kind) in &syntax.spans[first..] {
+        let (start, end) = (map(range.start), map(range.end));
+        if start >= window.end {
+            break;
+        }
+        if end > text.len() || start < pos || start >= end {
+            continue;
+        }
+        if start > pos {
+            job.append(&text[pos..start], 0.0, base.clone());
+        }
+        let mut format = base.clone();
+        match kind {
+            SyntaxKind::Heading => format.color = colors.heading,
+            SyntaxKind::Emphasis => {
+                format.color = colors.emphasis;
+                format.italics = true;
+            }
+            SyntaxKind::Strong => format.color = colors.strong,
+            SyntaxKind::Strike => {
+                format.color = colors.meta;
+                format.strikethrough = egui::Stroke::new(1.0, colors.meta);
+            }
+            SyntaxKind::Code => format.color = colors.code,
+            SyntaxKind::Link => format.color = colors.link,
+            SyntaxKind::ListMarker => format.color = colors.list,
+            SyntaxKind::QuoteMarker => format.color = colors.quote,
+            SyntaxKind::Meta => format.color = colors.meta,
+        }
+        job.append(&text[start..end], 0.0, format);
+        pos = end;
+    }
+    if pos < text.len() || job.sections.is_empty() {
+        job.append(&text[pos..], 0.0, base);
+    }
+    job
+}
+
+/// 문자 인덱스 두 개를 한 번 훑어 바이트 위치로 바꾼다 (`first <= last`, 넘으면 텍스트 끝).
+fn char_range_to_bytes(text: &str, first: usize, last: usize) -> (usize, usize) {
+    let mut start = text.len();
+    for (n, (byte, _)) in text.char_indices().enumerate() {
+        if n == first {
+            start = byte;
+        }
+        if n == last {
+            return (start, byte);
+        }
+    }
+    (start.min(text.len()), text.len())
 }
 
 /// 소스 줄(0부터)의 galley 안 위·아래 y. 줄이 없으면 galley 끝.
@@ -821,6 +998,181 @@ mod tests {
             repeat: false,
             modifiers,
         }
+    }
+
+    /// 헤드리스 프레임 (시각 지정): 에디터 본문 galley의 `needle` 첫 글자 색을 돌려준다.
+    fn color_at(
+        ctx: &egui::Context,
+        editor: &mut EditorState,
+        doc: &mut Document,
+        events: Vec<Event>,
+        time: f64,
+        needle: &str,
+    ) -> Option<egui::Color32> {
+        let raw = RawInput {
+            events,
+            time: Some(time),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut full = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                editor.show(ui, doc, &options(), &Palette::light());
+            });
+        });
+        full.textures_delta.clear();
+        full.shapes.iter().find_map(|c| match &c.shape {
+            egui::Shape::Text(t) => {
+                let text = t.galley.text();
+                let at = text.find(needle)?;
+                t.galley
+                    .job
+                    .sections
+                    .iter()
+                    .find(|s| s.byte_range.start.0 <= at && at < s.byte_range.end.0)
+                    .map(|s| s.format.color)
+            }
+            _ => None,
+        })
+    }
+
+    fn markdown_doc(text: &str) -> Document {
+        let mut doc = new_doc();
+        doc.set_text(text);
+        doc
+    }
+
+    #[test]
+    fn markdown_source_gets_syntax_colors() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(1);
+        editor.set_markdown_syntax(true);
+        let mut doc =
+            markdown_doc("# 제목\n\n본문 **굵게** `코드` [링크](a.md)\n\n- 항목\n> 인용\n");
+        let p = Palette::light();
+        let mut at = |needle| color_at(&ctx, &mut editor, &mut doc, vec![], 1.0, needle);
+        assert_eq!(at("# 제목"), Some(p.md_heading));
+        assert_eq!(at("**굵게**"), Some(p.md_strong));
+        assert_eq!(at("`코드`"), Some(p.md_code));
+        assert_eq!(at("[링크]"), Some(p.md_link));
+        assert_eq!(at("- 항목"), Some(p.md_list));
+        assert_eq!(at("> 인용"), Some(p.md_quote));
+        assert_ne!(at("본문"), Some(p.md_heading));
+
+        // 끄면 모두 본문 색
+        editor.set_markdown_syntax(false);
+        let plain = color_at(&ctx, &mut editor, &mut doc, vec![], 1.1, "# 제목");
+        let body = color_at(&ctx, &mut editor, &mut doc, vec![], 1.2, "본문");
+        assert_eq!(plain, body);
+    }
+
+    #[test]
+    fn syntax_colors_follow_edits_until_recomputed() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(1);
+        editor.set_markdown_syntax(true);
+        let mut doc = markdown_doc("앞 문단\n\n**굵게** 뒤\n");
+        let p = Palette::light();
+        assert_eq!(
+            color_at(&ctx, &mut editor, &mut doc, vec![], 1.0, "**굵게**"),
+            Some(p.md_strong)
+        );
+        // 앞쪽에 글자를 넣은 직후(다시 계산하기 전)에도 굵게 색은 같은 글자에 붙어 있다
+        doc.set_text("앞쪽에 넣은 글자 문단\n\n**굵게** 뒤\n");
+        assert_eq!(
+            color_at(&ctx, &mut editor, &mut doc, vec![], 1.05, "**굵게**"),
+            Some(p.md_strong)
+        );
+        assert_ne!(
+            color_at(&ctx, &mut editor, &mut doc, vec![], 1.06, "앞쪽"),
+            Some(p.md_strong)
+        );
+        // 디바운스가 지나면 새로 쓴 제목도 칠해진다
+        doc.set_text("# 새 제목\n\n**굵게** 뒤\n");
+        color_at(&ctx, &mut editor, &mut doc, vec![], 1.1, "새 제목");
+        assert_eq!(
+            color_at(
+                &ctx,
+                &mut editor,
+                &mut doc,
+                vec![],
+                1.1 + SYNTAX_DEBOUNCE + 0.01,
+                "# 새"
+            ),
+            Some(p.md_heading)
+        );
+    }
+
+    /// 1MB `.md` 구문 색상 켠 상태의 입력 프레임 시간 —
+    /// `cargo test --release --lib -- --ignored --nocapture markdown_syntax_frame_time`
+    #[test]
+    #[ignore = "성능 측정 (릴리스 빌드로 수동 실행)"]
+    fn markdown_syntax_frame_time_1mb() {
+        use std::time::Instant;
+
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/markdown");
+        let unit = format!(
+            "{}\n{}\n",
+            std::fs::read_to_string(format!("{dir}/gfm_all.md")).unwrap(),
+            std::fs::read_to_string(format!("{dir}/korean.md")).unwrap()
+        );
+        let mut text = String::new();
+        while text.len() + unit.len() <= SYNTAX_MAX_BYTES {
+            text.push_str(&unit);
+        }
+        let ctx = egui::Context::default();
+        let measure = |syntax: bool| {
+            let mut doc = markdown_doc(&text);
+            let mut editor = EditorState::new(31);
+            editor.set_markdown_syntax(syntax);
+            editor.request_focus();
+            let options = options();
+            let clock = Instant::now();
+            let timed = |editor: &mut EditorState, doc: &mut Document, events: Vec<Event>| {
+                let started = Instant::now();
+                let raw = RawInput {
+                    events,
+                    time: Some(clock.elapsed().as_secs_f64()),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 900.0),
+                    )),
+                    ..Default::default()
+                };
+                let mut full = ctx.run_ui(raw, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        editor.show(ui, doc, &options, &Palette::light());
+                    });
+                });
+                full.textures_delta.clear();
+                let _ = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
+                started.elapsed().as_secs_f64() * 1000.0
+            };
+            for _ in 0..3 {
+                timed(&mut editor, &mut doc, vec![]);
+            }
+            // 연속 입력 (디바운스 안) 30프레임 + 멈춘 뒤 다시 계산하는 프레임
+            let typing: Vec<f64> = (0..30)
+                .map(|i| {
+                    let t = if i % 2 == 0 { "가" } else { "a" };
+                    timed(&mut editor, &mut doc, vec![Event::Text(t.into())])
+                })
+                .collect();
+            std::thread::sleep(std::time::Duration::from_secs_f64(SYNTAX_DEBOUNCE + 0.02));
+            let recompute = timed(&mut editor, &mut doc, vec![]);
+            let avg = typing.iter().sum::<f64>() / typing.len() as f64;
+            let max = typing.iter().copied().fold(0.0, f64::max);
+            (avg, max, recompute)
+        };
+        let (plain_avg, plain_max, _) = measure(false);
+        let (avg, max, recompute) = measure(true);
+        println!(
+            "1MB .md({} B) 입력 프레임: 색상 끔 평균 {plain_avg:.1}ms·최대 {plain_max:.1}ms / 색상 켬 평균 {avg:.1}ms·최대 {max:.1}ms, 멈춘 뒤 다시 계산 프레임 {recompute:.1}ms",
+            text.len()
+        );
     }
 
     /// 포커스를 준 에디터와 문서를 만든다.

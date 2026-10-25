@@ -40,6 +40,15 @@ pub struct Palette {
     pub selection_stroke: Color32,
     /// 메뉴에서 선택된 항목 왼쪽의 점 `•` (`menu_selected_marker`)
     pub menu_selected_marker: Color32,
+    /// 소스 모드 Markdown 구문 색상 (P3-10): 제목, 기울임, 굵게, 코드, 링크, 목록 기호, 인용 기호, 메타(HTML·Front Matter)
+    pub md_heading: Color32,
+    pub md_emphasis: Color32,
+    pub md_strong: Color32,
+    pub md_code: Color32,
+    pub md_link: Color32,
+    pub md_list: Color32,
+    pub md_quote: Color32,
+    pub md_meta: Color32,
 }
 
 impl Palette {
@@ -73,6 +82,14 @@ impl Palette {
             selection_bg: Color32::from_rgb(0x26, 0x46, 0x69),
             selection_stroke: Color32::from_rgb(0xE0, 0xEC, 0xF8),
             menu_selected_marker: Color32::from_rgb(0x4C, 0xC3, 0x8A),
+            md_heading: Color32::from_rgb(0x56, 0x9C, 0xD6),
+            md_emphasis: Color32::from_rgb(0xC5, 0x86, 0xC0),
+            md_strong: Color32::from_rgb(0xE8, 0xE8, 0xE8),
+            md_code: Color32::from_rgb(0xCE, 0x91, 0x78),
+            md_link: Color32::from_rgb(0x4E, 0xC9, 0xB0),
+            md_list: Color32::from_rgb(0xD7, 0xBA, 0x7D),
+            md_quote: Color32::from_rgb(0x8B, 0x94, 0x9E),
+            md_meta: Color32::from_gray(0x80),
         }
     }
 
@@ -97,6 +114,14 @@ impl Palette {
             selection_bg: Color32::from_rgb(0xCE, 0xDF, 0xF2),
             selection_stroke: Color32::from_rgb(0x1A, 0x36, 0x5D),
             menu_selected_marker: Color32::from_rgb(0x1E, 0x8E, 0x3E),
+            md_heading: Color32::from_rgb(0x1E, 0x5A, 0xA8),
+            md_emphasis: Color32::from_rgb(0x7B, 0x3F, 0xA0),
+            md_strong: Color32::from_rgb(0x10, 0x10, 0x10),
+            md_code: Color32::from_rgb(0xA3, 0x4A, 0x1D),
+            md_link: Color32::from_rgb(0x0B, 0x7A, 0x6B),
+            md_list: Color32::from_rgb(0xB0, 0x60, 0x00),
+            md_quote: Color32::from_rgb(0x6A, 0x73, 0x7D),
+            md_meta: Color32::from_gray(0x80),
         }
     }
 }

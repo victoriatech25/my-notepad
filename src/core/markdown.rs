@@ -9,6 +9,8 @@
 //! - [`MarkdownCache`]는 문서 버전(`revision`)이 바뀔 때만 다시 파싱한다 (§3.8-2 매 프레임 재파싱 금지).
 //!   [`BACKGROUND_PARSE_BYTES`]를 넘는 문서는 작업 스레드에서 파싱하고, 끝날 때까지 이전 결과를 쓴다 (P3-05).
 //!
+//! - 소스 모드 구문 색상([`syntax_spans`])도 같은 파서의 위치 정보로 계산한다 (P3-10, `syntect` 없이).
+//!
 //! 원시 HTML은 실행하지 않고 원문 그대로 보관하며(§3.8-4), Mermaid·수식은 일반 코드 블록·텍스트로 남는다
 //! (미지원 라벨은 렌더러가 붙인다).
 
@@ -346,6 +348,184 @@ impl MarkdownCache {
     pub fn invalidate(&mut self) {
         self.key = None;
     }
+}
+
+/// 소스 모드 구문 색상 종류 (PLAN.md §3.8-6, P3-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SyntaxKind {
+    /// 제목 줄 전체 (`#` 포함)
+    Heading,
+    /// 기울임
+    Emphasis,
+    /// 굵게
+    Strong,
+    /// 취소선
+    Strike,
+    /// 인라인 코드·코드 블록 (펜스 포함)
+    Code,
+    /// 링크·이미지 (`[글자](주소)` 전체)
+    Link,
+    /// 목록 기호 (`-`, `*`, `1.`, `[ ]`)
+    ListMarker,
+    /// 인용 기호 `>`
+    QuoteMarker,
+    /// Front Matter·원시 HTML·각주 참조
+    Meta,
+}
+
+/// 구문 색상 구간: 바이트 범위 (오름차순, 겹치지 않음).
+pub type SyntaxSpans = Vec<(Range<usize>, SyntaxKind)>;
+
+/// 소스 텍스트의 구문 색상 구간을 계산한다. 안쪽 요소가 바깥 요소보다 우선한다 (예: 제목 안의 인라인 코드).
+pub fn syntax_spans(text: &str) -> SyntaxSpans {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    options.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
+    // 바이트마다 종류를 칠한다 (나중에 칠한 안쪽 요소가 이긴다) — 0 = 없음
+    let mut paint = vec![0u8; text.len()];
+    let mut fill = |range: Range<usize>, kind: SyntaxKind| {
+        let end = range.end.min(text.len());
+        if range.start < end {
+            paint[range.start..end].fill(kind as u8 + 1);
+        }
+    };
+    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Heading { .. }) => fill(range, SyntaxKind::Heading),
+            Event::Start(Tag::Emphasis) => fill(range, SyntaxKind::Emphasis),
+            Event::Start(Tag::Strong) => fill(range, SyntaxKind::Strong),
+            Event::Start(Tag::Strikethrough) => fill(range, SyntaxKind::Strike),
+            Event::Start(Tag::CodeBlock(_)) | Event::Code(_) => fill(range, SyntaxKind::Code),
+            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => fill(range, SyntaxKind::Link),
+            Event::Start(Tag::MetadataBlock(_) | Tag::HtmlBlock)
+            | Event::InlineHtml(_)
+            | Event::FootnoteReference(_) => fill(range, SyntaxKind::Meta),
+            Event::Start(Tag::Item) => {
+                // 항목 맨 앞의 기호만 (`-`, `*`, `+`, `1.`, `1)`)
+                let rest = &text[range.clone()];
+                let len = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+                fill(range.start..range.start + len, SyntaxKind::ListMarker);
+            }
+            Event::TaskListMarker(_) => {
+                // `[ ]`·`[x]` — 범위가 표시만 가리키므로 앞뒤 대괄호까지 찾는다
+                let rest = &text[range.start..];
+                let len = rest.find(']').map_or(rest.len(), |i| i + 1);
+                fill(range.start..range.start + len, SyntaxKind::ListMarker);
+            }
+            Event::Start(Tag::BlockQuote(_)) => {
+                // 인용 범위 안 줄마다 앞쪽 `>`들
+                let mut line_start = range.start;
+                for line in text[range.clone()].split_inclusive('\n') {
+                    let mut i = 0;
+                    for (j, c) in line.char_indices() {
+                        match c {
+                            '>' => i = j + 1,
+                            ' ' | '\t' => {}
+                            _ => break,
+                        }
+                    }
+                    if i > 0 {
+                        fill(line_start..line_start + i, SyntaxKind::QuoteMarker);
+                    }
+                    line_start += line.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    let kinds = [
+        SyntaxKind::Heading,
+        SyntaxKind::Emphasis,
+        SyntaxKind::Strong,
+        SyntaxKind::Strike,
+        SyntaxKind::Code,
+        SyntaxKind::Link,
+        SyntaxKind::ListMarker,
+        SyntaxKind::QuoteMarker,
+        SyntaxKind::Meta,
+    ];
+    let mut spans = SyntaxSpans::new();
+    let mut i = 0;
+    while i < paint.len() {
+        let value = paint[i];
+        let start = i;
+        while i < paint.len() && paint[i] == value {
+            i += 1;
+        }
+        if value != 0 {
+            spans.push((start..i, kinds[value as usize - 1]));
+        }
+    }
+    spans
+}
+
+/// 한 군데 편집된 두 텍스트 사이의 위치 대응 (앞·뒤 공통 부분 기준).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditMap {
+    /// 앞쪽 공통 부분 길이
+    prefix: usize,
+    /// 뒤쪽 공통 부분이 시작하는 위치 (옛 텍스트, 새 텍스트)
+    old_tail: usize,
+    new_tail: usize,
+}
+
+impl EditMap {
+    /// `old` → `new`. 경계는 두 텍스트 모두의 글자 경계로 맞춘다.
+    pub fn new(old: &str, new: &str) -> Self {
+        let (o, n) = (old.as_bytes(), new.as_bytes());
+        let mut prefix = o.iter().zip(n).take_while(|(a, b)| a == b).count();
+        while !new.is_char_boundary(prefix) || !old.is_char_boundary(prefix) {
+            prefix -= 1;
+        }
+        let max_suffix = o.len().min(n.len()) - prefix;
+        let mut suffix = o
+            .iter()
+            .rev()
+            .zip(n.iter().rev())
+            .take(max_suffix)
+            .take_while(|(a, b)| a == b)
+            .count();
+        while !new.is_char_boundary(n.len() - suffix) || !old.is_char_boundary(o.len() - suffix) {
+            suffix -= 1;
+        }
+        Self {
+            prefix,
+            old_tail: o.len() - suffix,
+            new_tail: n.len() - suffix,
+        }
+    }
+
+    /// 옛 텍스트 위치 → 새 텍스트 위치. 편집으로 바뀐 곳 안은 새 편집 범위 끝으로.
+    pub fn map(&self, pos: usize) -> usize {
+        if pos <= self.prefix {
+            pos
+        } else if pos >= self.old_tail {
+            pos - self.old_tail + self.new_tail
+        } else {
+            self.new_tail
+        }
+    }
+}
+
+/// `old` 텍스트로 계산한 구간을 한 군데 편집된 `new` 텍스트에 맞게 옮긴다 (다시 계산하기 전까지 색이 흔들리지 않게).
+///
+/// 앞쪽 공통 부분의 구간은 그대로, 뒤쪽 공통 부분의 구간은 길이 차이만큼 옮기고, 편집한 곳에 걸친 구간은
+/// 편집 범위에 맞게 줄이거나 늘린다 ([`EditMap`]).
+pub fn shift_spans(spans: &[(Range<usize>, SyntaxKind)], old: &str, new: &str) -> SyntaxSpans {
+    if old == new {
+        return spans.to_vec();
+    }
+    let map = EditMap::new(old, new);
+    spans
+        .iter()
+        .filter_map(|(range, kind)| {
+            let (start, end) = (map.map(range.start), map.map(range.end));
+            (start < end).then_some((start..end, *kind))
+        })
+        .collect()
 }
 
 type Events<'a> = [(Event<'a>, Range<usize>)];
@@ -734,6 +914,81 @@ mod tests {
                 title: "제목".into()
             }
         );
+    }
+
+    fn kinds_of(text: &str) -> Vec<(&str, SyntaxKind)> {
+        syntax_spans(text)
+            .into_iter()
+            .map(|(r, k)| (&text[r], k))
+            .collect()
+    }
+
+    #[test]
+    fn syntax_spans_mark_markdown_parts() {
+        use SyntaxKind::*;
+        let text = "# 제목 `코드`
+
+**굵게** *기울임* ~~취소~~ [링크](a.md)
+
+- 항목
+1. 번호
+- [x] 끝
+
+> 인용
+> > 중첩
+
+```rs
+fn a() {}
+```
+";
+        let spans = kinds_of(text);
+        let has = |part: &str, kind| spans.contains(&(part, kind));
+        assert!(has("# 제목 ", Heading), "{spans:?}");
+        assert!(has("`코드`", Code), "제목 안의 코드가 이긴다");
+        assert!(has("**굵게**", Strong));
+        assert!(has("*기울임*", Emphasis));
+        assert!(has("~~취소~~", Strike));
+        assert!(has("[링크](a.md)", Link));
+        assert!(has("-", ListMarker));
+        assert!(has("1.", ListMarker));
+        assert!(has("[x]", ListMarker));
+        assert!(has(">", QuoteMarker));
+        assert!(has("> >", QuoteMarker));
+        let code = spans
+            .iter()
+            .find(|(part, kind)| *kind == Code && part.starts_with("```rs"))
+            .map(|(part, _)| *part);
+        assert_eq!(
+            code.map(str::trim_end),
+            Some("```rs\nfn a() {}\n```"),
+            "{spans:?}"
+        );
+        // 구간은 겹치지 않고 오름차순
+        let raw = syntax_spans(text);
+        assert!(raw.windows(2).all(|w| w[0].0.end <= w[1].0.start));
+    }
+
+    #[test]
+    fn shift_spans_follows_one_edit() {
+        let old = "앞 **굵게** 뒤 `코드`
+";
+        let spans = syntax_spans(old);
+        // 앞쪽에 글자를 넣으면 뒤 구간이 그만큼 밀린다
+        let new = "앞앞 **굵게** 뒤 `코드`
+";
+        let shifted = shift_spans(&spans, old, new);
+        assert_eq!(shifted, syntax_spans(new));
+        // 굵게 안에서 지우면 그 구간이 줄어든다
+        let new = "앞 **굵** 뒤 `코드`
+";
+        let shifted = shift_spans(&spans, old, new);
+        assert_eq!(&new[shifted[0].0.clone()], "**굵**");
+        assert_eq!(&new[shifted[1].0.clone()], "`코드`");
+        // 한글 글자 일부만 같은 경우(앞 바이트 공유)에도 글자 경계를 지킨다
+        let old = "가 `a`";
+        let new = "각 `a`";
+        let shifted = shift_spans(&syntax_spans(old), old, new);
+        assert_eq!(&new[shifted[0].0.clone()], "`a`");
     }
 
     #[test]
