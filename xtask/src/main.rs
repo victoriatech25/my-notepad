@@ -20,6 +20,7 @@ struct Scenario {
     wait: bool,
     /// 실행 전에 `target/try-<시나리오>/`로 새로 복사해 인자로 넘길 파일 (저장소 기준 경로).
     /// 검증 중에 저장해도 `tests/fixtures`의 바이트가 바뀌지 않게 한다.
+    /// 폴더를 적으면 같은 이름으로 통째로 복사만 하고 인자로는 넘기지 않는다 (문서가 참조하는 이미지 등).
     work_files: &'static [&'static str],
 }
 
@@ -117,12 +118,14 @@ const SCENARIOS: &[Scenario] = &[
         name: "markdown",
         package: "my-notepad",
         args: &[],
-        description: "P3-02~ Markdown 미리보기 (gfm_all.md·korean.md·tables.md·docs/PLAN.md 사본을 분할 모드 탭으로 열기)",
+        description: "P3-02~ Markdown 미리보기 (gfm_all.md·korean.md·tables.md·images.md(+images/)·docs/PLAN.md 사본을 분할 모드 탭으로 열기)",
         wait: false,
         work_files: &[
             "tests/fixtures/markdown/gfm_all.md",
             "tests/fixtures/markdown/korean.md",
             "tests/fixtures/markdown/tables.md",
+            "tests/fixtures/markdown/images.md",
+            "tests/fixtures/markdown/images",
             "docs/PLAN.md",
         ],
     },
@@ -328,11 +331,30 @@ fn prepare_work_files(root: &Path, scenario: &Scenario) -> Result<Vec<String>, S
             .file_name()
             .ok_or_else(|| format!("파일 이름 없음: {file}"))?;
         let dst = dir.join(name);
+        if src.is_dir() {
+            copy_dir(&src, &dst).map_err(|e| format!("{file} 복사 실패: {e}"))?;
+            continue;
+        }
         std::fs::copy(&src, &dst).map_err(|e| format!("{file} 복사 실패: {e}"))?;
         paths.push(dst.display().to_string());
     }
     println!("  작업 사본: {} ({}개)", dir.display(), paths.len());
     Ok(paths)
+}
+
+/// 폴더를 하위 폴더까지 복사한다.
+fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), to)?;
+        }
+    }
+    Ok(())
 }
 
 /// GUI 앱을 실행한다.

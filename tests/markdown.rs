@@ -222,6 +222,11 @@ fn gfm_all_inline_and_table_details() {
         panic!("Front Matter가 아님");
     };
     assert_eq!(yaml, "title: GFM 전체 요소\ntags: [markdown, test]");
+
+    // 각주 번호는 본문에서 처음 참조한 순서
+    assert_eq!(doc.footnotes, ["1", "note"]);
+    assert_eq!(doc.footnote_number("note"), Some(2));
+    assert_eq!(doc.footnote_number("없음"), None);
 }
 
 #[test]

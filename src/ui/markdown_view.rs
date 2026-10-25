@@ -6,19 +6,36 @@
 //!   (H1 = 2배) + 진한 색, 굵게는 진한 색(굵은 글꼴은 쓰지 않음 — ADR 0002), 블록 사이 한 줄 여백,
 //!   인용은 왼쪽 3px 선 + 흐린 글자, 목록 글머리는 공백 4칸 폭 안에 그린다.
 //! - 최상위 블록마다 그려진 위치([`BlockPos`])를 기록한다 — 스크롤 동기화(P3-08)·가상 스크롤(P3-05)의 기반.
-//! - 코드 블록은 줄을 접지 않고 블록 안에서만 가로 스크롤, 표는 내용에 맞춘 열 폭·넘치면 넓은 열부터 줄바꿈·
-//!   그래도 넘치면 표만 가로 스크롤 (P3-03). 이미지·Front Matter·각주·HTML(P3-04)은 지금은 단순 표시만 한다.
+//! - 코드 블록은 줄을 접지 않고 블록 안에서만 가로 스크롤, 표는 내용에 맞춘 열 폭·넘치면 열을 내용 폭에 비례해
+//!   줄여 줄바꿈·그래도 넘치면 표만 가로 스크롤 (P3-03).
+//! - 이미지(P3-04): 문단 안 이미지는 자기 줄에 그린다. 로컬 파일은 원본 크기(보이는 폭에 맞춰 축소)로,
+//!   디코딩·텍스처는 [`ImageCache`]가 맡는다. 원격 이미지는 차단, 없는·읽지 못한 이미지는 파일 이름 + 깨진 이미지 아이콘.
+//! - Front Matter는 접힌 메타데이터 블록, 각주 참조 번호를 누르면 각주로·각주의 `↑ 본문으로`를 누르면 참조로 이동,
+//!   원시 HTML은 회색 원문(`<br>`만 줄바꿈), Mermaid·수식 코드 블록에는 "미리보기 미지원" 라벨.
 
 use eframe::egui::{
     self, Align, Color32, FontFamily, FontId, RichText, Sense, Stroke, TextFormat, TextStyle,
-    text::LayoutJob,
+    text::{CCursor, LayoutJob},
 };
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ops::Range;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::core::document::Document;
-use crate::core::markdown::{self, Block, BlockKind, Inlines, ListItem, MarkdownCache, SpanKind};
+use crate::core::image_load::{self, ImageSource};
+use crate::core::markdown::{
+    self, Block, BlockKind, Inlines, ListItem, MarkdownCache, Span, SpanKind,
+};
+use crate::fonts::ICON_FAMILY;
+use crate::ui::preview_images::{ImageCache, TextureState};
 use crate::ui::theme::Palette;
+
+/// Phosphor 아이콘: 깨진 이미지, 차단된 원격(구름에 빗금) (egui-phosphor 0.14 codepoints)
+const ICON_IMAGE_BROKEN: &str = "\u{E7A8}";
+const ICON_CLOUD_SLASH: &str = "\u{E1B6}";
 
 /// 미리보기 본문 바깥 여백(px).
 const MARGIN: i8 = 16;
@@ -50,6 +67,8 @@ pub struct PreviewState {
     pending_offset: Option<f32>,
     /// 다음에 그릴 때 이 소스 줄이 화면 맨 위에 오게 한다 (보기 모드 전환, P3-06)
     pending_top_line: Option<f32>,
+    /// 이미지 텍스처 캐시 (P3-04)
+    images: RefCell<ImageCache>,
 }
 
 impl PreviewState {
@@ -64,6 +83,7 @@ impl PreviewState {
             max_offset: 0.0,
             pending_offset: None,
             pending_top_line: None,
+            images: RefCell::new(ImageCache::default()),
         }
     }
 
@@ -136,6 +156,11 @@ impl PreviewState {
         self.cache.invalidate();
     }
 
+    /// 지금 올라가 있는 이미지 텍스처 수.
+    pub fn image_texture_count(&self) -> usize {
+        self.images.borrow().texture_count()
+    }
+
     /// 실제로 파싱한 횟수 (캐시 확인용).
     pub fn parse_count(&self) -> u64 {
         self.cache.parse_count()
@@ -153,7 +178,9 @@ impl PreviewState {
     ) -> PreviewOutput {
         let parsed = self.cache.get(doc.revision(), doc.text());
         self.parsed = Some(std::sync::Arc::clone(&parsed));
-        let mut style = Style::new(ui, zoom, palette);
+        self.images.borrow_mut().begin_frame(ui.ctx());
+        let doc_dir = doc.path().and_then(Path::parent);
+        let mut style = Style::new(ui, zoom, palette, doc_dir, &self.images, &parsed.footnotes);
         style.cursor = cursor_line.map(|line| (line, palette.cursor_block));
         if self.pending_top_line.is_some() {
             ui.set_invisible();
@@ -184,9 +211,34 @@ impl PreviewState {
             ui.ctx().request_repaint();
         }
 
+        self.images.borrow_mut().end_frame();
+
         // 블록 더블클릭 → 그 블록의 첫 소스 줄 (P3-08)
         let view = output.inner_rect;
         let content_top = view.top() - self.offset_y;
+
+        // 각주 이동 (P3-04): 참조 → 각주 블록 위, 각주 → 처음 참조가 화면 위쪽 1/3에 오게
+        if let Some(jump) = style.jump.take() {
+            let target = match jump {
+                Jump::ToFootnote(label) => parsed
+                    .blocks
+                    .iter()
+                    .position(
+                        |b| matches!(&b.kind, BlockKind::Footnote { label: l, .. } if *l == label),
+                    )
+                    .and_then(|i| self.positions.get(i))
+                    .map(|p| p.top - MARGIN as f32),
+                Jump::BackToRef(label) => style
+                    .footnote_refs
+                    .borrow()
+                    .get(&label)
+                    .map(|y| y - content_top - view.height() / 3.0),
+            };
+            if let Some(y) = target {
+                self.pending_offset = Some(y.max(0.0));
+                ui.ctx().request_repaint();
+            }
+        }
         let double_clicked_line = ui
             .input(|i| {
                 i.pointer
@@ -272,17 +324,40 @@ fn lerp_gap(x: f32, x0: f32, x1: f32, y0: f32, y1: f32) -> f32 {
     }
 }
 
-/// 크기·색 규칙.
-struct Style {
+/// 각주 이동 요청.
+enum Jump {
+    ToFootnote(String),
+    BackToRef(String),
+}
+
+/// 크기·색 규칙과 한 프레임 동안 모으는 상태.
+struct Style<'a> {
     body: f32,
     line: f32,
     code_bg: Color32,
+    warning: Color32,
     /// (커서 소스 줄, 강조 색) — 이 줄을 포함한 최상위 블록 뒤에 배경을 깐다
     cursor: Option<(usize, Color32)>,
+    /// 문서가 있는 폴더 (상대 경로 이미지 기준, 저장하지 않은 문서면 `None`)
+    doc_dir: Option<&'a Path>,
+    images: &'a RefCell<ImageCache>,
+    /// 각주 이름 (처음 참조한 순서 — 화면 번호 = 순서 + 1)
+    footnotes: &'a [String],
+    /// 이번 프레임에 그린 각주 참조의 화면 y (이름별 처음 참조)
+    footnote_refs: RefCell<HashMap<String, f32>>,
+    /// 이번 프레임에 누른 각주 이동
+    jump: RefCell<Option<Jump>>,
 }
 
-impl Style {
-    fn new(ui: &egui::Ui, zoom: f32, palette: &Palette) -> Self {
+impl<'a> Style<'a> {
+    fn new(
+        ui: &egui::Ui,
+        zoom: f32,
+        palette: &Palette,
+        doc_dir: Option<&'a Path>,
+        images: &'a RefCell<ImageCache>,
+        footnotes: &'a [String],
+    ) -> Self {
         let size =
             |s: TextStyle, default: f32| ui.style().text_styles.get(&s).map_or(default, |f| f.size);
         let body = size(TextStyle::Body, 14.0) * zoom;
@@ -290,8 +365,22 @@ impl Style {
             body,
             line: ui.text_style_height(&TextStyle::Body) * zoom,
             code_bg: palette.preview_code_bg,
+            warning: palette.status_warning,
             cursor: None,
+            doc_dir,
+            images,
+            footnotes,
+            footnote_refs: RefCell::new(HashMap::new()),
+            jump: RefCell::new(None),
         }
+    }
+
+    /// 각주 화면 번호 문자열 (참조가 없으면 이름 그대로).
+    fn footnote_mark(&self, label: &str) -> String {
+        self.footnotes
+            .iter()
+            .position(|l| l == label)
+            .map_or_else(|| label.to_owned(), |i| (i + 1).to_string())
     }
 
     /// 제목 크기: 본문 크기의 배율 (GitHub 미리보기에 가깝게 H1 = 2배, P3-02 사용자 요청).
@@ -366,17 +455,9 @@ fn render_block(ui: &mut egui::Ui, block: &Block, style: &Style, depth: usize) {
         BlockKind::Heading { level, text, .. } => {
             // H1~H4는 진한 색, H5·H6은 본문 색 (A와 같음)
             let strong = *level <= 4;
-            ui.label(inline_job(
-                ui,
-                text,
-                style.heading_size(*level),
-                strong,
-                style,
-            ));
+            inline_text(ui, text, style.heading_size(*level), strong, style);
         }
-        BlockKind::Paragraph(text) => {
-            ui.label(inline_job(ui, text, style.body, false, style));
-        }
+        BlockKind::Paragraph(text) => inline_text(ui, text, style.body, false, style),
         BlockKind::List { start, items } => list(ui, *start, items, style, depth),
         BlockKind::Quote(children) => quote(ui, children, style, depth),
         BlockKind::Code { lang, text } => code_block(ui, lang, text, style, block.first_line),
@@ -394,30 +475,27 @@ fn render_block(ui: &mut egui::Ui, block: &Block, style: &Style, depth: usize) {
             );
         }
         BlockKind::FrontMatter(yaml) => {
+            // 본문 대신 접힌 메타데이터 블록 (§3.8-4)
             egui::Frame::new()
                 .fill(style.code_bg)
                 .corner_radius(4)
-                .inner_margin(8)
+                .inner_margin(egui::Margin::symmetric(8, 4))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new("Front Matter").size(style.body * 0.85).weak());
-                    ui.label(
-                        RichText::new(yaml)
-                            .font(FontId::monospace(style.body))
-                            .weak(),
-                    );
+                    let title = format!("Front Matter · {}줄", yaml.lines().count());
+                    egui::CollapsingHeader::new(RichText::new(title).size(style.body * 0.9).weak())
+                        .id_salt(("md-front-matter", block.first_line))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(yaml)
+                                    .font(FontId::monospace(style.body))
+                                    .weak(),
+                            );
+                        });
                 });
         }
-        BlockKind::Footnote { label, blocks } => {
-            ui.horizontal_top(|ui| {
-                ui.label(
-                    RichText::new(format!("{label}."))
-                        .size(style.body * 0.85)
-                        .weak(),
-                );
-                ui.vertical(|ui| render_children(ui, blocks, style, depth, 0.4));
-            });
-        }
+        BlockKind::Footnote { label, blocks } => footnote(ui, label, blocks, style, depth),
     }
 }
 
@@ -560,7 +638,17 @@ fn code_block(ui: &mut egui::Ui, lang: &str, text: &str, style: &Style, salt: us
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             if !lang.is_empty() {
-                ui.label(RichText::new(lang).size(style.body * 0.85).weak());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(lang).size(style.body * 0.85).weak());
+                    // Mermaid·수식은 그리지 않고 코드로 보여 준다 (§3.8-4, 2차 목표 검토)
+                    if is_unsupported_diagram(lang) {
+                        ui.label(
+                            RichText::new("미리보기 미지원")
+                                .size(style.body * 0.85)
+                                .color(style.warning),
+                        );
+                    }
+                });
             }
             // 가로 스크롤바가 마지막 줄을 가리지 않도록 아래 여백을 둔다.
             ui.spacing_mut().scroll.content_margin.bottom = ui.spacing().scroll.bar_width as i8;
@@ -765,15 +853,28 @@ fn align_offset(align: Option<markdown::Align>, inner: f32, text: f32) -> f32 {
 /// 인라인 스팬 → `LayoutJob`. `all_strong`이면 전체를 진한 색으로(제목·표 머리글).
 fn inline_job(
     ui: &egui::Ui,
-    spans: &Inlines,
+    spans: &[Span],
     size: f32,
     all_strong: bool,
     style: &Style,
 ) -> LayoutJob {
+    inline_job_marked(ui, spans, size, all_strong, style).0
+}
+
+/// [`inline_job`]과 같고, 각주 참조의 (글자 범위, 각주 이름)을 함께 돌려준다.
+fn inline_job_marked(
+    ui: &egui::Ui,
+    spans: &[Span],
+    size: f32,
+    all_strong: bool,
+    style: &Style,
+) -> (LayoutJob, Vec<(Range<usize>, String)>) {
     let visuals = ui.visuals();
     let text_color = visuals.override_text_color.unwrap_or(visuals.text_color());
     let weak = visuals.weak_text_color();
     let mut job = LayoutJob::default();
+    let mut refs = Vec::new();
+    let mut chars = 0;
     for span in spans {
         let s = span.style;
         let strong = s.strong || all_strong;
@@ -815,7 +916,7 @@ fn inline_job(
                 }
             }
             SpanKind::Image { .. } => {
-                // 이미지 표시는 P3-04 — 지금은 대체 텍스트 자리 표시
+                // 문단 밖(제목·표 칸)의 이미지는 대체 텍스트로 (문단 안 이미지는 [`inline_text`]가 그린다)
                 format.color = weak;
                 format!("[이미지: {}]", span.text).into()
             }
@@ -823,13 +924,192 @@ fn inline_job(
                 format.font_id = FontId::proportional(size * 0.75);
                 format.color = visuals.hyperlink_color;
                 format.valign = Align::TOP;
-                format!("[{}]", span.text).into()
+                format!("[{}]", style.footnote_mark(&span.text)).into()
             }
         };
+        let len = text.chars().count();
+        if span.kind == SpanKind::FootnoteRef {
+            refs.push((chars..chars + len, span.text.clone()));
+        }
+        chars += len;
         job.append(&text, 0.0, format);
     }
     job.wrap.max_width = ui.available_width();
-    job
+    (job, refs)
+}
+
+/// 제목·문단 글자. 이미지가 있으면 글자 덩어리와 이미지를 차례로 그린다 (이미지는 자기 줄).
+fn inline_text(ui: &mut egui::Ui, spans: &[Span], size: f32, all_strong: bool, style: &Style) {
+    let mut start = 0;
+    for (i, span) in spans.iter().enumerate() {
+        if let SpanKind::Image { url, title } = &span.kind {
+            if start < i {
+                rich_label(ui, &spans[start..i], size, all_strong, style);
+            }
+            image(ui, &span.text, url, title, style);
+            start = i + 1;
+        }
+    }
+    if start < spans.len() || spans.is_empty() {
+        rich_label(ui, &spans[start..], size, all_strong, style);
+    }
+}
+
+/// 글자 라벨. 각주 참조 번호는 눌러서 각주로 이동한다.
+fn rich_label(ui: &mut egui::Ui, spans: &[Span], size: f32, all_strong: bool, style: &Style) {
+    let (job, refs) = inline_job_marked(ui, spans, size, all_strong, style);
+    if refs.is_empty() {
+        ui.label(job);
+        return;
+    }
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let response = ui.add(egui::Label::new(Arc::clone(&galley)));
+    let origin = response.rect.min.to_vec2();
+    for (range, label) in refs {
+        let start = galley.pos_from_cursor(CCursor::new(range.start));
+        let end = galley.pos_from_cursor(CCursor::new(range.end));
+        let right = if end.min.y == start.min.y {
+            end.min.x
+        } else {
+            start.max.x + size
+        };
+        let rect =
+            egui::Rect::from_min_max(start.min, egui::pos2(right, start.max.y)).translate(origin);
+        style
+            .footnote_refs
+            .borrow_mut()
+            .entry(label.clone())
+            .or_insert(rect.top());
+        let hit = ui
+            .interact(
+                rect,
+                ui.scope_id().with(("md-fnref", &label, range.start)),
+                Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("각주로 이동");
+        if hit.clicked() {
+            *style.jump.borrow_mut() = Some(Jump::ToFootnote(label));
+        }
+    }
+}
+
+/// 각주 정의: 번호 + 내용 + `↑ 본문으로`(누르면 처음 참조로).
+fn footnote(ui: &mut egui::Ui, label: &str, blocks: &[Block], style: &Style, depth: usize) {
+    ui.horizontal_top(|ui| {
+        ui.label(
+            RichText::new(format!("{}.", style.footnote_mark(label)))
+                .size(style.body * 0.85)
+                .weak(),
+        );
+        ui.vertical(|ui| {
+            render_children(ui, blocks, style, depth, 0.4);
+            if style.footnotes.iter().any(|l| l == label) {
+                let back = ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new("↑ 본문으로")
+                                .size(style.body * 0.85)
+                                .color(ui.visuals().hyperlink_color),
+                        )
+                        .sense(Sense::click()),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if back.clicked() {
+                    *style.jump.borrow_mut() = Some(Jump::BackToRef(label.to_owned()));
+                }
+            }
+        });
+    });
+}
+
+/// 문단 안 이미지 (자기 줄). 로컬 파일은 원본 크기(보이는 폭보다 크면 줄임), 그 밖은 자리 표시.
+fn image(ui: &mut egui::Ui, alt: &str, url: &str, title: &str, style: &Style) {
+    let path = match image_load::resolve(url, style.doc_dir) {
+        ImageSource::Local(path) => path,
+        ImageSource::Remote(url) => {
+            image_placeholder(ui, ICON_CLOUD_SLASH, "원격 이미지 차단됨", &url, style);
+            return;
+        }
+        ImageSource::Unsupported(reason) => {
+            image_placeholder(ui, ICON_IMAGE_BROKEN, file_label(url, alt), &reason, style);
+            return;
+        }
+    };
+    let mut images = style.images.borrow_mut();
+    let size = images.size_of(&path);
+    if let Some(error) = images.error_of(&path).map(str::to_owned) {
+        drop(images);
+        let name = path
+            .file_name()
+            .map_or_else(|| url.to_owned(), |n| n.to_string_lossy().into_owned());
+        let detail = format!(
+            "{}
+{error}",
+            path.display()
+        );
+        image_placeholder(ui, ICON_IMAGE_BROKEN, &name, &detail, style);
+        return;
+    }
+    // 크기를 아직 모르면(SVG 디코딩 중) 임시 크기
+    let natural = size.map_or(egui::vec2(240.0, 135.0), |(w, h)| {
+        egui::vec2(w as f32, h as f32)
+    });
+    let scale = (ui.available_width() / natural.x.max(1.0)).min(1.0);
+    let (rect, response) = ui.allocate_exact_size(natural * scale, Sense::hover());
+    if ui.is_rect_visible(rect) {
+        match images.texture(ui.ctx(), &path) {
+            TextureState::Ready(texture) => {
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                ui.painter().image(texture, rect, uv, Color32::WHITE);
+            }
+            // 읽는 중이거나 방금 실패(다음 프레임에 자리 표시로 바뀜)
+            TextureState::Loading | TextureState::Failed(_) => {
+                ui.painter().rect_filled(rect, 4.0, style.code_bg);
+            }
+        }
+    }
+    let tip = if title.is_empty() { alt } else { title };
+    if !tip.is_empty() {
+        response.on_hover_text(tip);
+    }
+}
+
+/// 이미지를 보여 줄 수 없을 때: 아이콘 + 이름, 마우스를 올리면 자세한 사유.
+fn image_placeholder(ui: &mut egui::Ui, icon: &str, name: &str, detail: &str, style: &Style) {
+    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+    egui::Frame::new()
+        .stroke(stroke)
+        .corner_radius(4)
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(icon)
+                        .family(FontFamily::Name(ICON_FAMILY.into()))
+                        .size(style.body * 1.3)
+                        .weak(),
+                );
+                ui.label(RichText::new(name).size(style.body).weak());
+            });
+        })
+        .response
+        .on_hover_text(detail);
+}
+
+/// 자리 표시에 쓸 이름: 주소의 마지막 부분, 없으면 대체 텍스트.
+fn file_label<'s>(url: &'s str, alt: &'s str) -> &'s str {
+    let name = url.rsplit(['/', '\\']).next().unwrap_or(url);
+    if name.is_empty() { alt } else { name }
+}
+
+/// 미리보기로 그리지 않는 코드 블록 언어 (Mermaid·수식).
+fn is_unsupported_diagram(lang: &str) -> bool {
+    let lang = lang.trim().to_ascii_lowercase();
+    matches!(
+        lang.as_str(),
+        "mermaid" | "math" | "latex" | "katex" | "tex"
+    )
 }
 
 /// `<br>`, `<br/>`, `<br />` (대소문자 무시).
@@ -1135,6 +1415,161 @@ mod tests {
         assert!(cell.3 > 1, "긴 셀은 여러 줄로 접혀야 함");
         assert!(cell.1.x + cell.2.x <= 600.0, "표가 창 폭 안에 들어와야 함");
         assert_eq!(find(&shapes, "짧음").3, 1);
+    }
+
+    /// 헤드리스 프레임 (입력 포함): 그려진 글자를 (글자, 위치, galley)로 돌려준다.
+    fn galleys_frame(
+        ctx: &egui::Context,
+        state: &mut PreviewState,
+        doc: &Document,
+        events: Vec<egui::Event>,
+    ) -> Vec<(String, Pos2, Arc<egui::Galley>)> {
+        let raw = RawInput {
+            events,
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 800.0))),
+            ..Default::default()
+        };
+        let mut full = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                state.show(ui, doc, 1.0, &Palette::light(), None);
+            });
+        });
+        full.textures_delta.clear();
+        full.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => {
+                    Some((t.galley.text().to_owned(), t.pos, Arc::clone(&t.galley)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn click_events(pos: Pos2) -> Vec<egui::Event> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+    }
+
+    /// 임시 폴더에 문서를 저장하고 연다 (상대 경로 이미지용).
+    fn saved_doc(dir: &Path, text: &str) -> Document {
+        let path = dir.join("doc.md");
+        std::fs::write(&path, text).unwrap();
+        Document::from_bytes(Some(path), text.as_bytes(), false, None).unwrap()
+    }
+
+    #[test]
+    fn local_missing_and_remote_images() {
+        let dir = tempfile::tempdir().unwrap();
+        image::RgbaImage::from_pixel(64, 32, image::Rgba([200, 50, 50, 255]))
+            .save(dir.path().join("a.png"))
+            .unwrap();
+        let d = saved_doc(
+            dir.path(),
+            "![그림](a.png)\n\n![없는 그림](none.png)\n\n![원격](https://example.com/x.png)\n",
+        );
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let mut texts = Vec::new();
+        for _ in 0..400 {
+            texts = galleys_frame(&ctx, &mut state, &d, Vec::new());
+            if state.image_texture_count() == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            state.image_texture_count(),
+            1,
+            "로컬 이미지가 올라가지 않음"
+        );
+        // 원본 크기(64×32)로 자리를 잡는다
+        assert!((state.positions()[0].height - 32.0).abs() < 1.0);
+        assert!(
+            texts.iter().any(|t| t.0 == "none.png"),
+            "없는 이미지 자리 표시"
+        );
+        assert!(texts.iter().any(|t| t.0 == "원격 이미지 차단됨"));
+    }
+
+    #[test]
+    fn front_matter_starts_folded() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let d = doc("---\ntitle: 제목\ntags: [a]\n---\n\n본문\n");
+        let texts = galleys_frame(&ctx, &mut state, &d, Vec::new());
+        assert!(texts.iter().any(|t| t.0 == "Front Matter · 2줄"));
+        assert!(
+            !texts.iter().any(|t| t.0.contains("title: 제목")),
+            "접혀 있어야 함"
+        );
+        assert!(texts.iter().any(|t| t.0 == "본문"));
+    }
+
+    #[test]
+    fn footnote_reference_jumps_to_footnote_and_back() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let filler: String = (0..80).map(|i| format!("문단 {i}\n\n")).collect();
+        let d = doc(&format!("본문[^note] 끝\n\n{filler}[^note]: 각주 내용\n"));
+        let texts = galleys_frame(&ctx, &mut state, &d, Vec::new());
+        // 참조는 화면 번호 1로 보인다
+        let (_, pos, galley) = texts
+            .iter()
+            .find(|t| t.0 == "본문[1] 끝")
+            .expect("참조 문단");
+        let start = galley.pos_from_cursor(CCursor::new(2));
+        let end = galley.pos_from_cursor(CCursor::new(5));
+        let target = *pos + egui::vec2((start.min.x + end.min.x) / 2.0, start.center().y);
+        galleys_frame(&ctx, &mut state, &d, click_events(target));
+        galleys_frame(&ctx, &mut state, &d, Vec::new());
+        let texts = galleys_frame(&ctx, &mut state, &d, Vec::new());
+        let footnote = *state.positions().last().unwrap();
+        assert!(
+            state.offset_y() > 500.0,
+            "각주로 이동하지 않음: {}",
+            state.offset_y()
+        );
+        let on_screen = footnote.top - state.offset_y();
+        assert!(
+            (0.0..800.0).contains(&on_screen),
+            "각주가 화면 밖: {on_screen}"
+        );
+
+        // ↑ 본문으로 → 참조가 다시 화면 안으로
+        let (_, back, galley) = texts
+            .iter()
+            .find(|t| t.0 == "↑ 본문으로")
+            .expect("되돌아가기");
+        let back = *back + galley.rect.center().to_vec2();
+        galleys_frame(&ctx, &mut state, &d, click_events(back));
+        galleys_frame(&ctx, &mut state, &d, Vec::new());
+        galleys_frame(&ctx, &mut state, &d, Vec::new());
+        assert!(
+            state.offset_y() < 50.0,
+            "참조로 돌아오지 않음: {}",
+            state.offset_y()
+        );
+    }
+
+    #[test]
+    fn mermaid_and_math_blocks_get_unsupported_label() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let d = doc("```mermaid\nA --> B\n```\n\n```rust\nfn a() {}\n```\n");
+        let texts = galleys_frame(&ctx, &mut state, &d, Vec::new());
+        assert_eq!(texts.iter().filter(|t| t.0 == "미리보기 미지원").count(), 1);
+        assert!(
+            texts.iter().any(|t| t.0 == "A --> B"),
+            "코드는 그대로 보인다"
+        );
+        assert!(is_unsupported_diagram(" Math "));
+        assert!(!is_unsupported_diagram("rust"));
     }
 
     #[test]
