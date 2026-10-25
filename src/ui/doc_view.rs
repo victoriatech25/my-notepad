@@ -17,7 +17,7 @@ use eframe::egui::{self, CursorIcon, Rect, Sense, Stroke, UiBuilder, pos2, vec2}
 use crate::commands::ViewMode;
 use crate::tabs::Tab;
 use crate::ui::editor::{self, EditorOptions};
-use crate::ui::markdown_view::PreviewOutput;
+use crate::ui::markdown_view::{LinkAction, PreviewOutput};
 use crate::ui::theme::Palette;
 
 /// 이보다 좁으면 분할 대신 한쪽만 보여 준다 (논리 px).
@@ -77,12 +77,14 @@ fn shows_preview(mode: ViewMode) -> bool {
 }
 
 /// [`show`] 결과.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DocViewOutput {
     /// 선택 단어 강조가 상한을 넘었다
     pub highlight_exceeded: bool,
     /// 미리보기 단독 모드에서 블록을 더블클릭했다 → 탭 모드를 분할로 바꿔야 한다
     pub switch_to_split: bool,
+    /// 미리보기에서 누른 링크 중 앱이 처리할 것 (P3-09)
+    pub link: Option<LinkAction>,
 }
 
 /// 탭 본문을 그린다. 남은 영역을 모두 차지한다. `scroll_sync`는 분할 모드 스크롤 동기화 켜기/끄기.
@@ -126,6 +128,7 @@ pub fn show(
                 tab.editor.go_to_line(&mut tab.doc, line + 1);
                 output.switch_to_split = true;
             }
+            output.link = preview.link;
         }
         ViewMode::Split => {
             let x = split_x(full, *split_ratio);
@@ -140,6 +143,11 @@ pub fn show(
             if let Some(line) = preview.double_clicked_line {
                 tab.editor.go_to_line(&mut tab.doc, line + 1);
             }
+            // `#앵커` 링크로 미리보기가 제목으로 옮겨 갔으면 소스도 그 줄로 (P3-09)
+            if let Some(line) = preview.jumped_line {
+                tab.editor.scroll_to_line(line as f32);
+            }
+            output.link = preview.link.clone();
             splitter(ui, full, x, split_ratio, palette);
             // 미리보기가 위쪽 높이 변화로 스크롤을 옮긴 것(P3-07)도 사용자 조작이 아니다
             let applied = (source_applied, preview_applied || preview.anchored);
@@ -642,6 +650,46 @@ mod tests {
         let output = frame(&ctx, &mut tabs, &mut ratio, 1200.0, click(pos));
         assert!(output.switch_to_split);
         assert_eq!(editor::cursor_status(&tabs.active().doc).0, 9);
+    }
+
+    #[test]
+    fn anchor_link_in_split_moves_source_too() {
+        let ctx = egui::Context::default();
+        let mut tabs = Tabs::new();
+        let filler: String = (0..80)
+            .map(|i| {
+                format!(
+                    "문단 {i}
+
+"
+                )
+            })
+            .collect();
+        tabs.active_mut().doc.set_text(format!(
+            "[끝으로](#끝)
+
+{filler}## 끝
+"
+        ));
+        tabs.active_mut().view_mode = ViewMode::Split;
+        let mut ratio = DEFAULT_SPLIT_RATIO;
+        frames(&ctx, &mut tabs, &mut ratio, 1200.0);
+        // 미리보기 첫 블록(링크)의 첫 글자 근처를 누른다
+        let link = tabs.active().preview.positions()[0];
+        let point = pos2(600.0 + 16.0 + 6.0, link.top + link.height / 2.0);
+        for _ in 0..30 {
+            frame(&ctx, &mut tabs, &mut ratio, 1200.0, Vec::new());
+        }
+        frame(&ctx, &mut tabs, &mut ratio, 1200.0, click(point));
+        frames(&ctx, &mut tabs, &mut ratio, 1200.0);
+        let heading = 2 + 80 * 2;
+        let tab = tabs.active();
+        let source = tab.editor.top_line(&tab.doc).unwrap();
+        assert!(
+            source > 100.0,
+            "소스가 제목 쪽으로 따라가야 함: 맨 위 줄 {source} (제목 {heading})"
+        );
+        assert!(tab.preview.offset_y() > 0.0);
     }
 
     /// PLAN.md Phase 3 완료 기준(👤 확인 항목)의 자동 측정: `docs/PLAN.md`를 처음부터 끝까지 소스 쪽에서 스크롤하며

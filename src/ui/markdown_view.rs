@@ -19,6 +19,8 @@
 //!   디코딩·텍스처는 [`ImageCache`]가 맡는다. 원격 이미지는 차단, 없는·읽지 못한 이미지는 파일 이름 + 깨진 이미지 아이콘.
 //! - Front Matter는 접힌 메타데이터 블록, 각주 참조 번호를 누르면 각주로·각주의 `↑ 본문으로`를 누르면 참조로 이동,
 //!   원시 HTML은 회색 원문(`<br>`만 줄바꿈), Mermaid·수식 코드 블록에는 "미리보기 미지원" 라벨.
+//! - 링크(P3-09): 마우스를 올리면 주소 툴팁, 누르면 [`LinkAction`]으로 앱에 알린다 (외부 주소·파일 열기·안내).
+//!   문서 안 `#앵커`는 미리보기가 직접 그 제목으로 스크롤한다. 대상 파일이 없는 링크는 오류 색으로 그린다.
 
 use eframe::egui::{
     self, Align, Color32, FontFamily, FontId, RichText, Sense, Stroke, TextFormat, TextStyle,
@@ -34,6 +36,7 @@ use std::sync::Arc;
 
 use crate::core::document::Document;
 use crate::core::image_load::{self, ImageSource};
+use crate::core::link::{self, LinkTarget};
 use crate::core::markdown::{
     self, Block, BlockKind, Inlines, ListItem, MarkdownCache, Span, SpanKind,
 };
@@ -86,6 +89,8 @@ pub struct PreviewState {
     changed_at: f64,
     /// 지난 프레임 화면 맨 위 블록 (위쪽 높이가 바뀌어도 보던 내용을 고정)
     anchor: Option<ViewAnchor>,
+    /// 파싱이 끝나면 이 제목 앵커로 스크롤한다 (다른 문서의 `파일.md#앵커` 링크로 열었을 때)
+    pending_anchor: Option<String>,
 }
 
 /// 화면 맨 위 블록: (원문 해시, 순번, 그때의 위치)
@@ -128,7 +133,13 @@ impl PreviewState {
             seen_revision: None,
             changed_at: 0.0,
             anchor: None,
+            pending_anchor: None,
         }
+    }
+
+    /// 다음에 그릴 때(큰 문서는 파싱이 끝난 뒤) `anchor` 제목으로 스크롤한다.
+    pub fn jump_to_anchor(&mut self, anchor: String) {
+        self.pending_anchor = Some(anchor);
     }
 
     /// 마지막 프레임에 높이를 새로 잰 블록 수와 실제로 그린 블록 수 (가상 스크롤 확인용).
@@ -266,6 +277,8 @@ impl PreviewState {
         // 위치표는 스크롤 영역보다 먼저 만든다 (스크롤바는 내용 위에 떠 있어 폭이 같다)
         let width = (ui.available_width() - 2.0 * MARGIN as f32).max(1.0);
         let mut anchored = false;
+        let mut link_action = None;
+        let mut jumped_line = None;
         if parsing {
             self.positions.clear();
         } else {
@@ -273,6 +286,15 @@ impl PreviewState {
             heights.prepare(&parsed, doc, width, zoom, ui.visuals().dark_mode);
             heights.measure_missing(ui, &parsed.blocks, &style, width);
             self.positions = heights.positions(&parsed.blocks, &style);
+            if let Some(anchor) = self.pending_anchor.take() {
+                match link::anchor_line(&parsed, &anchor) {
+                    Some(line) => {
+                        self.pending_offset = Some(anchor_offset(&self.positions, line));
+                        jumped_line = Some(line);
+                    }
+                    None => link_action = Some(LinkAction::Notice(missing_anchor(&anchor))),
+                }
+            }
             // 지난 프레임 맨 위 블록이 움직였으면(위쪽 블록의 높이가 바뀜) 같은 만큼 스크롤해 보던 내용을 고정
             if self.pending_offset.is_none()
                 && self.pending_top_line.is_none()
@@ -349,6 +371,46 @@ impl PreviewState {
         // 각주 이동 (P3-04): 참조 → 각주 블록 위, 각주 → 처음 참조가 화면 위쪽 1/3에 오게
         if let Some(jump) = style.jump.take() {
             let target = match jump {
+                Jump::Link(url) => match link::resolve(&url, doc_dir) {
+                    LinkTarget::Anchor(anchor) => {
+                        self.anchor_jump(&parsed, &anchor, &mut jumped_line, &mut link_action)
+                    }
+                    LinkTarget::File {
+                        path,
+                        anchor,
+                        exists: true,
+                    } if doc.path().is_some_and(|p| same_file(p, &path)) => {
+                        // 이 문서 자신(`이문서.md#제목`) — 앵커만 따른다
+                        anchor.and_then(|a| {
+                            self.anchor_jump(&parsed, &a, &mut jumped_line, &mut link_action)
+                        })
+                    }
+                    LinkTarget::File {
+                        path,
+                        anchor,
+                        exists: true,
+                    } => {
+                        link_action = Some(LinkAction::OpenFile { path, anchor });
+                        None
+                    }
+                    LinkTarget::File { path, .. } => {
+                        link_action = Some(LinkAction::Notice(format!(
+                            "링크 대상 파일이 없습니다: {}",
+                            path.display()
+                        )));
+                        None
+                    }
+                    LinkTarget::External(url) => {
+                        link_action = Some(LinkAction::OpenUrl(url));
+                        None
+                    }
+                    LinkTarget::Unresolved(reason) => {
+                        link_action = Some(LinkAction::Notice(format!(
+                            "링크를 열 수 없습니다: {reason}"
+                        )));
+                        None
+                    }
+                },
                 Jump::ToFootnote(label) => parsed
                     .blocks
                     .iter()
@@ -384,17 +446,74 @@ impl PreviewState {
         PreviewOutput {
             double_clicked_line,
             anchored,
+            link: link_action,
+            jumped_line,
+        }
+    }
+
+    /// 이 문서의 `#앵커`로 스크롤할 위치. 없으면 안내를 남기고 `None`.
+    fn anchor_jump(
+        &self,
+        parsed: &markdown::Document,
+        anchor: &str,
+        jumped_line: &mut Option<usize>,
+        link_action: &mut Option<LinkAction>,
+    ) -> Option<f32> {
+        match link::anchor_line(parsed, anchor) {
+            Some(line) => {
+                *jumped_line = Some(line);
+                Some(anchor_offset(&self.positions, line))
+            }
+            None => {
+                *link_action = Some(LinkAction::Notice(missing_anchor(anchor)));
+                None
+            }
         }
     }
 }
 
+/// 제목 줄이 화면 맨 위 조금 아래에 오는 스크롤 위치.
+fn anchor_offset(positions: &[BlockPos], line: usize) -> f32 {
+    (line_to_y(positions, line as f32) - MARGIN as f32 / 2.0).max(0.0)
+}
+
+fn missing_anchor(anchor: &str) -> String {
+    format!("문서에 '#{anchor}' 제목이 없습니다")
+}
+
+/// 두 경로가 같은 파일인지 (실제 경로로 비교).
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// 미리보기에서 누른 링크 중 앱이 처리할 것.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkAction {
+    /// 외부 주소를 OS 기본 프로그램(브라우저·메일)으로 연다
+    OpenUrl(String),
+    /// 파일을 앱 탭으로 연다 (이미 열려 있으면 그 탭으로), `anchor`가 있으면 그 제목으로
+    OpenFile {
+        path: std::path::PathBuf,
+        anchor: Option<String>,
+    },
+    /// 상태 표시줄 안내 (없는 파일·제목 등)
+    Notice(String),
+}
+
 /// [`PreviewState::show`] 결과.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PreviewOutput {
     /// 이번 프레임에 더블클릭한 블록의 첫 소스 줄 (0부터)
     pub double_clicked_line: Option<usize>,
     /// 위쪽 블록 높이가 바뀌어 이번 프레임에 스크롤을 옮겼다 (사용자 조작이 아님 — 스크롤 동기화가 따라가지 않는다)
     pub anchored: bool,
+    /// 누른 링크 중 앱이 처리할 것
+    pub link: Option<LinkAction>,
+    /// `#앵커` 링크로 미리보기를 이 소스 줄의 제목으로 옮겼다 (분할 모드면 소스도 따라간다)
+    pub jumped_line: Option<usize>,
 }
 
 /// 소스 줄(0부터, 소수 = 줄 안 위치) → 미리보기 스크롤 내용 y.
@@ -458,6 +577,8 @@ fn lerp_gap(x: f32, x0: f32, x1: f32, y0: f32, y1: f32) -> f32 {
 enum Jump {
     ToFootnote(String),
     BackToRef(String),
+    /// 링크 (주소 원문)
+    Link(String),
 }
 
 /// 크기·색 규칙과 한 프레임 동안 모으는 상태.
@@ -468,6 +589,8 @@ struct Style<'a> {
     item_gap: f32,
     code_bg: Color32,
     warning: Color32,
+    /// 대상이 없는 링크 색
+    error: Color32,
     /// (커서 소스 줄, 강조 색) — 이 줄을 포함한 최상위 블록 뒤에 배경을 깐다
     cursor: Option<(usize, Color32)>,
     /// 문서가 있는 폴더 (상대 경로 이미지 기준, 저장하지 않은 문서면 `None`)
@@ -475,8 +598,10 @@ struct Style<'a> {
     images: &'a RefCell<ImageCache>,
     /// 각주 이름 (처음 참조한 순서 — 화면 번호 = 순서 + 1)
     footnotes: &'a [String],
-    /// 이번 프레임에 누른 각주 이동
+    /// 이번 프레임에 누른 각주 이동·링크
     jump: RefCell<Option<Jump>>,
+    /// 이번 프레임에 본 링크의 대상 없음 여부 (주소 → 깨짐)
+    broken_links: RefCell<HashMap<String, bool>>,
 }
 
 impl<'a> Style<'a> {
@@ -497,12 +622,26 @@ impl<'a> Style<'a> {
             item_gap: ui.spacing().item_spacing.y,
             code_bg: palette.preview_code_bg,
             warning: palette.status_warning,
+            error: palette.status_error,
             cursor: None,
             doc_dir,
             images,
             footnotes,
             jump: RefCell::new(None),
+            broken_links: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// 대상이 없는 링크인지 (없는 파일·알 수 없는 대상). 프레임 안에서는 주소마다 한 번만 확인한다.
+    fn link_broken(&self, url: &str) -> bool {
+        if let Some(&broken) = self.broken_links.borrow().get(url) {
+            return broken;
+        }
+        let broken = link::resolve(url, self.doc_dir).is_broken();
+        self.broken_links
+            .borrow_mut()
+            .insert(url.to_owned(), broken);
+        broken
     }
 
     /// 각주 화면 번호 문자열 (참조가 없으면 이름 그대로).
@@ -1122,28 +1261,41 @@ fn inline_job(
     inline_job_marked(ui, spans, size, all_strong, style).0
 }
 
-/// [`inline_job`]과 같고, 각주 참조의 (글자 범위, 각주 이름)을 함께 돌려준다.
+/// 글자 라벨 안의 누를 수 있는 구간 (글자 범위).
+#[derive(Default)]
+struct Marks {
+    /// (범위, 각주 이름)
+    footnotes: Vec<(Range<usize>, String)>,
+    /// (범위, 링크 주소) — 같은 링크가 이어지는 스팬은 하나로
+    links: Vec<(Range<usize>, String)>,
+}
+
+/// [`inline_job`]과 같고, 각주 참조·링크의 글자 범위를 함께 돌려준다.
 fn inline_job_marked(
     ui: &egui::Ui,
     spans: &[Span],
     size: f32,
     all_strong: bool,
     style: &Style,
-) -> (LayoutJob, Vec<(Range<usize>, String)>) {
+) -> (LayoutJob, Marks) {
     let visuals = ui.visuals();
     let text_color = visuals.override_text_color.unwrap_or(visuals.text_color());
     let weak = visuals.weak_text_color();
     let mut job = LayoutJob::default();
-    let mut refs = Vec::new();
+    let mut marks = Marks::default();
     let mut chars = 0;
     for span in spans {
         let s = span.style;
         let strong = s.strong || all_strong;
         let linked = span.link.is_some();
+        let link_color = match &span.link {
+            Some(url) if style.link_broken(url) => style.error,
+            _ => visuals.hyperlink_color,
+        };
         let mut format = TextFormat {
             font_id: FontId::proportional(size),
             color: if linked {
-                visuals.hyperlink_color
+                link_color
             } else if strong && visuals.override_text_color.is_none() {
                 visuals.strong_text_color()
             } else {
@@ -1156,7 +1308,7 @@ fn inline_job_marked(
             format.strikethrough = Stroke::new(1.0, format.color);
         }
         if linked {
-            format.underline = Stroke::new(1.0, visuals.hyperlink_color);
+            format.underline = Stroke::new(1.0, link_color);
         }
         let text: std::borrow::Cow<'_, str> = match &span.kind {
             SpanKind::Text => span.text.as_str().into(),
@@ -1190,13 +1342,20 @@ fn inline_job_marked(
         };
         let len = text.chars().count();
         if span.kind == SpanKind::FootnoteRef {
-            refs.push((chars..chars + len, span.text.clone()));
+            marks
+                .footnotes
+                .push((chars..chars + len, span.text.clone()));
+        } else if let Some(url) = &span.link {
+            match marks.links.last_mut() {
+                Some((range, last)) if last == url && range.end == chars => range.end += len,
+                _ => marks.links.push((chars..chars + len, url.clone())),
+            }
         }
         chars += len;
         job.append(&text, 0.0, format);
     }
     job.wrap.max_width = ui.available_width();
-    (job, refs)
+    (job, marks)
 }
 
 /// 제목·문단 글자. 이미지가 있으면 글자 덩어리와 이미지를 차례로 그린다 (이미지는 자기 줄).
@@ -1216,17 +1375,38 @@ fn inline_text(ui: &mut egui::Ui, spans: &[Span], size: f32, all_strong: bool, s
     }
 }
 
-/// 글자 라벨. 각주 참조 번호는 눌러서 각주로 이동한다.
+/// 글자 라벨. 각주 참조 번호는 눌러서 각주로, 링크는 눌러서 대상으로 이동한다 (마우스를 올리면 주소 툴팁).
 fn rich_label(ui: &mut egui::Ui, spans: &[Span], size: f32, all_strong: bool, style: &Style) {
-    let (job, refs) = inline_job_marked(ui, spans, size, all_strong, style);
-    if refs.is_empty() {
+    let (job, marks) = inline_job_marked(ui, spans, size, all_strong, style);
+    if marks.footnotes.is_empty() && marks.links.is_empty() {
         ui.label(job);
         return;
     }
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let response = ui.add(egui::Label::new(Arc::clone(&galley)));
     let origin = response.rect.min.to_vec2();
-    for (range, label) in refs {
+    for (range, url) in marks.links {
+        let tip = if style.link_broken(&url) {
+            format!("대상을 찾을 수 없음: {url}")
+        } else {
+            url.clone()
+        };
+        // 줄이 바뀌는 링크는 줄마다 누를 수 있는 영역을 둔다
+        for (row, rect) in range_rects(&galley, range.clone()).into_iter().enumerate() {
+            let hit = ui
+                .interact(
+                    rect.translate(origin),
+                    link_id(ui, &galley, ("md-link", range.start, row)),
+                    Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(&tip);
+            if hit.clicked() {
+                *style.jump.borrow_mut() = Some(Jump::Link(url.clone()));
+            }
+        }
+    }
+    for (range, label) in marks.footnotes {
         let start = galley.pos_from_cursor(CCursor::new(range.start));
         let end = galley.pos_from_cursor(CCursor::new(range.end));
         let right = if end.min.y == start.min.y {
@@ -1239,7 +1419,7 @@ fn rich_label(ui: &mut egui::Ui, spans: &[Span], size: f32, all_strong: bool, st
         let hit = ui
             .interact(
                 rect,
-                ui.scope_id().with(("md-fnref", &label, range.start)),
+                link_id(ui, &galley, ("md-fnref", range.start)),
                 Sense::click(),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1248,6 +1428,33 @@ fn rich_label(ui: &mut egui::Ui, spans: &[Span], size: f32, all_strong: bool, st
             *style.jump.borrow_mut() = Some(Jump::ToFootnote(label));
         }
     }
+}
+
+/// 라벨 안 누를 수 있는 구간의 위젯 ID. 프레임마다 같아야 클릭이 잡히므로(자동 ID는 첫 프레임에 바뀔 수 있음)
+/// 범위(scope) ID + 라벨 글자 + 구간으로 만든다 — 같은 목록의 항목들은 범위 ID가 같아 글자로 구분한다.
+fn link_id(ui: &egui::Ui, galley: &egui::Galley, part: impl Hash + std::fmt::Debug) -> egui::Id {
+    ui.scope_id().with((galley.text(), part))
+}
+
+/// 글자 범위가 차지하는 줄별 사각형 (galley 좌표).
+fn range_rects(galley: &egui::Galley, range: Range<usize>) -> Vec<egui::Rect> {
+    let mut rects: Vec<egui::Rect> = Vec::new();
+    for c in range {
+        let here = galley.pos_from_cursor(CCursor::new(c));
+        let next = galley.pos_from_cursor(CCursor::new(c + 1));
+        // 다음 글자가 같은 줄이면 거기까지, 줄 끝 글자면 글자 높이의 절반 폭
+        let right = if (next.min.y - here.min.y).abs() < 0.5 && next.min.x > here.min.x {
+            next.min.x
+        } else {
+            here.min.x + here.height() / 2.0
+        };
+        let rect = egui::Rect::from_min_max(here.min, egui::pos2(right, here.max.y));
+        match rects.last_mut() {
+            Some(last) if (last.min.y - rect.min.y).abs() < 0.5 => *last = last.union(rect),
+            _ => rects.push(rect),
+        }
+    }
+    rects
 }
 
 /// 각주 정의: 번호 + 내용 + `↑ 본문으로`(누르면 처음 참조로).
@@ -2100,6 +2307,170 @@ mod tests {
             "1MB 미리보기 스크롤: 블록 {}개, 첫 표시까지 {ready:.0}ms(첫 레이아웃 프레임 {first_layout:.1}ms), 스크롤 {frames}프레임 평균 {avg:.2}ms·최대 {max:.2}ms",
             state.positions().len()
         );
+    }
+
+    /// 저장소 링크 픽스처 폴더의 문서를 연다.
+    fn links_doc(name: &str) -> Document {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/markdown/links")
+            .join(name);
+        let bytes = std::fs::read(&path).unwrap();
+        Document::from_bytes(Some(path), &bytes, false, None).unwrap()
+    }
+
+    /// 헤드리스 프레임 (입력 포함): (결과, 그려진 글자 (글자, 위치, galley)).
+    fn output_frame(
+        ctx: &egui::Context,
+        state: &mut PreviewState,
+        doc: &Document,
+        events: Vec<egui::Event>,
+    ) -> (PreviewOutput, Vec<(String, Pos2, Arc<egui::Galley>)>) {
+        let raw = RawInput {
+            events,
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 800.0))),
+            ..Default::default()
+        };
+        let mut output = PreviewOutput::default();
+        let mut full = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                output = state.show(ui, doc, 1.0, &Palette::light(), None);
+            });
+        });
+        full.textures_delta.clear();
+        let texts = full
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => {
+                    Some((t.galley.text().to_owned(), t.pos, Arc::clone(&t.galley)))
+                }
+                _ => None,
+            })
+            .collect();
+        (output, texts)
+    }
+
+    /// `needle` 글자의 화면 가운데 (그 글자를 포함한 라벨에서 찾는다).
+    fn text_point(texts: &[(String, Pos2, Arc<egui::Galley>)], needle: &str) -> Pos2 {
+        let (text, pos, galley) = texts
+            .iter()
+            .find(|t| t.0.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} 글자가 없음"));
+        let start = text[..text.find(needle).unwrap()].chars().count();
+        let end = start + needle.chars().count();
+        let a = galley.pos_from_cursor(CCursor::new(start));
+        let b = galley.pos_from_cursor(CCursor::new(end));
+        *pos + egui::vec2((a.min.x + b.min.x) / 2.0, a.center().y)
+    }
+
+    /// `needle` 링크를 누르고 그 프레임의 결과를 돌려준다.
+    fn click_link(
+        ctx: &egui::Context,
+        state: &mut PreviewState,
+        doc: &Document,
+        needle: &str,
+    ) -> PreviewOutput {
+        // 앞선 클릭과 이어진 두 번 클릭으로 보지 않게 잠시 그린다
+        for _ in 0..30 {
+            output_frame(ctx, state, doc, Vec::new());
+        }
+        let (_, texts) = output_frame(ctx, state, doc, Vec::new());
+        let point = text_point(&texts, needle);
+        output_frame(ctx, state, doc, click_events(point)).0
+    }
+
+    #[test]
+    fn link_clicks_report_external_file_and_missing_targets() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let d = links_doc("index.md");
+        let dir = d.path().unwrap().parent().unwrap().to_path_buf();
+        assert_eq!(
+            click_link(&ctx, &mut state, &d, "GitHub 저장소").link,
+            Some(LinkAction::OpenUrl(
+                "https://github.com/victoriatech25/my-notepad".into()
+            ))
+        );
+        assert_eq!(
+            click_link(&ctx, &mut state, &d, "다른 문서의 \"세 번째 절\"").link,
+            Some(LinkAction::OpenFile {
+                path: dir.join("other.md"),
+                anchor: Some("세-번째-절".into()),
+            })
+        );
+        assert_eq!(
+            click_link(&ctx, &mut state, &d, "공백 이름").link,
+            Some(LinkAction::OpenFile {
+                path: dir.join("공백 있는 이름.md"),
+                anchor: None,
+            })
+        );
+        assert!(matches!(
+            click_link(&ctx, &mut state, &d, "없는 파일").link,
+            Some(LinkAction::Notice(text)) if text.contains("없는-파일.md")
+        ));
+        assert!(matches!(
+            click_link(&ctx, &mut state, &d, "없는 제목").link,
+            Some(LinkAction::Notice(text)) if text.contains("#없는-제목")
+        ));
+    }
+
+    #[test]
+    fn missing_link_target_is_drawn_in_error_color() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let d = links_doc("index.md");
+        let (_, texts) = output_frame(&ctx, &mut state, &d, Vec::new());
+        let color_of = |needle: &str| {
+            let (text, _, galley) = texts.iter().find(|t| t.0.contains(needle)).unwrap();
+            let at = text.find(needle).unwrap();
+            galley
+                .job
+                .sections
+                .iter()
+                .find(|s| s.byte_range.start.0 <= at && at < s.byte_range.end.0)
+                .unwrap()
+                .format
+                .color
+        };
+        assert_eq!(color_of("없는 파일"), Palette::light().status_error);
+        assert_ne!(color_of("다른 문서"), Palette::light().status_error);
+    }
+
+    #[test]
+    fn anchor_link_scrolls_to_heading() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let d = links_doc("index.md");
+        let output = click_link(&ctx, &mut state, &d, "아래 \"긴 절\"로");
+        let line = output.jumped_line.expect("앵커로 이동하지 않음");
+        assert!(output.link.is_none());
+        output_frame(&ctx, &mut state, &d, Vec::new());
+        assert_heading_on_screen(&state, line);
+
+        // 원문 제목을 그대로 쓴 앵커도 찾는다 (맨 위 목록의 링크이므로 새로 열어서)
+        let mut state = PreviewState::new(2);
+        let output = click_link(&ctx, &mut state, &d, "3.8 링크 규칙");
+        assert!(output.jumped_line.is_some(), "{:?}", output.link);
+    }
+
+    /// 제목 줄이 스크롤되어 화면 안(문서 끝이라 맨 위까지 못 오면 그 아래)에 보인다.
+    fn assert_heading_on_screen(state: &PreviewState, line: usize) {
+        let y = line_to_y(state.positions(), line as f32) - state.offset_y();
+        assert!(state.offset_y() > 0.0, "스크롤하지 않음");
+        assert!((0.0..760.0).contains(&y), "제목이 화면 밖: y {y}");
+    }
+
+    #[test]
+    fn pending_anchor_scrolls_newly_opened_document() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let d = links_doc("other.md");
+        state.jump_to_anchor("세-번째-절".into());
+        let (output, _) = output_frame(&ctx, &mut state, &d, Vec::new());
+        let line = output.jumped_line.expect("열자마자 앵커로");
+        output_frame(&ctx, &mut state, &d, Vec::new());
+        assert_heading_on_screen(&state, line);
     }
 
     #[test]
