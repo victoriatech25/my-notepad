@@ -10,6 +10,9 @@
 //!   처음 보는 블록은 보이지 않는 측정용 UI에 한 번 그려 높이를 잰다 — 편집하면 바뀐 블록만 다시 잰다.
 //!   보이는 블록을 실제로 그린 높이가 캐시와 다르면(이미지 크기·접기 상태 등) 캐시를 고치고 다시 그린다.
 //!   1MB를 넘는 문서는 작업 스레드에서 파싱한다 ([`MarkdownCache::get_or_spawn`]).
+//! - 실시간 갱신(P3-07): 편집이 [`REFRESH_DEBOUNCE`] 동안 멈추면 다시 파싱한다 (그동안은 이전 결과를 그대로 그린다).
+//!   위치표는 스크롤 영역보다 먼저 만들고, 화면 맨 위 블록 위쪽의 높이가 바뀌면 같은 프레임에 그만큼 스크롤을 옮겨
+//!   보던 내용이 튀지 않게 한다.
 //! - 코드 블록은 줄을 접지 않고 블록 안에서만 가로 스크롤, 표는 내용에 맞춘 열 폭·넘치면 열을 내용 폭에 비례해
 //!   줄여 줄바꿈·그래도 넘치면 표만 가로 스크롤 (P3-03).
 //! - 이미지(P3-04): 문단 안 이미지는 자기 줄에 그린다. 로컬 파일은 원본 크기(보이는 폭에 맞춰 축소)로,
@@ -44,6 +47,8 @@ const ICON_CLOUD_SLASH: &str = "\u{E1B6}";
 
 /// 미리보기 본문 바깥 여백(px).
 const MARGIN: i8 = 16;
+/// 편집 후 미리보기를 다시 파싱하기까지 기다리는 시간 (초, PLAN.md §3.8-2 "약 150~200ms").
+pub const REFRESH_DEBOUNCE: f64 = 0.15;
 
 /// 최상위 블록 하나의 소스 줄 범위와 화면 위치.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -76,6 +81,19 @@ pub struct PreviewState {
     images: RefCell<ImageCache>,
     /// 블록 높이 캐시 (P3-05)
     heights: HeightCache,
+    /// 마지막으로 본 문서 버전과 그 버전이 처음 보인 시각 (디바운스, P3-07)
+    seen_revision: Option<u64>,
+    changed_at: f64,
+    /// 지난 프레임 화면 맨 위 블록 (위쪽 높이가 바뀌어도 보던 내용을 고정)
+    anchor: Option<ViewAnchor>,
+}
+
+/// 화면 맨 위 블록: (원문 해시, 순번, 그때의 위치)
+#[derive(Debug, Clone, Copy)]
+struct ViewAnchor {
+    key: u64,
+    index: usize,
+    top: f32,
 }
 
 /// 블록 높이 캐시: 블록 원문 해시 → 높이. 본문 폭·확대·테마가 바뀌면 비운다.
@@ -107,6 +125,9 @@ impl PreviewState {
             pending_top_line: None,
             images: RefCell::new(ImageCache::default()),
             heights: HeightCache::default(),
+            seen_revision: None,
+            changed_at: 0.0,
+            anchor: None,
         }
     }
 
@@ -209,10 +230,30 @@ impl PreviewState {
         palette: &Palette,
         cursor_line: Option<usize>,
     ) -> PreviewOutput {
-        let ctx = ui.ctx().clone();
-        let parsed = self
-            .cache
-            .get_or_spawn(doc.revision(), doc.text(), move || ctx.request_repaint());
+        // 편집이 멈출 때까지(디바운스) 이전 파싱 결과를 그대로 그린다
+        let now = ui.input(|i| i.time);
+        let revision = doc.revision();
+        if self.seen_revision != Some(revision) {
+            self.seen_revision = Some(revision);
+            self.changed_at = now;
+        }
+        let waited = now - self.changed_at;
+        let parsed = match &self.parsed {
+            Some(previous)
+                if !self.cache.is_current(revision, doc.text()) && waited < REFRESH_DEBOUNCE =>
+            {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(
+                        REFRESH_DEBOUNCE - waited,
+                    ));
+                Arc::clone(previous)
+            }
+            _ => {
+                let ctx = ui.ctx().clone();
+                self.cache
+                    .get_or_spawn(revision, doc.text(), move || ctx.request_repaint())
+            }
+        };
         self.parsed = Some(std::sync::Arc::clone(&parsed));
         self.images.borrow_mut().begin_frame(ui.ctx());
         let doc_dir = doc.path().and_then(Path::parent);
@@ -221,31 +262,52 @@ impl PreviewState {
         if self.pending_top_line.is_some() {
             ui.set_invisible();
         }
+        let parsing = self.cache.is_parsing() && parsed.blocks.is_empty();
+        // 위치표는 스크롤 영역보다 먼저 만든다 (스크롤바는 내용 위에 떠 있어 폭이 같다)
+        let width = (ui.available_width() - 2.0 * MARGIN as f32).max(1.0);
+        let mut anchored = false;
+        if parsing {
+            self.positions.clear();
+        } else {
+            let heights = &mut self.heights;
+            heights.prepare(&parsed, doc, width, zoom, ui.visuals().dark_mode);
+            heights.measure_missing(ui, &parsed.blocks, &style, width);
+            self.positions = heights.positions(&parsed.blocks, &style);
+            // 지난 프레임 맨 위 블록이 움직였으면(위쪽 블록의 높이가 바뀜) 같은 만큼 스크롤해 보던 내용을 고정
+            if self.pending_offset.is_none()
+                && self.pending_top_line.is_none()
+                && let Some(anchor) = self.anchor
+                && let Some(j) = heights.find(anchor.key, anchor.index)
+            {
+                let shift = self.positions[j].top - anchor.top;
+                if shift.abs() > 0.5 {
+                    self.pending_offset = Some((self.offset_y + shift).max(0.0));
+                    anchored = true;
+                }
+            }
+        }
+        let total = self
+            .positions
+            .last()
+            .map_or(0.0, |p| p.top + p.height + MARGIN as f32);
+
         let mut scroll = egui::ScrollArea::vertical()
             .id_salt(("md-preview", self.id))
             .auto_shrink(false);
-        // 스크롤 범위를 넘는 위치(문서 끝 각주로 이동 등)는 지난 프레임의 최대값으로 자른다 —
+        // 스크롤 범위를 넘는 위치(문서 끝 각주로 이동 등)는 내용 높이로 자른다 —
         // egui는 넘는 값을 그대로 써서 내용을 그 자리에 그린다
         if let Some(y) = self.pending_offset.take() {
-            scroll = scroll.vertical_scroll_offset(y.min(self.max_offset));
+            let max = (total - ui.available_height()).max(0.0);
+            scroll = scroll.vertical_scroll_offset(y.min(max));
         }
-        let parsing = self.cache.is_parsing() && parsed.blocks.is_empty();
         let heights = &mut self.heights;
-        let positions = &mut self.positions;
+        let positions = &self.positions;
         let output = scroll.show_viewport(ui, |ui, viewport| {
             if parsing {
                 ui.add_space(MARGIN as f32);
                 ui.label(RichText::new("  큰 문서를 분석하는 중…").weak());
-                positions.clear();
                 return;
             }
-            let width = (ui.available_width() - 2.0 * MARGIN as f32).max(1.0);
-            heights.prepare(&parsed, doc, width, zoom, ui.visuals().dark_mode);
-            heights.measure_missing(ui, &parsed.blocks, &style, width);
-            *positions = heights.positions(&parsed.blocks, &style);
-            let total = positions
-                .last()
-                .map_or(0.0, |p| p.top + p.height + MARGIN as f32);
             let content = ui.min_rect().min;
             ui.allocate_space(egui::vec2(ui.available_width(), total));
             let changed = heights.render_visible(
@@ -264,6 +326,15 @@ impl PreviewState {
         self.offset_y = output.state.clamped_offset().y;
         self.view_height = output.inner_rect.height();
         self.max_offset = (output.content_size.y - output.inner_rect.height()).max(0.0);
+        // 다음 프레임의 기준 블록 = 지금 화면 맨 위 블록
+        let top = self
+            .positions
+            .partition_point(|p| p.top + p.height <= self.offset_y);
+        self.anchor = self.positions.get(top).map(|p| ViewAnchor {
+            key: self.heights.keys[top],
+            index: top,
+            top: p.top,
+        });
         if let Some(line) = self.pending_top_line.take() {
             self.pending_offset = Some(line_to_y(&self.positions, line));
             ui.ctx().request_repaint();
@@ -312,6 +383,7 @@ impl PreviewState {
             });
         PreviewOutput {
             double_clicked_line,
+            anchored,
         }
     }
 }
@@ -321,6 +393,8 @@ impl PreviewState {
 pub struct PreviewOutput {
     /// 이번 프레임에 더블클릭한 블록의 첫 소스 줄 (0부터)
     pub double_clicked_line: Option<usize>,
+    /// 위쪽 블록 높이가 바뀌어 이번 프레임에 스크롤을 옮겼다 (사용자 조작이 아님 — 스크롤 동기화가 따라가지 않는다)
+    pub anchored: bool,
 }
 
 /// 소스 줄(0부터, 소수 = 줄 안 위치) → 미리보기 스크롤 내용 y.
@@ -536,6 +610,20 @@ impl HeightCache {
             self.heights.insert(self.keys[i], height);
             self.measured += 1;
         }
+    }
+
+    /// 원문 해시가 `key`인 블록 중 `index`에 가장 가까운 것.
+    fn find(&self, key: u64, index: usize) -> Option<usize> {
+        if self.keys.get(index) == Some(&key) {
+            return Some(index);
+        }
+        (1..self.keys.len()).find_map(|d| {
+            let before = index
+                .checked_sub(d)
+                .filter(|&i| self.keys.get(i) == Some(&key));
+            let after = Some(index + d).filter(|&i| self.keys.get(i) == Some(&key));
+            before.or(after)
+        })
     }
 
     /// 캐시된 높이로 전체 위치표를 만든다 (스크롤 내용 좌표, 바깥 여백 포함).
@@ -1347,9 +1435,112 @@ mod tests {
         frame(&ctx, &mut state, &d);
         assert_eq!(state.parse_count(), 1);
         d.set_text("# 둘\n");
-        let texts = frame(&ctx, &mut state, &d);
+        // 편집이 멈추고 디바운스(한 프레임 = 1/60초)가 지나야 다시 파싱한다
+        let mut frames = 0;
+        let texts = loop {
+            frames += 1;
+            let texts = frame(&ctx, &mut state, &d);
+            if state.parse_count() == 2 || frames > 60 {
+                break texts;
+            }
+        };
         assert_eq!(state.parse_count(), 2);
+        assert!(
+            frames as f64 / 60.0 >= REFRESH_DEBOUNCE,
+            "디바운스 전에 파싱함: {frames}프레임"
+        );
         assert!(texts.iter().any(|t| t == "둘"));
+    }
+
+    /// 지정한 시각(초)의 헤드리스 프레임. 그려진 글자를 돌려준다.
+    fn frame_at(
+        ctx: &egui::Context,
+        state: &mut PreviewState,
+        doc: &Document,
+        time: f64,
+    ) -> Vec<String> {
+        let raw = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 800.0))),
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut full = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                state.show(ui, doc, 1.0, &Palette::light(), None);
+            });
+        });
+        full.textures_delta.clear();
+        full.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn refresh_waits_until_typing_pauses() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let mut d = doc("가\n");
+        frame_at(&ctx, &mut state, &d, 1.0);
+        // 0.1초 간격으로 계속 입력하는 동안은 이전 결과
+        for (i, text) in ["가나\n", "가나다\n", "가나다라\n"].iter().enumerate() {
+            d.set_text(*text);
+            let t = 1.1 + 0.1 * i as f64;
+            let texts = frame_at(&ctx, &mut state, &d, t);
+            assert!(
+                texts.iter().any(|x| x == "가"),
+                "{t}초: 아직 이전 결과여야 함"
+            );
+        }
+        // 마지막 입력(1.3초) 뒤 0.1초: 아직
+        assert!(
+            frame_at(&ctx, &mut state, &d, 1.4)
+                .iter()
+                .any(|x| x == "가")
+        );
+        // 디바운스가 지나면 한 번에 최신 내용
+        let texts = frame_at(&ctx, &mut state, &d, 1.3 + REFRESH_DEBOUNCE + 0.01);
+        assert!(texts.iter().any(|x| x == "가나다라"), "{texts:?}");
+        assert_eq!(state.parse_count(), 2, "중간 입력은 파싱하지 않음");
+    }
+
+    #[test]
+    fn editing_above_keeps_visible_content_in_place() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let paragraphs: Vec<String> = (0..200).map(|i| format!("문단 {i}")).collect();
+        let mut d = doc(&(paragraphs.join("\n\n") + "\n"));
+        for _ in 0..3 {
+            frame(&ctx, &mut state, &d);
+        }
+        // 문단 100(소스 줄 200)을 화면 맨 위로
+        let target = state.positions()[100];
+        state.set_scroll_offset(target.top);
+        for _ in 0..3 {
+            frame(&ctx, &mut state, &d);
+        }
+        let before = state.top_line().unwrap();
+        assert!((before - 200.0).abs() < 1.0, "맨 위 줄 {before}");
+
+        // 화면 위쪽 문단 10을 20줄짜리 긴 문단으로 바꾼다 (소스 줄 +19)
+        let mut edited = paragraphs.clone();
+        edited[10] = (0..20)
+            .map(|i| format!("긴 문단 {i}줄"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        d.set_text(edited.join("\n\n") + "\n");
+        for _ in 0..20 {
+            frame(&ctx, &mut state, &d);
+        }
+        assert_eq!(state.parse_count(), 2);
+        let after = state.top_line().unwrap();
+        assert!(
+            (after - (before + 19.0)).abs() < 1.0,
+            "같은 문단이 맨 위에 남아야 함: {before} → {after}"
+        );
     }
 
     #[test]
@@ -1809,11 +2000,72 @@ mod tests {
         galleys_frame(&ctx, &mut state, &d, Vec::new());
         assert_eq!(state.last_frame_counts().0, 0);
 
-        // 첫 문단 한 곳만 고친다 → 그 블록만 다시 잰다
+        // 첫 문단 한 곳만 고친다 → (디바운스 뒤 다시 파싱한 프레임에) 그 블록만 다시 잰다
         d.set_text(text.replacen("문단에 **굵게**", "문단을 고쳐 **굵게**", 1));
-        galleys_frame(&ctx, &mut state, &d, Vec::new());
-        let (measured, _) = state.last_frame_counts();
-        assert!(measured <= 2, "바뀐 블록만 다시 재야 함: {measured}");
+        let mut measured = None;
+        for _ in 0..60 {
+            galleys_frame(&ctx, &mut state, &d, Vec::new());
+            if state.parse_count() == 2 {
+                measured = Some(state.last_frame_counts().0);
+                break;
+            }
+        }
+        let measured = measured.expect("다시 파싱하지 않음");
+        assert!(
+            (1..=2).contains(&measured),
+            "바뀐 블록만 다시 재야 함: {measured}"
+        );
+    }
+
+    /// 100KB 편집 → 미리보기 반영 시간 (PLAN.md §1.3 "≤ 디바운스 + 50ms") —
+    /// `cargo test --release --lib -- --ignored --nocapture preview_refresh_time`
+    #[test]
+    #[ignore = "측정용: 릴리스 빌드로 실행"]
+    fn preview_refresh_time_100kb() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let text = long_markdown(100 * 1024);
+        let mut d = doc(&text);
+        // 실제 경과 시간으로 프레임을 돌린다 (디바운스가 실제 시간 기준으로 지나가게)
+        let clock = std::time::Instant::now();
+        let now = || 1.0 + clock.elapsed().as_secs_f64();
+        for _ in 0..3 {
+            frame_at(&ctx, &mut state, &d, now());
+        }
+        let mut report = Vec::new();
+        for n in 0..5 {
+            let marker = format!("반영확인{n}");
+            let edited = text.replacen("같은 문단의 둘째 줄이다.", &marker, 1 + n * 3);
+            d.set_text(&edited);
+            let start = std::time::Instant::now();
+            let mut work = 0.0;
+            loop {
+                let t = std::time::Instant::now();
+                let texts = frame_at(&ctx, &mut state, &d, now());
+                let frame_ms = t.elapsed().as_secs_f64() * 1000.0;
+                if texts.iter().any(|x| x.contains(&marker))
+                    || state.parse_count() as usize == n + 2
+                {
+                    work = frame_ms;
+                    break;
+                }
+                // 60fps로 다시 그리는 것처럼 프레임 사이를 띄운다
+                std::thread::sleep(std::time::Duration::from_millis(16));
+                if start.elapsed().as_secs() > 5 {
+                    break;
+                }
+            }
+            report.push(format!(
+                "반영 {:.0}ms(갱신 프레임 {work:.1}ms)",
+                start.elapsed().as_secs_f64() * 1000.0
+            ));
+        }
+        println!(
+            "100KB 편집 → 미리보기 반영 (디바운스 {:.0}ms, {} B): {}",
+            REFRESH_DEBOUNCE * 1000.0,
+            text.len(),
+            report.join(" · ")
+        );
     }
 
     /// 1MB 미리보기 스크롤 프레임 시간 — `cargo test --release --lib -- --ignored --nocapture preview_scroll_frame_time`
