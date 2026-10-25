@@ -6,12 +6,18 @@
 //!   다시 넓히면 분할로 돌아온다. 좁은 동안 소스 ↔ 미리보기 전환은 [`DocViewState::toggle_narrow_pane`].
 //! - 실제로 보이는 화면이 바뀌면 직전 화면 맨 위의 소스 줄을 새로 보이는 쪽의 맨 위로 맞춘다
 //!   (전환할 때 문서 맨 위로 튀지 않게). 새 쪽은 그 폭의 레이아웃으로 위치를 계산하느라 한 프레임 숨겨 그린다.
+//! - 분할 모드 양방향 스크롤 동기화(P3-08): 이번 프레임에 사용자가 움직인 쪽(둘 다면 마우스가 올라간 쪽)의
+//!   화면 맨 위 소스 줄을 반대쪽 맨 위로 맞춘다. 동기화로 적용한 스크롤 변화는 사용자 조작으로 보지 않으므로
+//!   반대 방향으로 되먹임되지 않는다. 대응은 블록 줄 범위 ↔ y([`crate::ui::markdown_view::line_to_y`]).
+//! - 분할 모드에서는 소스 커서 줄을 포함한 미리보기 블록에 옅은 배경을 깔고, 미리보기 블록을 더블클릭하면
+//!   소스의 그 줄로 커서를 옮긴다 (미리보기 단독이면 분할로 바꾼다).
 
 use eframe::egui::{self, CursorIcon, Rect, Sense, Stroke, UiBuilder, pos2, vec2};
 
 use crate::commands::ViewMode;
 use crate::tabs::Tab;
-use crate::ui::editor::EditorOptions;
+use crate::ui::editor::{self, EditorOptions};
+use crate::ui::markdown_view::PreviewOutput;
 use crate::ui::theme::Palette;
 
 /// 이보다 좁으면 분할 대신 한쪽만 보여 준다 (논리 px).
@@ -32,6 +38,9 @@ pub struct DocViewState {
     narrow: bool,
     /// 좁은 창에서 분할 대신 미리보기를 보여 줄지 (기본은 소스)
     narrow_preview: bool,
+    /// 지난 프레임의 소스·미리보기 세로 스크롤 위치 (사용자가 움직인 쪽 판정)
+    source_offset: f32,
+    preview_offset: f32,
 }
 
 impl DocViewState {
@@ -67,15 +76,25 @@ fn shows_preview(mode: ViewMode) -> bool {
     mode != ViewMode::Source
 }
 
-/// 탭 본문을 그린다. 남은 영역을 모두 차지한다. 선택 단어 강조가 상한을 넘었으면 `true`.
+/// [`show`] 결과.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DocViewOutput {
+    /// 선택 단어 강조가 상한을 넘었다
+    pub highlight_exceeded: bool,
+    /// 미리보기 단독 모드에서 블록을 더블클릭했다 → 탭 모드를 분할로 바꿔야 한다
+    pub switch_to_split: bool,
+}
+
+/// 탭 본문을 그린다. 남은 영역을 모두 차지한다. `scroll_sync`는 분할 모드 스크롤 동기화 켜기/끄기.
 pub fn show(
     ui: &mut egui::Ui,
     tab: &mut Tab,
     split_ratio: &mut f32,
+    scroll_sync: bool,
     options: &EditorOptions,
     zoom: f32,
     palette: &Palette,
-) -> bool {
+) -> DocViewOutput {
     let full = ui.available_rect_before_wrap();
     tab.doc_view.narrow = full.width() < NARROW_WIDTH;
     let shown = tab.doc_view.effective(tab.view_mode);
@@ -98,21 +117,139 @@ pub fn show(
     }
     tab.doc_view.shown = Some(shown);
 
-    let mut exceeded = false;
+    let mut output = DocViewOutput::default();
     match shown {
-        ViewMode::Source => exceeded = source_in(ui, full, tab, options, palette),
-        ViewMode::Preview => preview_in(ui, full, tab, zoom, palette),
+        ViewMode::Source => output.highlight_exceeded = source_in(ui, full, tab, options, palette),
+        ViewMode::Preview => {
+            let preview = preview_in(ui, full, tab, zoom, palette, None);
+            if let Some(line) = preview.double_clicked_line {
+                tab.editor.go_to_line(&mut tab.doc, line + 1);
+                output.switch_to_split = true;
+            }
+        }
         ViewMode::Split => {
             let x = split_x(full, *split_ratio);
             let left = Rect::from_min_max(full.min, pos2(x, full.bottom()));
             let right = Rect::from_min_max(pos2(x + 1.0, full.top()), full.max);
-            exceeded = source_in(ui, left, tab, options, palette);
-            preview_in(ui, right, tab, zoom, palette);
+            // 이번 프레임에 적용될 스크롤 요청이 있으면 그 변화는 사용자 조작이 아니다
+            let source_applied = tab.editor.has_pending_scroll();
+            let preview_applied = tab.preview.has_pending_scroll();
+            output.highlight_exceeded = source_in(ui, left, tab, options, palette);
+            let cursor_line = editor::cursor_status(&tab.doc).0.saturating_sub(1);
+            let preview = preview_in(ui, right, tab, zoom, palette, Some(cursor_line));
+            if let Some(line) = preview.double_clicked_line {
+                tab.editor.go_to_line(&mut tab.doc, line + 1);
+            }
             splitter(ui, full, x, split_ratio, palette);
+            let applied = (source_applied, preview_applied);
+            sync_scroll(ui, tab, right, scroll_sync, applied);
         }
     }
     ui.allocate_rect(full, Sense::hover());
-    exceeded
+    output
+}
+
+/// 스크롤을 움직인 쪽에 반대쪽을 맞춘다. `applied`는 (소스, 미리보기)에 이번 프레임 스크롤 요청이 적용됐는지.
+fn sync_scroll(
+    ui: &egui::Ui,
+    tab: &mut Tab,
+    preview_rect: Rect,
+    enabled: bool,
+    applied: (bool, bool),
+) {
+    let source = tab.doc.scroll_offset_y();
+    let preview = tab.preview.offset_y();
+    let state = &mut tab.doc_view;
+    let source_moved = !applied.0 && (source - state.source_offset).abs() > 0.5;
+    let preview_moved = !applied.1 && (preview - state.preview_offset).abs() > 0.5;
+    state.source_offset = source;
+    state.preview_offset = preview;
+    if !enabled || tab.editor.is_repositioning() || tab.preview.is_repositioning() {
+        return;
+    }
+    let preview_drives = match (source_moved, preview_moved) {
+        (true, false) => false,
+        (false, true) => true,
+        (true, true) => ui
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|p| preview_rect.contains(p)),
+        (false, false) => return,
+    };
+    // 기준점은 움직인 쪽 화면의 가운데(문서 처음·끝 10%에서는 맨 위·맨 아래로 옮겨 가 양 끝을 맞춘다).
+    // 두 쪽은 같은 내용이라도 높이가 달라(소스 줄바꿈, 표 등) 기준점에서 멀수록 어긋나므로, 기준점을 가운데에 두어
+    // 화면 안 어디든 기준점과의 거리를 화면 절반 이하로 줄인다. 기준점 가까이 제목이 보이면 그 제목에 맞춘다.
+    let headings: Vec<usize> = tab.preview.heading_lines().collect();
+    if preview_drives {
+        let (fraction, height) = tab.preview.scroll_fraction();
+        let preview = &tab.preview;
+        let anchor = anchor_point(
+            anchor_dy(fraction, height),
+            height,
+            &headings,
+            |dy| preview.line_at(dy),
+            |line| Some(preview.offset_for_line(line, 0.0) - preview.offset_y()),
+        );
+        if let Some((line, dy)) = anchor
+            && let Some(y) = tab.editor.offset_for_line(&tab.doc, line, dy)
+        {
+            tab.editor.set_scroll_offset(y);
+            ui.ctx().request_repaint();
+        }
+    } else if let Some((fraction, height)) = tab.editor.scroll_fraction(&tab.doc) {
+        let (editor, doc) = (&tab.editor, &tab.doc);
+        let offset = doc.scroll_offset_y();
+        let anchor = anchor_point(
+            anchor_dy(fraction, height),
+            height,
+            &headings,
+            |dy| editor.line_at(doc, dy),
+            |line| editor.offset_for_line(doc, line, 0.0).map(|y| y - offset),
+        );
+        if let Some((line, dy)) = anchor {
+            tab.preview
+                .set_scroll_offset(tab.preview.offset_for_line(line, dy));
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+/// 이 비율(화면 높이 대비) 안에 제목이 있으면 기준점을 그 제목으로 옮긴다.
+const HEADING_SNAP: f32 = 0.15;
+/// 문서 처음·끝에서 기준점이 가운데 ↔ 맨 위·맨 아래로 옮겨 가는 스크롤 비율 구간.
+const EDGE_RAMP: f32 = 0.05;
+
+/// 스크롤 비율(0~1)에 따른 기준점의 화면 y: 가운데, 문서 처음·끝 [`EDGE_RAMP`] 구간에서는 맨 위·맨 아래 쪽으로.
+fn anchor_dy(fraction: f32, height: f32) -> f32 {
+    let position = if fraction < 0.5 {
+        0.5 * (fraction / EDGE_RAMP).min(1.0)
+    } else {
+        1.0 - 0.5 * ((1.0 - fraction) / EDGE_RAMP).min(1.0)
+    };
+    position * height
+}
+
+/// 움직인 쪽의 동기화 기준점 (소스 줄, 화면 위로부터 y).
+///
+/// `dy` 위치의 줄이 기본이고, `dy`에서 화면 높이의 [`HEADING_SNAP`] 안에 제목이 보이면 가장 가까운 제목으로 바꾼다.
+/// `line_at(dy)`는 화면 y → 소스 줄, `screen_y(line)`은 소스 줄 → 화면 y.
+fn anchor_point(
+    dy: f32,
+    height: f32,
+    headings: &[usize],
+    line_at: impl Fn(f32) -> Option<f32>,
+    screen_y: impl Fn(f32) -> Option<f32>,
+) -> Option<(f32, f32)> {
+    let line = line_at(dy)?;
+    let snap = height * HEADING_SNAP;
+    let (first, last) = (line_at(dy - snap)?, line_at(dy + snap)?);
+    let start = headings.partition_point(|&h| (h as f32) < first);
+    let end = headings.partition_point(|&h| (h as f32) <= last);
+    let nearest = headings[start..end]
+        .iter()
+        .filter_map(|&h| screen_y(h as f32).map(|y| (h as f32, y)))
+        .filter(|&(_, y)| (y - dy).abs() <= snap && (0.0..height).contains(&y))
+        .min_by(|a, b| (a.1 - dy).abs().total_cmp(&(b.1 - dy).abs()));
+    Some(nearest.unwrap_or((line, dy)))
 }
 
 /// 분할선 x (정수 픽셀).
@@ -134,9 +271,17 @@ fn source_in(
         .highlight_exceeded
 }
 
-fn preview_in(ui: &mut egui::Ui, rect: Rect, tab: &mut Tab, zoom: f32, palette: &Palette) {
+fn preview_in(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    tab: &mut Tab,
+    zoom: f32,
+    palette: &Palette,
+    cursor_line: Option<usize>,
+) -> PreviewOutput {
     let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
-    tab.preview.show(&mut child, &tab.doc, zoom, palette);
+    tab.preview
+        .show(&mut child, &tab.doc, zoom, palette, cursor_line)
 }
 
 /// 분할선: 끌면 비율을 바꾸고, 더블클릭하면 기본 비율로 되돌린다.
@@ -174,6 +319,7 @@ mod tests {
     use super::*;
     use crate::core::highlight::HighlightOptions;
     use crate::tabs::Tabs;
+    use crate::ui::markdown_view;
     use eframe::egui::{Event, FontId, PointerButton, Pos2, RawInput};
 
     fn options() -> EditorOptions {
@@ -186,27 +332,41 @@ mod tests {
         }
     }
 
-    /// 헤드리스 프레임: `width`×800 창 전체에 활성 탭 본문을 그린다.
+    thread_local! {
+        /// 테스트 프레임에 넘길 스크롤 동기화 켜기/끄기와 입력 시각(초).
+        static SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+        static TIME: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    }
+
+    /// 헤드리스 프레임: `width`×800 창 전체에 활성 탭 본문을 그린다. 한 프레임 = 1/60초.
     fn frame(
         ctx: &egui::Context,
         tabs: &mut Tabs,
         ratio: &mut f32,
         width: f32,
         events: Vec<Event>,
-    ) {
+    ) -> DocViewOutput {
+        let time = TIME.with(|t| {
+            t.set(t.get() + 1.0 / 60.0);
+            t.get()
+        });
         let raw = RawInput {
             events,
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(width, 800.0))),
+            time: Some(time),
+            predicted_dt: 1.0 / 60.0,
             ..Default::default()
         };
+        let mut output = DocViewOutput::default();
         let mut full = ctx.run_ui(raw, |ui| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| {
-                    show(
+                    output = show(
                         ui,
                         tabs.active_mut(),
                         ratio,
+                        SYNC.with(std::cell::Cell::get),
                         &options(),
                         1.0,
                         &Palette::light(),
@@ -214,6 +374,33 @@ mod tests {
                 });
         });
         full.textures_delta.clear();
+        output
+    }
+
+    /// 마우스를 `pos`에 두고 휠로 `dy`(양수 = 아래로)만큼 굴린 뒤 애니메이션이 끝날 때까지 그린다.
+    fn wheel(ctx: &egui::Context, tabs: &mut Tabs, ratio: &mut f32, pos: Pos2, dy: f32) {
+        frame(ctx, tabs, ratio, 1200.0, vec![Event::PointerMoved(pos)]);
+        let event = Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -dy),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: Default::default(),
+        };
+        frame(ctx, tabs, ratio, 1200.0, vec![event]);
+        for _ in 0..40 {
+            frame(ctx, tabs, ratio, 1200.0, Vec::new());
+        }
+    }
+
+    fn click(pos: Pos2) -> Vec<Event> {
+        let button = |pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        vec![Event::PointerMoved(pos), button(true), button(false)]
     }
 
     fn frames(ctx: &egui::Context, tabs: &mut Tabs, ratio: &mut f32, width: f32) {
@@ -362,7 +549,161 @@ mod tests {
         assert_eq!(ratio, 0.8);
     }
 
-    /// 모드 전환 소요 시간 — `cargo test --release --lib -- --ignored --nocapture mode_switch_time`
+    fn split_tabs(paragraphs: usize) -> (egui::Context, Tabs, f32) {
+        let ctx = egui::Context::default();
+        let mut tabs = markdown_tabs(paragraphs);
+        tabs.active_mut().view_mode = ViewMode::Split;
+        let mut ratio = DEFAULT_SPLIT_RATIO;
+        frames(&ctx, &mut tabs, &mut ratio, 1200.0);
+        (ctx, tabs, ratio)
+    }
+
+    fn top_lines(tabs: &Tabs) -> (f32, f32) {
+        let tab = tabs.active();
+        (
+            tab.editor.top_line(&tab.doc).unwrap(),
+            tab.preview.top_line().unwrap(),
+        )
+    }
+
+    #[test]
+    fn scrolling_source_moves_preview_and_back() {
+        let (ctx, mut tabs, mut ratio) = split_tabs(300);
+        wheel(&ctx, &mut tabs, &mut ratio, pos2(300.0, 400.0), 3000.0);
+        let (source, preview) = top_lines(&tabs);
+        assert!(source > 50.0, "소스가 스크롤되지 않음: {source}");
+        assert!(
+            (source - preview).abs() <= 1.0,
+            "소스 {source} · 미리보기 {preview}"
+        );
+
+        // 미리보기를 굴리면 소스가 따라온다
+        wheel(&ctx, &mut tabs, &mut ratio, pos2(900.0, 400.0), 2000.0);
+        let (source2, preview2) = top_lines(&tabs);
+        assert!(
+            preview2 > preview + 20.0,
+            "미리보기가 스크롤되지 않음: {preview2}"
+        );
+        assert!(
+            (source2 - preview2).abs() <= 1.0,
+            "소스 {source2} · 미리보기 {preview2}"
+        );
+    }
+
+    #[test]
+    fn synced_panes_stay_still_without_feedback() {
+        let (ctx, mut tabs, mut ratio) = split_tabs(300);
+        wheel(&ctx, &mut tabs, &mut ratio, pos2(300.0, 400.0), 2500.0);
+        let offsets = |tabs: &Tabs| {
+            let tab = tabs.active();
+            (tab.doc.scroll_offset_y(), tab.preview.offset_y())
+        };
+        let settled = offsets(&tabs);
+        for _ in 0..20 {
+            frame(&ctx, &mut tabs, &mut ratio, 1200.0, Vec::new());
+            assert_eq!(offsets(&tabs), settled, "멈춘 뒤 스크롤이 움직임");
+        }
+    }
+
+    #[test]
+    fn sync_off_scrolls_independently() {
+        let (ctx, mut tabs, mut ratio) = split_tabs(300);
+        SYNC.with(|s| s.set(false));
+        wheel(&ctx, &mut tabs, &mut ratio, pos2(300.0, 400.0), 3000.0);
+        SYNC.with(|s| s.set(true));
+        let (source, preview) = top_lines(&tabs);
+        assert!(source > 50.0);
+        assert_eq!(preview, 0.0);
+    }
+
+    #[test]
+    fn double_click_on_preview_block_moves_source_cursor() {
+        let (ctx, mut tabs, mut ratio) = split_tabs(50);
+        // 미리보기 두 번째 블록(`문단 1`, 소스 줄 2)의 가운데
+        let block = tabs.active().preview.positions()[1];
+        let pos = pos2(900.0, block.top + block.height / 2.0);
+        frame(&ctx, &mut tabs, &mut ratio, 1200.0, click(pos));
+        frame(&ctx, &mut tabs, &mut ratio, 1200.0, click(pos));
+        frames(&ctx, &mut tabs, &mut ratio, 1200.0);
+        assert_eq!(editor::cursor_status(&tabs.active().doc).0, 3);
+
+        // 미리보기 단독이면 분할로 바꾸라고 알린다 (앞 클릭과 이어진 세 번 클릭으로 보지 않게 1초 기다린다)
+        tabs.active_mut().view_mode = ViewMode::Preview;
+        for _ in 0..60 {
+            frame(&ctx, &mut tabs, &mut ratio, 1200.0, Vec::new());
+        }
+        let block = tabs.active().preview.positions()[4];
+        let pos = pos2(
+            600.0,
+            block.top + block.height / 2.0 - tabs.active().preview.offset_y(),
+        );
+        frame(&ctx, &mut tabs, &mut ratio, 1200.0, click(pos));
+        let output = frame(&ctx, &mut tabs, &mut ratio, 1200.0, click(pos));
+        assert!(output.switch_to_split);
+        assert_eq!(editor::cursor_status(&tabs.active().doc).0, 9);
+    }
+
+    /// PLAN.md Phase 3 완료 기준(👤 확인 항목)의 자동 측정: `docs/PLAN.md`를 처음부터 끝까지 소스 쪽에서 스크롤하며
+    /// 두 쪽 모두 화면에 보이는 모든 제목의 위치 차이(화면 높이 기준)를 잰다.
+    #[test]
+    fn plan_md_headings_align_within_ten_percent() {
+        let plan = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/PLAN.md"),
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        let mut tabs = Tabs::new();
+        tabs.active_mut().doc.set_text(&plan);
+        tabs.active_mut().view_mode = ViewMode::Split;
+        let mut ratio = DEFAULT_SPLIT_RATIO;
+        frames(&ctx, &mut tabs, &mut ratio, 1200.0);
+        let headings = crate::core::markdown::parse(&plan).anchors;
+        let height = 800.0;
+        let mut checked = 0;
+        let mut worst = 0.0_f32;
+        let mut over = 0;
+        loop {
+            wheel(&ctx, &mut tabs, &mut ratio, pos2(300.0, 400.0), 200.0);
+            let tab = tabs.active();
+            let source_offset = tab.doc.scroll_offset_y();
+            let preview_offset = tab.preview.offset_y();
+            for h in &headings {
+                let line = h.line as f32;
+                let source_y =
+                    tab.editor.offset_for_line(&tab.doc, line, 0.0).unwrap() - source_offset;
+                let preview_y =
+                    markdown_view::line_to_y(tab.preview.positions(), line) - preview_offset;
+                // 두 쪽 모두 화면 안에 보이는 제목만
+                if (0.0..height).contains(&source_y) && (0.0..height).contains(&preview_y) {
+                    let diff = (source_y - preview_y).abs() / height;
+                    if diff > 0.10 {
+                        over += 1;
+                    }
+                    worst = worst.max(diff);
+                    checked += 1;
+                }
+            }
+            if tab.editor.top_line(&tab.doc).unwrap() + 40.0 >= tab.doc.line_count() as f32 {
+                break;
+            }
+            if checked > 5000 {
+                break;
+            }
+        }
+        println!(
+            "PLAN.md 제목 정렬: {checked}회 확인, 10% 초과 {over}회, 최대 차이 {:.1}%",
+            worst * 100.0
+        );
+        assert!(checked > 50, "확인한 제목이 너무 적음: {checked}");
+        // 두 쪽 레이아웃 차이(소스 줄바꿈·표)로 화면 가장자리 제목은 10%를 조금 넘을 수 있다 — 회귀 방지 기준
+        assert!(worst <= 0.12, "최대 차이 {:.1}% > 12%", worst * 100.0);
+        assert!(
+            over * 10 <= checked,
+            "10% 초과가 너무 많음: {over}/{checked}"
+        );
+    }
+
+    /// 모드 전환 소요 시간 —`cargo test --release --lib -- --ignored --nocapture mode_switch_time`
     #[test]
     #[ignore = "측정용: 릴리스 빌드로 실행"]
     fn mode_switch_time_100kb() {

@@ -35,9 +35,14 @@ pub struct BlockPos {
 pub struct PreviewState {
     id: u64,
     cache: MarkdownCache,
+    /// 마지막으로 그린 파싱 결과 (제목 줄 조회용)
+    parsed: Option<std::sync::Arc<markdown::Document>>,
     positions: Vec<BlockPos>,
     /// 마지막 프레임의 세로 스크롤 위치
     offset_y: f32,
+    /// 마지막 프레임의 보이는 높이와 세로 스크롤 최대값
+    view_height: f32,
+    max_offset: f32,
     /// 다음 프레임에 적용할 세로 스크롤 위치
     pending_offset: Option<f32>,
     /// 다음에 그릴 때 이 소스 줄이 화면 맨 위에 오게 한다 (보기 모드 전환, P3-06)
@@ -49,8 +54,11 @@ impl PreviewState {
         Self {
             id,
             cache: MarkdownCache::default(),
+            parsed: None,
             positions: Vec::new(),
             offset_y: 0.0,
+            view_height: 0.0,
+            max_offset: 0.0,
             pending_offset: None,
             pending_top_line: None,
         }
@@ -58,7 +66,27 @@ impl PreviewState {
 
     /// 마지막으로 그린 화면 맨 위의 소스 줄 (0부터, 소수 = 줄 안 위치). 아직 그린 적이 없으면 `None`.
     pub fn top_line(&self) -> Option<f32> {
-        (!self.positions.is_empty()).then(|| y_to_line(&self.positions, self.offset_y))
+        self.line_at(0.0)
+    }
+
+    /// 마지막으로 그린 화면에서 위로부터 `dy`만큼 내려간 곳의 소스 줄.
+    pub fn line_at(&self, dy: f32) -> Option<f32> {
+        (!self.positions.is_empty()).then(|| y_to_line(&self.positions, self.offset_y + dy))
+    }
+
+    /// `line`이 위로부터 `dy` 위치에 오는 세로 스크롤 위치 (0 미만이면 0).
+    pub fn offset_for_line(&self, line: f32, dy: f32) -> f32 {
+        (line_to_y(&self.positions, line) - dy).max(0.0)
+    }
+
+    /// 마지막 프레임의 (스크롤 비율 0~1, 보이는 높이). 스크롤할 내용이 없으면 비율은 0.
+    pub fn scroll_fraction(&self) -> (f32, f32) {
+        let fraction = if self.max_offset > 0.0 {
+            (self.offset_y / self.max_offset).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (fraction, self.view_height)
     }
 
     /// 다음에 그릴 때 `line`이 화면 맨 위에 오도록 스크롤한다.
@@ -66,6 +94,33 @@ impl PreviewState {
     /// 블록 위치는 그 폭으로 그려 봐야 알 수 있으므로, 그 프레임은 보이지 않게 그리고 다음 프레임에 맞춘다.
     pub fn scroll_to_line(&mut self, line: f32) {
         self.pending_top_line = Some(line.max(0.0));
+    }
+
+    /// 마지막 프레임의 세로 스크롤 위치.
+    pub fn offset_y(&self) -> f32 {
+        self.offset_y
+    }
+
+    /// 다음 프레임에 세로 스크롤 위치를 `y`로 맞춘다 (스크롤 동기화, P3-08).
+    pub fn set_scroll_offset(&mut self, y: f32) {
+        self.pending_offset = Some(y.max(0.0));
+    }
+
+    /// 다음 프레임에 적용할 스크롤 요청이 있는지 (그 프레임의 스크롤 변화는 사용자 조작이 아니다).
+    pub fn has_pending_scroll(&self) -> bool {
+        self.pending_offset.is_some() || self.pending_top_line.is_some()
+    }
+
+    /// 보기 모드 전환으로 위치를 다시 맞추는 중인지 (숨겨 그리는 프레임).
+    pub fn is_repositioning(&self) -> bool {
+        self.pending_top_line.is_some()
+    }
+
+    /// 마지막으로 그린 문서의 제목 소스 줄 (문서 순서, 중첩 제목 포함).
+    pub fn heading_lines(&self) -> impl Iterator<Item = usize> + '_ {
+        self.parsed
+            .iter()
+            .flat_map(|d| d.anchors.iter().map(|a| a.line))
     }
 
     /// 마지막으로 그린 최상위 블록 위치표.
@@ -83,10 +138,20 @@ impl PreviewState {
         self.cache.parse_count()
     }
 
-    /// 문서를 미리보기로 그린다. `zoom`은 에디터 확대/축소 배율.
-    pub fn show(&mut self, ui: &mut egui::Ui, doc: &Document, zoom: f32, palette: &Palette) {
+    /// 문서를 미리보기로 그린다. `zoom`은 에디터 확대/축소 배율,
+    /// `cursor_line`(0부터)이 있으면 그 줄을 포함한 최상위 블록에 옅은 배경을 깐다 (분할 모드 커서 위치, P3-08).
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &Document,
+        zoom: f32,
+        palette: &Palette,
+        cursor_line: Option<usize>,
+    ) -> PreviewOutput {
         let parsed = self.cache.get(doc.revision(), doc.text());
-        let style = Style::new(ui, zoom, palette);
+        self.parsed = Some(std::sync::Arc::clone(&parsed));
+        let mut style = Style::new(ui, zoom, palette);
+        style.cursor = cursor_line.map(|line| (line, palette.cursor_block));
         if self.pending_top_line.is_some() {
             ui.set_invisible();
         }
@@ -109,11 +174,42 @@ impl PreviewState {
             });
         });
         self.offset_y = output.state.clamped_offset().y;
+        self.view_height = output.inner_rect.height();
+        self.max_offset = (output.content_size.y - output.inner_rect.height()).max(0.0);
         if let Some(line) = self.pending_top_line.take() {
             self.pending_offset = Some(line_to_y(&self.positions, line));
             ui.ctx().request_repaint();
         }
+
+        // 블록 더블클릭 → 그 블록의 첫 소스 줄 (P3-08)
+        let view = output.inner_rect;
+        let content_top = view.top() - self.offset_y;
+        let double_clicked_line = ui
+            .input(|i| {
+                i.pointer
+                    .button_double_clicked(egui::PointerButton::Primary)
+                    .then(|| i.pointer.interact_pos())
+                    .flatten()
+            })
+            .filter(|pos| view.contains(*pos))
+            .and_then(|pos| {
+                let y = pos.y - content_top;
+                self.positions
+                    .iter()
+                    .find(|p| p.top <= y && y < p.top + p.height)
+                    .map(|p| p.first_line)
+            });
+        PreviewOutput {
+            double_clicked_line,
+        }
     }
+}
+
+/// [`PreviewState::show`] 결과.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewOutput {
+    /// 이번 프레임에 더블클릭한 블록의 첫 소스 줄 (0부터)
+    pub double_clicked_line: Option<usize>,
 }
 
 /// 소스 줄(0부터, 소수 = 줄 안 위치) → 미리보기 스크롤 내용 y.
@@ -178,6 +274,8 @@ struct Style {
     body: f32,
     line: f32,
     code_bg: Color32,
+    /// (커서 소스 줄, 강조 색) — 이 줄을 포함한 최상위 블록 뒤에 배경을 깐다
+    cursor: Option<(usize, Color32)>,
 }
 
 impl Style {
@@ -189,6 +287,7 @@ impl Style {
             body,
             line: ui.text_style_height(&TextStyle::Body) * zoom,
             code_bg: palette.preview_code_bg,
+            cursor: None,
         }
     }
 
@@ -220,6 +319,8 @@ fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], style: &Style) -> Vec<BlockP
             };
             ui.add_space(style.line * (0.8 + extra));
         }
+        // 커서 블록 배경은 글자 뒤에 깔리도록 자리를 먼저 잡아 둔다
+        let background = ui.painter().add(egui::Shape::Noop);
         let rect = ui
             .scope(|ui| {
                 ui.set_width(ui.available_width());
@@ -227,6 +328,15 @@ fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], style: &Style) -> Vec<BlockP
             })
             .response
             .rect;
+        if let Some((line, color)) = style.cursor
+            && (block.first_line..=block.last_line).contains(&line)
+        {
+            let pad = MARGIN as f32 / 2.0;
+            ui.painter().set(
+                background,
+                egui::Shape::rect_filled(rect.expand2(egui::vec2(pad, pad / 2.0)), 4.0, color),
+            );
+        }
         positions.push(BlockPos {
             first_line: block.first_line,
             last_line: block.last_line,
@@ -597,7 +707,7 @@ mod tests {
         };
         let mut full = ctx.run_ui(raw, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                state.show(ui, doc, 1.0, &Palette::light());
+                state.show(ui, doc, 1.0, &Palette::light(), None);
             });
         });
         full.textures_delta.clear();
@@ -708,6 +818,41 @@ mod tests {
         frame(&ctx, &mut state, &d);
         let top = state.top_line().unwrap();
         assert!((top - 100.0).abs() < 1.0, "맨 위 줄 {top}");
+    }
+
+    #[test]
+    fn cursor_line_block_gets_background() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let d = doc("# 제목
+
+첫 문단
+둘째 줄
+
+끝
+");
+        let color = Palette::light().cursor_block;
+        let backgrounds = |state: &mut PreviewState, line| {
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 800.0))),
+                ..Default::default()
+            };
+            let mut full = ctx.run_ui(raw, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    state.show(ui, &d, 1.0, &Palette::light(), line);
+                });
+            });
+            full.textures_delta.clear();
+            full.shapes
+                .iter()
+                .filter(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.fill == color))
+                .count()
+        };
+        // 줄 3(0부터)은 둘째 블록(줄 2~3) 안
+        assert_eq!(backgrounds(&mut state, Some(3)), 1);
+        // 블록 사이 빈 줄은 강조 없음, 커서 정보가 없어도 없음
+        assert_eq!(backgrounds(&mut state, Some(4)), 0);
+        assert_eq!(backgrounds(&mut state, None), 0);
     }
 
     #[test]

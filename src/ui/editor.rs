@@ -95,6 +95,10 @@ pub struct EditorState {
 struct LastView {
     galley: Arc<Galley>,
     top_in_galley: f32,
+    /// 보이는 영역 높이
+    view_height: f32,
+    /// 세로 스크롤 최대값 (내용 높이 − 보이는 높이)
+    max_offset: f32,
 }
 
 impl EditorState {
@@ -137,19 +141,34 @@ impl EditorState {
 
     /// 마지막으로 그린 화면 맨 위의 소스 줄 (0부터, 소수 = 줄 안 위치). 아직 그린 적이 없으면 `None`.
     pub fn top_line(&self, doc: &Document) -> Option<f32> {
+        self.line_at(doc, 0.0)
+    }
+
+    /// 마지막으로 그린 화면에서 위로부터 `dy`만큼 내려간 곳의 소스 줄 (0부터, 소수 = 줄 안 위치).
+    pub fn line_at(&self, doc: &Document, dy: f32) -> Option<f32> {
         let view = self.last_view.as_ref()?;
-        let cursor = view
-            .galley
-            .cursor_from_pos(egui::vec2(0.0, view.top_in_galley.max(0.0)));
+        let y = view.top_in_galley + dy;
+        let cursor = view.galley.cursor_from_pos(egui::vec2(0.0, y.max(0.0)));
         let byte = char_to_byte_offset(doc.text(), cursor.index.0);
         let line = doc.line_index().line_of_byte(byte);
         let (top, bottom) = line_span(doc, &view.galley, line);
         let fraction = if bottom > top {
-            ((view.top_in_galley - top) / (bottom - top)).clamp(0.0, 1.0)
+            ((y - top) / (bottom - top)).clamp(0.0, 1.0)
         } else {
             0.0
         };
         Some(line as f32 + fraction)
+    }
+
+    /// 마지막 프레임의 (스크롤 비율 0~1, 보이는 높이). 스크롤할 내용이 없으면 비율은 0.
+    pub fn scroll_fraction(&self, doc: &Document) -> Option<(f32, f32)> {
+        let view = self.last_view.as_ref()?;
+        let fraction = if view.max_offset > 0.0 {
+            (doc.scroll_offset_y() / view.max_offset).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Some((fraction, view.view_height))
     }
 
     /// 다음에 그릴 때 `line`(0부터, 소수 = 줄 안 위치)이 화면 맨 위에 오도록 스크롤한다.
@@ -157,6 +176,31 @@ impl EditorState {
     /// 새 레이아웃(폭이 바뀌었을 수 있다)으로 위치를 계산해야 하므로, 그 프레임은 보이지 않게 그리고 다음 프레임에 맞춘다.
     pub fn scroll_to_line(&mut self, line: f32) {
         self.pending_top_line = Some(line.max(0.0));
+    }
+
+    /// 보이는 화면 그대로(폭이 같을 때) `line`이 위로부터 `dy` 위치에 오는 세로 스크롤 위치
+    /// (0 미만이면 0). 아직 그린 적이 없으면 `None`.
+    pub fn offset_for_line(&self, doc: &Document, line: f32, dy: f32) -> Option<f32> {
+        let view = self.last_view.as_ref()?;
+        let line = line.max(0.0);
+        let (top, bottom) = line_span(doc, &view.galley, line.floor() as usize);
+        let y = top + (bottom - top) * line.fract();
+        Some((doc.scroll_offset_y() + y - view.top_in_galley - dy).max(0.0))
+    }
+
+    /// 다음 프레임에 세로 스크롤 위치를 `y`로 맞춘다 (스크롤 동기화, P3-08).
+    pub fn set_scroll_offset(&mut self, y: f32) {
+        self.pending_scroll_y = Some(y.max(0.0));
+    }
+
+    /// 다음 프레임에 적용할 스크롤 요청이 있는지 (그 프레임의 스크롤 변화는 사용자 조작이 아니다).
+    pub fn has_pending_scroll(&self) -> bool {
+        self.pending_scroll_y.is_some() || self.pending_top_line.is_some() || self.center_cursor
+    }
+
+    /// 보기 모드 전환으로 위치를 다시 맞추는 중인지 (숨겨 그리는 프레임).
+    pub fn is_repositioning(&self) -> bool {
+        self.pending_top_line.is_some()
     }
 
     /// `line`(1-기반) 줄 처음으로 커서를 옮기고, 그 줄이 화면 가운데에 오도록 스크롤한다 (줄 이동, P2-02).
@@ -343,6 +387,8 @@ impl EditorState {
         self.last_view = Some(LastView {
             galley: Arc::clone(&scroll_output.inner.galley),
             top_in_galley: view.min.y - galley_pos.y,
+            view_height: view.height(),
+            max_offset: (scroll_output.content_size.y - view.height()).max(0.0),
         });
         if let Some(line) = self.pending_top_line.take() {
             let (top, bottom) = line_span(doc, &scroll_output.inner.galley, line.floor() as usize);
