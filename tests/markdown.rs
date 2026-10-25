@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use my_notepad::core::markdown::{
-    Align, Block, BlockKind, Document, MarkdownCache, SpanKind, parse, plain_text,
+    Align, BACKGROUND_PARSE_BYTES, Block, BlockKind, Document, MarkdownCache, SpanKind, parse,
+    plain_text,
 };
 
 fn fixture(name: &str) -> String {
@@ -227,6 +228,9 @@ fn gfm_all_inline_and_table_details() {
     assert_eq!(doc.footnotes, ["1", "note"]);
     assert_eq!(doc.footnote_number("note"), Some(2));
     assert_eq!(doc.footnote_number("없음"), None);
+    // 처음 참조한 소스 줄 (gfm_all.md 58번째 줄)
+    assert_eq!(doc.footnote_ref_line("note"), Some(57));
+    assert_eq!(doc.footnote_ref_line("없음"), None);
 }
 
 #[test]
@@ -274,6 +278,46 @@ fn cache_reparses_only_when_revision_changes() {
     cache.invalidate();
     cache.get(2, &text);
     assert_eq!(cache.parse_count(), 4);
+}
+
+/// P3-05: 1MB를 넘는 문서는 UI 스레드 밖에서 파싱하고, 끝날 때까지 이전 결과를 쓴다.
+#[test]
+fn large_document_is_parsed_off_thread() {
+    let unit = format!(
+        "{}
+",
+        fixture("korean.md")
+    );
+    let mut text = String::new();
+    while text.len() <= BACKGROUND_PARSE_BYTES {
+        text.push_str(&unit);
+    }
+    let mut cache = MarkdownCache::default();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let caller = std::thread::current().id();
+    let first = cache.get_or_spawn(1, &text, move || {
+        sender.send(std::thread::current().id()).unwrap();
+    });
+    // 처음에는 빈 문서를 바로 돌려주고 파싱 중
+    assert!(first.blocks.is_empty());
+    assert!(cache.is_parsing());
+    let worker = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("파싱이 끝나지 않음");
+    assert_ne!(worker, caller, "UI 스레드에서 파싱함");
+    let done = cache.get_or_spawn(1, &text, || {});
+    assert!(!done.blocks.is_empty());
+    assert!(!cache.is_parsing());
+    assert_eq!(cache.parse_count(), 1);
+
+    // 작은 문서는 바로 이 스레드에서
+    let small = cache.get_or_spawn(
+        2,
+        "# 작음
+",
+        || panic!("작은 문서를 백그라운드로 보냄"),
+    );
+    assert_eq!(small.blocks.len(), 1);
 }
 
 /// 1MB 문서 파싱 시간 측정 — `cargo test --release --test markdown -- --ignored --nocapture`

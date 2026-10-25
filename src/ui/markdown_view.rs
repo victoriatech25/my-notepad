@@ -5,7 +5,11 @@
 //! - 화면 규칙은 UX-004(P0-08)에서 정한 A(egui_commonmark) 모양을 따른다: 제목은 본문 크기의 단계별 배율
 //!   (H1 = 2배) + 진한 색, 굵게는 진한 색(굵은 글꼴은 쓰지 않음 — ADR 0002), 블록 사이 한 줄 여백,
 //!   인용은 왼쪽 3px 선 + 흐린 글자, 목록 글머리는 공백 4칸 폭 안에 그린다.
-//! - 최상위 블록마다 그려진 위치([`BlockPos`])를 기록한다 — 스크롤 동기화(P3-08)·가상 스크롤(P3-05)의 기반.
+//! - 최상위 블록마다 위치([`BlockPos`])를 기록한다 — 스크롤 동기화(P3-08)의 기반.
+//! - 가상 스크롤(P3-05): 블록 높이를 (블록 원문, 본문 폭·확대·테마)로 캐시하고, **화면에 보이는 블록만** 그린다.
+//!   처음 보는 블록은 보이지 않는 측정용 UI에 한 번 그려 높이를 잰다 — 편집하면 바뀐 블록만 다시 잰다.
+//!   보이는 블록을 실제로 그린 높이가 캐시와 다르면(이미지 크기·접기 상태 등) 캐시를 고치고 다시 그린다.
+//!   1MB를 넘는 문서는 작업 스레드에서 파싱한다 ([`MarkdownCache::get_or_spawn`]).
 //! - 코드 블록은 줄을 접지 않고 블록 안에서만 가로 스크롤, 표는 내용에 맞춘 열 폭·넘치면 열을 내용 폭에 비례해
 //!   줄여 줄바꿈·그래도 넘치면 표만 가로 스크롤 (P3-03).
 //! - 이미지(P3-04): 문단 안 이미지는 자기 줄에 그린다. 로컬 파일은 원본 크기(보이는 폭에 맞춰 축소)로,
@@ -20,6 +24,7 @@ use eframe::egui::{
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
@@ -69,6 +74,23 @@ pub struct PreviewState {
     pending_top_line: Option<f32>,
     /// 이미지 텍스처 캐시 (P3-04)
     images: RefCell<ImageCache>,
+    /// 블록 높이 캐시 (P3-05)
+    heights: HeightCache,
+}
+
+/// 블록 높이 캐시: 블록 원문 해시 → 높이. 본문 폭·확대·테마가 바뀌면 비운다.
+#[derive(Debug, Default)]
+struct HeightCache {
+    /// (본문 폭 px, 확대 배율 ×100, 다크 모드)
+    layout: Option<(i32, i32, bool)>,
+    heights: HashMap<u64, f32>,
+    /// `keys`를 계산한 파싱 결과
+    keys_for: Option<Arc<markdown::Document>>,
+    /// 최상위 블록마다의 원문 해시
+    keys: Vec<u64>,
+    /// 마지막 프레임에 측정한 블록 수와 실제로 그린 블록 수
+    measured: usize,
+    rendered: usize,
 }
 
 impl PreviewState {
@@ -84,7 +106,18 @@ impl PreviewState {
             pending_offset: None,
             pending_top_line: None,
             images: RefCell::new(ImageCache::default()),
+            heights: HeightCache::default(),
         }
+    }
+
+    /// 마지막 프레임에 높이를 새로 잰 블록 수와 실제로 그린 블록 수 (가상 스크롤 확인용).
+    pub fn last_frame_counts(&self) -> (usize, usize) {
+        (self.heights.measured, self.heights.rendered)
+    }
+
+    /// 큰 문서를 작업 스레드에서 파싱 중인지.
+    pub fn is_parsing(&self) -> bool {
+        self.cache.is_parsing()
     }
 
     /// 마지막으로 그린 화면 맨 위의 소스 줄 (0부터, 소수 = 줄 안 위치). 아직 그린 적이 없으면 `None`.
@@ -176,7 +209,10 @@ impl PreviewState {
         palette: &Palette,
         cursor_line: Option<usize>,
     ) -> PreviewOutput {
-        let parsed = self.cache.get(doc.revision(), doc.text());
+        let ctx = ui.ctx().clone();
+        let parsed = self
+            .cache
+            .get_or_spawn(doc.revision(), doc.text(), move || ctx.request_repaint());
         self.parsed = Some(std::sync::Arc::clone(&parsed));
         self.images.borrow_mut().begin_frame(ui.ctx());
         let doc_dir = doc.path().and_then(Path::parent);
@@ -188,20 +224,42 @@ impl PreviewState {
         let mut scroll = egui::ScrollArea::vertical()
             .id_salt(("md-preview", self.id))
             .auto_shrink(false);
+        // 스크롤 범위를 넘는 위치(문서 끝 각주로 이동 등)는 지난 프레임의 최대값으로 자른다 —
+        // egui는 넘는 값을 그대로 써서 내용을 그 자리에 그린다
         if let Some(y) = self.pending_offset.take() {
-            scroll = scroll.vertical_scroll_offset(y);
+            scroll = scroll.vertical_scroll_offset(y.min(self.max_offset));
         }
+        let parsing = self.cache.is_parsing() && parsed.blocks.is_empty();
+        let heights = &mut self.heights;
         let positions = &mut self.positions;
-        let output = scroll.show(ui, |ui| {
-            let origin = ui.cursor().top();
-            egui::Frame::new().inner_margin(MARGIN).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                let top = ui.cursor().top() - origin;
-                *positions = show_blocks(ui, &parsed.blocks, &style);
-                for p in positions.iter_mut() {
-                    p.top += top;
-                }
-            });
+        let output = scroll.show_viewport(ui, |ui, viewport| {
+            if parsing {
+                ui.add_space(MARGIN as f32);
+                ui.label(RichText::new("  큰 문서를 분석하는 중…").weak());
+                positions.clear();
+                return;
+            }
+            let width = (ui.available_width() - 2.0 * MARGIN as f32).max(1.0);
+            heights.prepare(&parsed, doc, width, zoom, ui.visuals().dark_mode);
+            heights.measure_missing(ui, &parsed.blocks, &style, width);
+            *positions = heights.positions(&parsed.blocks, &style);
+            let total = positions
+                .last()
+                .map_or(0.0, |p| p.top + p.height + MARGIN as f32);
+            let content = ui.min_rect().min;
+            ui.allocate_space(egui::vec2(ui.available_width(), total));
+            let changed = heights.render_visible(
+                ui,
+                &parsed.blocks,
+                positions,
+                &style,
+                content,
+                width,
+                viewport,
+            );
+            if changed {
+                ui.ctx().request_repaint();
+            }
         });
         self.offset_y = output.state.clamped_offset().y;
         self.view_height = output.inner_rect.height();
@@ -228,11 +286,9 @@ impl PreviewState {
                     )
                     .and_then(|i| self.positions.get(i))
                     .map(|p| p.top - MARGIN as f32),
-                Jump::BackToRef(label) => style
-                    .footnote_refs
-                    .borrow()
-                    .get(&label)
-                    .map(|y| y - content_top - view.height() / 3.0),
+                Jump::BackToRef(label) => parsed
+                    .footnote_ref_line(&label)
+                    .map(|line| line_to_y(&self.positions, line as f32) - view.height() / 3.0),
             };
             if let Some(y) = target {
                 self.pending_offset = Some(y.max(0.0));
@@ -334,6 +390,8 @@ enum Jump {
 struct Style<'a> {
     body: f32,
     line: f32,
+    /// 위젯 사이 세로 간격 (블록 사이에도 더한다)
+    item_gap: f32,
     code_bg: Color32,
     warning: Color32,
     /// (커서 소스 줄, 강조 색) — 이 줄을 포함한 최상위 블록 뒤에 배경을 깐다
@@ -343,8 +401,6 @@ struct Style<'a> {
     images: &'a RefCell<ImageCache>,
     /// 각주 이름 (처음 참조한 순서 — 화면 번호 = 순서 + 1)
     footnotes: &'a [String],
-    /// 이번 프레임에 그린 각주 참조의 화면 y (이름별 처음 참조)
-    footnote_refs: RefCell<HashMap<String, f32>>,
     /// 이번 프레임에 누른 각주 이동
     jump: RefCell<Option<Jump>>,
 }
@@ -364,13 +420,13 @@ impl<'a> Style<'a> {
         Self {
             body,
             line: ui.text_style_height(&TextStyle::Body) * zoom,
+            item_gap: ui.spacing().item_spacing.y,
             code_bg: palette.preview_code_bg,
             warning: palette.status_warning,
             cursor: None,
             doc_dir,
             images,
             footnotes,
-            footnote_refs: RefCell::new(HashMap::new()),
             jump: RefCell::new(None),
         }
     }
@@ -397,46 +453,163 @@ impl<'a> Style<'a> {
     }
 }
 
-/// 최상위 블록을 차례로 그리고 위치표를 돌려준다.
-fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], style: &Style) -> Vec<BlockPos> {
-    let origin = ui.cursor().top();
-    let mut positions = Vec::with_capacity(blocks.len());
-    for (index, block) in blocks.iter().enumerate() {
-        if index > 0 {
-            // 블록 사이 한 줄 여백, 제목 앞은 조금 더
-            let extra = if matches!(block.kind, BlockKind::Heading { .. }) {
-                0.6
-            } else {
-                0.0
-            };
-            ui.add_space(style.line * (0.8 + extra));
-        }
-        // 커서 블록 배경은 글자 뒤에 깔리도록 자리를 먼저 잡아 둔다
-        let background = ui.painter().add(egui::Shape::Noop);
-        let rect = ui
-            .scope(|ui| {
-                ui.set_width(ui.available_width());
-                render_block(ui, block, style, 0);
-            })
-            .response
-            .rect;
-        if let Some((line, color)) = style.cursor
-            && (block.first_line..=block.last_line).contains(&line)
-        {
-            let pad = MARGIN as f32 / 2.0;
-            ui.painter().set(
-                background,
-                egui::Shape::rect_filled(rect.expand2(egui::vec2(pad, pad / 2.0)), 4.0, color),
-            );
-        }
-        positions.push(BlockPos {
-            first_line: block.first_line,
-            last_line: block.last_line,
-            top: rect.top() - origin,
-            height: rect.height(),
-        });
+/// 최상위 블록 `index` 앞 여백: 위젯 간격 + 한 줄 여백, 제목 앞은 조금 더 (가상 스크롤 전과 같은 배치).
+fn gap_before(blocks: &[Block], index: usize, style: &Style) -> f32 {
+    if index == 0 {
+        return 0.0;
     }
-    positions
+    let extra = if matches!(blocks[index].kind, BlockKind::Heading { .. }) {
+        0.6
+    } else {
+        0.0
+    };
+    style.item_gap + style.line * (0.8 + extra)
+}
+
+/// 블록 원문(소스 줄 범위의 글자)과 종류로 만든 높이 캐시 키.
+fn block_key(doc: &Document, block: &Block) -> u64 {
+    let index = doc.line_index();
+    let text = doc.text();
+    let start = index
+        .line_start_byte(block.first_line)
+        .unwrap_or(text.len());
+    let end = index
+        .line_start_byte(block.last_line + 1)
+        .unwrap_or(text.len())
+        .max(start);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    block.kind.name().hash(&mut hasher);
+    text.get(start..end).hash(&mut hasher);
+    hasher.finish()
+}
+
+impl HeightCache {
+    /// 본문 폭·확대·테마가 바뀌었으면 높이를 비우고, 파싱 결과가 바뀌었으면 블록 키를 다시 만든다.
+    fn prepare(
+        &mut self,
+        parsed: &Arc<markdown::Document>,
+        doc: &Document,
+        width: f32,
+        zoom: f32,
+        dark: bool,
+    ) {
+        let layout = (width.round() as i32, (zoom * 100.0).round() as i32, dark);
+        if self.layout != Some(layout) {
+            self.layout = Some(layout);
+            self.heights.clear();
+        }
+        if !self
+            .keys_for
+            .as_ref()
+            .is_some_and(|d| Arc::ptr_eq(d, parsed))
+        {
+            self.keys = parsed.blocks.iter().map(|b| block_key(doc, b)).collect();
+            self.keys_for = Some(Arc::clone(parsed));
+        }
+    }
+
+    /// 높이를 모르는 블록을 보이지 않는 측정용 UI에 그려 높이를 잰다.
+    fn measure_missing(&mut self, ui: &mut egui::Ui, blocks: &[Block], style: &Style, width: f32) {
+        self.measured = 0;
+        let missing: Vec<usize> = (0..blocks.len())
+            .filter(|&i| !self.heights.contains_key(&self.keys[i]))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let area = egui::Rect::from_min_size(ui.min_rect().min, egui::vec2(width, f32::INFINITY));
+        let mut measure = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("md-measure")
+                .max_rect(area)
+                .invisible(),
+        );
+        for i in missing {
+            let height = measure
+                .push_id(("md-block", blocks[i].first_line), |ui| {
+                    ui.set_width(width);
+                    render_block(ui, &blocks[i], style, 0);
+                })
+                .response
+                .rect
+                .height();
+            self.heights.insert(self.keys[i], height);
+            self.measured += 1;
+        }
+    }
+
+    /// 캐시된 높이로 전체 위치표를 만든다 (스크롤 내용 좌표, 바깥 여백 포함).
+    fn positions(&self, blocks: &[Block], style: &Style) -> Vec<BlockPos> {
+        let mut y = MARGIN as f32;
+        blocks
+            .iter()
+            .enumerate()
+            .map(|(i, block)| {
+                y += gap_before(blocks, i, style);
+                let height = self
+                    .heights
+                    .get(&self.keys[i])
+                    .copied()
+                    .unwrap_or(style.line);
+                let pos = BlockPos {
+                    first_line: block.first_line,
+                    last_line: block.last_line,
+                    top: y,
+                    height,
+                };
+                y += height;
+                pos
+            })
+            .collect()
+    }
+
+    /// `viewport`(스크롤 내용 좌표)와 겹치는 블록만 그린다. 실제 높이가 캐시와 다르면 고치고 `true`.
+    #[allow(clippy::too_many_arguments)]
+    fn render_visible(
+        &mut self,
+        ui: &mut egui::Ui,
+        blocks: &[Block],
+        positions: &[BlockPos],
+        style: &Style,
+        content: egui::Pos2,
+        width: f32,
+        viewport: egui::Rect,
+    ) -> bool {
+        let first = positions.partition_point(|p| p.top + p.height < viewport.min.y);
+        let last = positions.partition_point(|p| p.top <= viewport.max.y);
+        let mut changed = false;
+        self.rendered = 0;
+        for i in first..last.max(first) {
+            let (block, pos) = (&blocks[i], positions[i]);
+            let min = content + egui::vec2(MARGIN as f32, pos.top);
+            let area = egui::Rect::from_min_size(min, egui::vec2(width, f32::INFINITY));
+            // 커서 블록 배경은 글자 뒤에 깔리도록 자리를 먼저 잡아 둔다
+            let background = ui.painter().add(egui::Shape::Noop);
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("md-block", block.first_line))
+                    .max_rect(area),
+            );
+            child.set_width(width);
+            render_block(&mut child, block, style, 0);
+            let rect = child.min_rect();
+            self.rendered += 1;
+            if let Some((line, color)) = style.cursor
+                && (block.first_line..=block.last_line).contains(&line)
+            {
+                let pad = MARGIN as f32 / 2.0;
+                ui.painter().set(
+                    background,
+                    egui::Shape::rect_filled(rect.expand2(egui::vec2(pad, pad / 2.0)), 4.0, color),
+                );
+            }
+            if (rect.height() - pos.height).abs() > 0.5 {
+                self.heights.insert(self.keys[i], rect.height());
+                changed = true;
+            }
+        }
+        changed
+    }
 }
 
 /// 하위 블록 목록 (인용·목록 항목·각주 안). `gap`은 블록 사이 여백(줄 높이 배수).
@@ -975,11 +1148,6 @@ fn rich_label(ui: &mut egui::Ui, spans: &[Span], size: f32, all_strong: bool, st
         };
         let rect =
             egui::Rect::from_min_max(start.min, egui::pos2(right, start.max.y)).translate(origin);
-        style
-            .footnote_refs
-            .borrow_mut()
-            .entry(label.clone())
-            .or_insert(rect.top());
         let hit = ui
             .interact(
                 rect,
@@ -1575,6 +1743,111 @@ mod tests {
         );
         assert!(is_unsupported_diagram(" Math "));
         assert!(!is_unsupported_diagram("rust"));
+    }
+
+    /// `gfm_all.md`·`korean.md`를 `bytes` 이상이 되도록 반복한 문서.
+    fn long_markdown(bytes: usize) -> String {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/markdown");
+        let unit = format!(
+            "{}\n{}\n",
+            std::fs::read_to_string(dir.join("gfm_all.md")).unwrap(),
+            std::fs::read_to_string(dir.join("korean.md")).unwrap()
+        );
+        let mut text = String::with_capacity(bytes + unit.len());
+        while text.len() < bytes {
+            text.push_str(&unit);
+        }
+        text
+    }
+
+    #[test]
+    fn only_visible_blocks_are_rendered() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let d = doc(&long_markdown(200 * 1024));
+        for _ in 0..3 {
+            galleys_frame(&ctx, &mut state, &d, Vec::new());
+        }
+        let blocks = state.positions().len();
+        let (measured, rendered) = state.last_frame_counts();
+        assert!(blocks > 1000, "블록 수 {blocks}");
+        assert_eq!(measured, 0, "높이가 이미 캐시됨");
+        assert!(
+            rendered < 40,
+            "보이는 블록만 그려야 함: {rendered}/{blocks}"
+        );
+        assert!(
+            state.positions().windows(2).all(|w| w[1].top > w[0].top),
+            "위치표가 단조 증가해야 함"
+        );
+
+        // 문서 가운데로 이동하면 그 블록이 그려진다
+        let mid = state.positions()[blocks / 2];
+        state.set_scroll_offset(mid.top - 20.0);
+        galleys_frame(&ctx, &mut state, &d, Vec::new());
+        let texts = galleys_frame(&ctx, &mut state, &d, Vec::new());
+        let (_, rendered) = state.last_frame_counts();
+        assert!(rendered < 40);
+        let top = state.top_line().unwrap();
+        assert!(
+            (top - mid.first_line as f32).abs() < 3.0,
+            "가운데 블록이 화면 맨 위에 있어야 함: {top} / {}",
+            mid.first_line
+        );
+        assert!(!texts.is_empty());
+    }
+
+    #[test]
+    fn editing_remeasures_only_changed_blocks() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let text = long_markdown(100 * 1024);
+        let mut d = doc(&text);
+        galleys_frame(&ctx, &mut state, &d, Vec::new());
+        let (first_measured, _) = state.last_frame_counts();
+        assert!(first_measured > 500, "처음에는 모두 잰다: {first_measured}");
+        galleys_frame(&ctx, &mut state, &d, Vec::new());
+        assert_eq!(state.last_frame_counts().0, 0);
+
+        // 첫 문단 한 곳만 고친다 → 그 블록만 다시 잰다
+        d.set_text(text.replacen("문단에 **굵게**", "문단을 고쳐 **굵게**", 1));
+        galleys_frame(&ctx, &mut state, &d, Vec::new());
+        let (measured, _) = state.last_frame_counts();
+        assert!(measured <= 2, "바뀐 블록만 다시 재야 함: {measured}");
+    }
+
+    /// 1MB 미리보기 스크롤 프레임 시간 — `cargo test --release --lib -- --ignored --nocapture preview_scroll_frame_time`
+    #[test]
+    #[ignore = "측정용: 릴리스 빌드로 실행"]
+    fn preview_scroll_frame_time_1mb() {
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let d = doc(&long_markdown(1 << 20));
+        // 처음 파싱(백그라운드)과 전체 측정이 끝날 때까지
+        let start = std::time::Instant::now();
+        while state.positions().is_empty() || state.is_parsing() {
+            galleys_frame(&ctx, &mut state, &d, Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let first = std::time::Instant::now();
+        galleys_frame(&ctx, &mut state, &d, Vec::new());
+        let first_layout = first.elapsed().as_secs_f64() * 1000.0;
+        let ready = start.elapsed().as_secs_f64() * 1000.0;
+        let total = state.positions().last().map_or(0.0, |p| p.top + p.height);
+        let frames = 300;
+        let mut times = Vec::with_capacity(frames);
+        for i in 0..frames {
+            state.set_scroll_offset(total * i as f32 / frames as f32);
+            let t = std::time::Instant::now();
+            galleys_frame(&ctx, &mut state, &d, Vec::new());
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let avg = times.iter().sum::<f64>() / frames as f64;
+        let max = times.iter().copied().fold(0.0, f64::max);
+        println!(
+            "1MB 미리보기 스크롤: 블록 {}개, 첫 표시까지 {ready:.0}ms(첫 레이아웃 프레임 {first_layout:.1}ms), 스크롤 {frames}프레임 평균 {avg:.2}ms·최대 {max:.2}ms",
+            state.positions().len()
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! - 제목마다 GitHub 방식 앵커 슬러그([`slugify`])를 붙인다. 한글은 그대로 두고, 같은 슬러그가 다시 나오면
 //!   `-1`, `-2` … 접미사를 붙인다 (인용·목록 안의 제목도 문서 순서대로 센다).
 //! - [`MarkdownCache`]는 문서 버전(`revision`)이 바뀔 때만 다시 파싱한다 (§3.8-2 매 프레임 재파싱 금지).
+//!   [`BACKGROUND_PARSE_BYTES`]를 넘는 문서는 작업 스레드에서 파싱하고, 끝날 때까지 이전 결과를 쓴다 (P3-05).
 //!
 //! 원시 HTML은 실행하지 않고 원문 그대로 보관하며(§3.8-4), Mermaid·수식은 일반 코드 블록·텍스트로 남는다
 //! (미지원 라벨은 렌더러가 붙인다).
@@ -14,6 +15,8 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, channel};
+use std::time::Instant;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
@@ -149,6 +152,8 @@ pub struct Document {
     pub anchors: Vec<Anchor>,
     /// 각주 이름 (본문에서 처음 참조한 순서 — 화면 번호는 순서 + 1)
     pub footnotes: Vec<String>,
+    /// 각주를 처음 참조한 소스 줄 (`footnotes`와 같은 순서)
+    pub footnote_ref_lines: Vec<usize>,
     /// 소스 줄 수 (끝 개행 뒤의 빈 줄 포함)
     pub line_count: usize,
 }
@@ -165,6 +170,12 @@ impl Document {
             .iter()
             .position(|l| l == label)
             .map(|i| i + 1)
+    }
+
+    /// 각주를 처음 참조한 소스 줄.
+    pub fn footnote_ref_line(&self, label: &str) -> Option<usize> {
+        let i = self.footnotes.iter().position(|l| l == label)?;
+        self.footnote_ref_lines.get(i).copied()
     }
 }
 
@@ -233,15 +244,20 @@ pub fn parse(text: &str) -> Document {
         slugger: Slugger::default(),
         anchors: Vec::new(),
         footnotes: Vec::new(),
+        footnote_ref_lines: Vec::new(),
     };
     let blocks = parser.blocks(None);
     Document {
         blocks,
         anchors: parser.anchors,
         footnotes: parser.footnotes,
+        footnote_ref_lines: parser.footnote_ref_lines,
         line_count: line_starts.len(),
     }
 }
+
+/// 이보다 큰 문서는 작업 스레드에서 파싱한다 (PLAN.md §3.8-2 "잠정 1MB 초과").
+pub const BACKGROUND_PARSE_BYTES: usize = 1 << 20;
 
 /// 문서 버전 기반 파싱 캐시. 탭(문서)마다 하나씩 둔다.
 #[derive(Debug, Default)]
@@ -250,10 +266,12 @@ pub struct MarkdownCache {
     key: Option<(u64, usize)>,
     document: Arc<Document>,
     parse_count: u64,
+    /// 작업 스레드에서 파싱 중인 (버전 키, 결과 받는 쪽)
+    job: Option<((u64, usize), Receiver<Document>)>,
 }
 
 impl MarkdownCache {
-    /// `revision`이 마지막 파싱 때와 같으면 캐시된 결과를, 다르면 다시 파싱한 결과를 돌려준다.
+    /// `revision`이 마지막 파싱 때와 같으면 캐시된 결과를, 다르면 다시 파싱한 결과를 돌려준다 (항상 이 스레드에서).
     pub fn get(&mut self, revision: u64, text: &str) -> Arc<Document> {
         let key = (revision, text.len());
         if self.key != Some(key) {
@@ -262,6 +280,56 @@ impl MarkdownCache {
             self.parse_count += 1;
         }
         Arc::clone(&self.document)
+    }
+
+    /// [`get`](Self::get)과 같되, [`BACKGROUND_PARSE_BYTES`]를 넘는 문서는 작업 스레드에서 파싱한다.
+    /// 파싱이 끝날 때까지는 이전 결과(처음이면 빈 문서)를 돌려주고, 끝나면 `done`을 부른다 (화면 다시 그리기 요청).
+    /// 파싱 중에 문서가 또 바뀌면 지금 작업이 끝난 뒤 최신 버전으로 다시 파싱한다.
+    pub fn get_or_spawn(
+        &mut self,
+        revision: u64,
+        text: &str,
+        done: impl FnOnce() + Send + 'static,
+    ) -> Arc<Document> {
+        if let Some((job_key, receiver)) = &self.job
+            && let Ok(document) = receiver.try_recv()
+        {
+            self.document = Arc::new(document);
+            self.key = Some(*job_key);
+            self.parse_count += 1;
+            self.job = None;
+        }
+        let key = (revision, text.len());
+        if self.key == Some(key) || text.len() <= BACKGROUND_PARSE_BYTES {
+            return self.get(revision, text);
+        }
+        if self.job.is_none() {
+            let (sender, receiver) = channel();
+            let owned = text.to_owned();
+            log::info!("큰 Markdown 문서 백그라운드 파싱 시작: {} B", owned.len());
+            std::thread::spawn(move || {
+                let start = Instant::now();
+                let document = parse(&owned);
+                log::info!(
+                    "백그라운드 파싱 끝: {} B, 최상위 블록 {}개, {:.1}ms ({:?})",
+                    owned.len(),
+                    document.blocks.len(),
+                    start.elapsed().as_secs_f64() * 1000.0,
+                    std::thread::current().id()
+                );
+                // 탭이 닫혀 받는 쪽이 없으면 버린다
+                if sender.send(document).is_ok() {
+                    done();
+                }
+            });
+            self.job = Some((key, receiver));
+        }
+        Arc::clone(&self.document)
+    }
+
+    /// 작업 스레드에서 파싱 중인지.
+    pub fn is_parsing(&self) -> bool {
+        self.job.is_some()
     }
 
     /// 지금까지 실제로 파싱한 횟수.
@@ -285,6 +353,7 @@ struct BlockParser<'e, 'a> {
     slugger: Slugger,
     anchors: Vec<Anchor>,
     footnotes: Vec<String>,
+    footnote_ref_lines: Vec<usize>,
 }
 
 impl BlockParser<'_, '_> {
@@ -498,6 +567,8 @@ impl BlockParser<'_, '_> {
                 Event::FootnoteReference(label) => {
                     if !self.footnotes.iter().any(|l| l == label.as_ref()) {
                         self.footnotes.push(label.to_string());
+                        let line = self.line_of(self.events[self.pos].1.start);
+                        self.footnote_ref_lines.push(line);
                     }
                     push(&mut spans, label, SpanKind::FootnoteRef, style, &link);
                 }
