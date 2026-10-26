@@ -972,12 +972,12 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 **결정 (2026-10-26)**: **서명 없는 배포** 승인(인증서·개발자 계정 준비 안 함, 우클릭 메뉴는 PLAN.md §5 B안). 사용자에게 보이는 제품명은 **"Vic Notepad"** — 저장소·크레이트·실행 파일·설정 폴더 이름은 유지. 앱 아이콘 D1안(하늘색 메모지 + 파란 연필).
 
 #### P5-01 아이콘·버전 정보 · S
-- **상태**: 🤖 구현 완료·CI Windows·macOS 녹색 (2026-10-26) · 🍎 macOS 확인 통과 (2026-10-26) · 👤 Windows 확인 대기 — 확인: `cargo xtask try basic`. 아이콘 원본 `assets/icons/vic-notepad.svg`(D1안) + 16~32px용 `vic-notepad-small.svg` → `cargo xtask icons`가 `.ico`(16~256px 9개, PNG)·`.icns`(16·32px ARGB + 32~1024px PNG — `iconutil`과 같은 구성, 16·32px를 PNG로 넣으면 macOS가 깨진 그림으로 읽음)·창 아이콘 `vic-notepad-512.png`를 만든다(커밋 대상). `src/branding.rs`: 제품명 `APP_NAME` "Vic Notepad"(창 제목·도움말 메뉴·기동 로그), 실행 중 창 아이콘(Windows 작업 표시줄·Alt+Tab, macOS Dock). `build.rs` + `winresource`: Windows 실행 파일 아이콘·제품명·파일 설명·버전(Cargo.toml). `assets/macos/Info.plist`: `.app` 번들용(P5-03에서 사용). 실행 파일·설정 폴더 이름은 그대로
+- **상태**: 🤖 구현 완료·CI Windows·macOS 녹색 (2026-10-26) · 🍎 macOS 확인 통과 (2026-10-26) · 👤 Windows 확인 통과 (2026-10-26) · **완료** — 확인: `cargo xtask try basic`. 아이콘 원본 `assets/icons/vic-notepad.svg`(D1안) + 16~32px용 `vic-notepad-small.svg` → `cargo xtask icons`가 `.ico`(16~256px 9개, PNG)·`.icns`(16·32px ARGB + 32~1024px PNG — `iconutil`과 같은 구성, 16·32px를 PNG로 넣으면 macOS가 깨진 그림으로 읽음)·창 아이콘 `vic-notepad-512.png`를 만든다(커밋 대상). `src/branding.rs`: 제품명 `APP_NAME` "Vic Notepad"(창 제목·도움말 메뉴·기동 로그), 실행 중 창 아이콘(Windows 작업 표시줄·Alt+Tab, macOS Dock). `build.rs` + `winresource`: Windows 실행 파일 아이콘·제품명·파일 설명·버전(Cargo.toml). `assets/macos/Info.plist`: `.app` 번들용(P5-03에서 사용). 실행 파일·설정 폴더 이름은 그대로
 - **산출물**: `assets/icons/*`, Windows 리소스(버전·제품명), macOS `Info.plist`
 - **선행**: G4
 - 👤 **사용자 화면 검증**
-  - [ ] 작업 표시줄·창 제목·Alt+Tab에 앱 아이콘 표시
-  - [ ] 실행 파일 속성 → 자세히에 버전·제품명 표시
+  - [x] 작업 표시줄·창 제목·Alt+Tab에 앱 아이콘 표시 — 👤 2026-10-26 통과
+  - [x] 실행 파일 속성 → 자세히에 버전·제품명 표시 — 👤 2026-10-26 통과
 - 🍎 **macOS 검증**
   - [x] Dock·`Cmd+Tab`에 앱 아이콘, 창 제목 "… - Vic Notepad", 도움말 메뉴 "Vic Notepad 정보" — 🍎 2026-10-26 통과
 
@@ -1194,6 +1194,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-26 | G4 통합 시나리오 1~3 | 🍎👤 | **통과** | MacBook Pro(M1 Pro), `cargo xtask try g4`: 5-6a `text-1mb.txt` 정규식 일괄 치환 1703개 → 저장본 `[오류]` 1703줄·`ERROR` 0줄·1,053,686 B → `Cmd+Z` 한 번 후 저장본 1,048,577 B·`cmp` 원본과 동일, `search.rs` 6개 바꿈·원복 · 5-6b `검색` `\b` 끔 15개/켬 7개 · 5-6c G1-2·G1-3·G1-4·G2-1·G2-2·G3-1·G3-2 회귀 없음 (G1-1은 2026-10-26 Windows 통과). 로그에 panic·ERROR·WARN 없음, 작업 트리 변경 없음. **G4 통과** | |
 | 2026-10-26 | P5-01 | 🤖 | 통과 | `cargo xtask icons`: SVG 원본 2개 → `.ico`(16~256px PNG 9개)·`.icns`(16·32px ARGB + 32~1024px PNG, `iconutil -c iconset`으로 풀어 전 크기 확인 — 처음엔 16·32px를 PNG(`icp4`·`icp5`)로 넣어 깨져 보였음)·창 아이콘 512px. `branding.rs` 창 아이콘 디코딩 테스트 1개. build·clippy·fmt·test(본 앱 220개) 통과 (macOS), CI 브랜치 `fc9fb8e` Windows(`build.rs` `winresource` 리소스 컴파일 포함)·macOS 녹색 | |
 | 2026-10-26 | P5-01 | 🍎 | 통과 | MacBook Pro(M1 Pro), `cargo xtask try basic`: Dock·`Cmd+Tab` 앱 아이콘, 창 제목 "… - Vic Notepad", 도움말 메뉴 "Vic Notepad 정보" 사용자 확인. Windows 👤(작업 표시줄·Alt+Tab 아이콘, 실행 파일 속성 제품명·버전)은 대기 | 2026-10-26 |
+| 2026-10-26 | P5-01 | 👤 | 통과 | Windows, 브랜치 `4440bc7`, `cargo xtask try basic --wait`(release 빌드): 작업 표시줄·창 제목·Alt+Tab 앱 아이콘(D1안) 사용자 확인. `target/release/my-notepad.exe` 버전 정보 — 제품명·파일 설명 "Vic Notepad", 제품·파일 버전 0.1.0 (`VersionInfo`로 확인). **P5-01 완료** | 2026-10-26 |
 
 ### 9.3 측정 결과 기록표
 
