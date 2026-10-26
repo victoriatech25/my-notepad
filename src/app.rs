@@ -28,6 +28,7 @@ use eframe::egui::{self, FontId, Key, Modifiers, ViewportCommand};
 
 use crate::commands::{Command, KeyDispatcher, Keymap, ThemeMode, ViewMode};
 use crate::config::{Settings, WindowGeometry};
+use crate::core::buffer::byte_to_char_offset;
 use crate::core::document::Document;
 use crate::core::encoding::{TextEncoding, decode_with_encoding, find_unmappable_chars};
 use crate::core::file_io::{self, FileIoErrorKind, OpenMode, OpenOutcome, SaveError, SizePolicy};
@@ -483,7 +484,8 @@ impl NotepadApp {
             Command::ShowWindowList => self.dialogs.push_back(Dialog::window_list()),
 
             // ── 검색 (바꾸기 줄은 P4-05 — 그때까지 바꾸기도 찾기 바를 연다) ──
-            Command::Find | Command::Replace => self.open_search(),
+            Command::Find => self.open_search(false),
+            Command::Replace => self.open_search(true),
             Command::FindNext => self.find_step(ctx, true),
             Command::FindPrev => self.find_step(ctx, false),
             Command::ToggleSearchWrapAround => self.search.toggle_wrap_around(),
@@ -577,8 +579,8 @@ impl NotepadApp {
         }
     }
 
-    /// 찾기 바를 연다. 활성 탭에서 한 줄 안을 선택해 두었으면 검색어로 채운다.
-    fn open_search(&mut self) {
+    /// 찾기 바를 연다 (`replace`면 바꾸기 줄도). 활성 탭에서 한 줄 안을 선택해 두었으면 검색어로 채운다.
+    fn open_search(&mut self, replace: bool) {
         let tab = self.tabs.active();
         let selected = match &tab.viewer {
             Some(viewer) => viewer.selected_text(&tab.doc).map(str::to_owned),
@@ -587,7 +589,7 @@ impl NotepadApp {
                 Some(text[char_range_to_byte_range(text, tab.doc.cursor_char_range())].to_owned())
             }
         };
-        self.search.open(selected.as_deref());
+        self.search.open(selected.as_deref(), replace);
     }
 
     /// 다음/이전 찾기 (`F3`·`Shift+F3`·찾기 바 `Enter`). 검색어가 없으면 찾기 바를 연다.
@@ -595,7 +597,7 @@ impl NotepadApp {
     /// 큰 문서를 아직 찾는 중이면 결과가 나온 뒤 이동한다.
     fn find_step(&mut self, ctx: &egui::Context, forward: bool) {
         if !self.search.has_pattern() {
-            self.open_search();
+            self.open_search(false);
             return;
         }
         let tab = self.tabs.active();
@@ -644,6 +646,64 @@ impl NotepadApp {
             self.set_view_mode(ViewMode::Split);
         }
     }
+    /// 바꾸기 (P4-05): 선택이 지금 텍스트의 매치면 바꾸고(Undo 한 단계), 다음 매치로 간다.
+    /// 선택이 매치가 아니면 바꾸지 않고 다음 매치로만 간다 (VS Code와 같음 — 무엇이 바뀔지 먼저 보여 준다).
+    fn replace_current(&mut self, ctx: &egui::Context) {
+        let tab = self.tabs.active();
+        if tab.viewer.is_some() || tab.doc.is_readonly() {
+            return;
+        }
+        let Some(query) = self.search.query() else {
+            return;
+        };
+        let text = tab.doc.text();
+        let bytes = char_range_to_byte_range(text, tab.doc.cursor_char_range());
+        if let Some(replacement) = query.replacement_for(text, &bytes, self.search.replacement()) {
+            let tab = self.tabs.active_mut();
+            tab.doc.break_undo_group();
+            tab.doc.replace_range(bytes, &replacement);
+            tab.doc.break_undo_group();
+            // 커서는 넣은 문자열 끝 — 위젯 커서도 맞춘다 (다음 매치가 없을 때도)
+            let cursor = tab.doc.cursor_char_range();
+            tab.editor.select_and_reveal(&mut tab.doc, cursor);
+        }
+        self.find_step(ctx, true);
+    }
+
+    /// 모두 바꾸기 (P4-05): 모든 매치를 Undo 한 단계로 바꾸고 "N개 바꿈"을 알린다. 커서는 첫 매치 자리로 가고,
+    /// 본문으로 포커스를 옮겨 바로 `Ctrl+Z` 한 번으로 되돌릴 수 있게 한다.
+    fn replace_all(&mut self, ctx: &egui::Context) {
+        let tab = self.tabs.active();
+        if tab.viewer.is_some() || tab.doc.is_readonly() {
+            return;
+        }
+        let Some(query) = self.search.query() else {
+            return;
+        };
+        let text = tab.doc.text();
+        let pairs = query.replacements(text, self.search.replacement());
+        let first = pairs
+            .first()
+            .map(|(range, _)| byte_to_char_offset(text, range.start));
+        let batch: Vec<(Range<usize>, &str)> = pairs
+            .iter()
+            .map(|(range, s)| (range.clone(), s.as_str()))
+            .collect();
+        let tab = self.tabs.active_mut();
+        let mut count = 0;
+        if let Some(first) = first {
+            tab.doc.break_undo_group();
+            count = tab.doc.apply_batch_replacements(&batch, Some(first..first));
+            tab.doc.break_undo_group();
+            let cursor = tab.doc.cursor_char_range();
+            tab.editor.select_and_reveal(&mut tab.doc, cursor);
+            tab.editor.request_focus();
+        }
+        let note = format!("{count}개 바꿈");
+        self.search.set_replace_note(note.clone());
+        self.show_notice(ctx, note);
+    }
+
     /// 찾기 바를 닫고 본문으로 포커스를 돌린다 (커서는 마지막으로 이동한 매치에 남는다).
     fn close_search(&mut self) {
         self.search.close();
@@ -1559,8 +1619,10 @@ impl eframe::App for NotepadApp {
         let mut search_event = None;
         if self.search.is_open() {
             let selection = self.active_selection();
+            let tab = self.tabs.active();
+            let can_replace = tab.viewer.is_none() && !tab.doc.is_readonly();
             egui::Panel::top("search_bar").show(ui, |ui| {
-                search_event = self.search.show(ui, &palette, &selection);
+                search_event = self.search.show(ui, &palette, &selection, can_replace);
             });
         }
         // 매치를 찾거나 작업 스레드의 결과를 받는다. 검색어·옵션이 바뀐 결과가 나왔으면 커서 이후 첫 매치로,
@@ -1584,6 +1646,8 @@ impl eframe::App for NotepadApp {
             Some(BarEvent::Next) => self.find_step(&ctx, true),
             Some(BarEvent::Prev) => self.find_step(&ctx, false),
             Some(BarEvent::Close) => self.close_search(),
+            Some(BarEvent::Replace) => self.replace_current(&ctx),
+            Some(BarEvent::ReplaceAll) => self.replace_all(&ctx),
             None => {}
         }
         // 6. 본문 영역: 활성 탭 에디터

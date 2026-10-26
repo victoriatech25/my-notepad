@@ -10,12 +10,17 @@
 //! - 캡처 그룹(`$1`·`${name}`)·이스케이프(`\n`·`\t`)·빈 매치(`^`·`$`) 치환
 //! - 줄바꿈 정규화(`LF` 내부 표현)와의 상호작용
 //!
+//! 검증 항목 (WORKPLAN.md P4-05, 문서 쪽):
+//! - 모두 바꾸기가 Undo 한 단계 — `Ctrl+Z` 한 번으로 전부 되돌아간다, 바꾸기 한 번도 한 단계
+//!
 //! 검증 항목 (WORKPLAN.md P4-03, 엔진 쪽 — 디바운스·폐기는 `ui::search_bar` 단위 테스트):
 //! - 백그라운드 작업 결과가 동기 검색과 같고, 작업을 버리면 취소된다
 
 use std::ops::Range;
 use std::time::Instant;
 
+use my_notepad::core::document::Document;
+use my_notepad::core::encoding::TextEncoding;
 use my_notepad::core::line_ending::{LineEnding, apply_line_ending, normalize_to_lf};
 use my_notepad::core::search::{
     JobPoll, RangeUnit, ReplaceAll, SearchError, SearchJob, SearchOptions, SearchQuery,
@@ -641,4 +646,84 @@ fn dropping_job_cancels_it() {
         || {},
     );
     assert_eq!(job.wait(), Some(vec![0..2, 3..5]));
+}
+
+// ── P4-05 바꾸기 (문서 적용·Undo) ──
+
+fn document(text: &str) -> Document {
+    let mut doc = Document::new_untitled_with_defaults(1, TextEncoding::Utf8, LineEnding::Lf);
+    doc.set_text(text);
+    doc.break_undo_group();
+    doc
+}
+
+/// 앱의 모두 바꾸기와 같은 경로: 매치별 바꿀 문자열 → `apply_batch_replacements` (Undo 한 단계)
+fn replace_all_in(doc: &mut Document, q: &SearchQuery, replacement: &str) -> usize {
+    let pairs = q.replacements(doc.text(), replacement);
+    let batch: Vec<(Range<usize>, &str)> =
+        pairs.iter().map(|(r, s)| (r.clone(), s.as_str())).collect();
+    doc.break_undo_group();
+    let n = doc.apply_batch_replacements(&batch, Some(0..0));
+    doc.break_undo_group();
+    n
+}
+
+#[test]
+fn replace_all_is_one_undo_step() {
+    let original = "id=10-20\n홍길동 3-4\n끝 5-6\n";
+    let mut doc = document(original);
+    // 바꾸기 전에 입력한 내용과 섞이지 않는다
+    doc.set_text(format!("{original}메모"));
+    let typed = doc.text().to_owned();
+    let undo_before = doc.undo_len();
+
+    let q = query(r"(\d+)-(\d+)", opts(true, true, false));
+    assert_eq!(q.replacements(doc.text(), "$2-$1").len(), 3);
+    assert_eq!(replace_all_in(&mut doc, &q, "$2-$1"), 3);
+    assert_eq!(doc.text(), "id=20-10\n홍길동 4-3\n끝 6-5\n메모");
+    assert_eq!(doc.undo_len(), undo_before + 1, "Undo 한 단계");
+    // 엔진의 모두 바꾸기 결과와 같다
+    assert_eq!(doc.text(), q.replace_all(&typed, "$2-$1").text);
+
+    assert!(doc.undo());
+    assert_eq!(doc.text(), typed, "Ctrl+Z 한 번으로 전부 되돌아간다");
+    assert!(doc.redo());
+    assert_eq!(doc.text(), "id=20-10\n홍길동 4-3\n끝 6-5\n메모");
+}
+
+#[test]
+fn replace_all_with_newlines_and_empty_matches_undoes_once() {
+    let mut doc = document("a\nb\nc");
+    let q = query("^", opts(true, true, false));
+    assert_eq!(replace_all_in(&mut doc, &q, "> "), 3);
+    assert_eq!(doc.text(), "> a\n> b\n> c");
+    let q = query(r"\n", opts(true, true, false));
+    assert_eq!(replace_all_in(&mut doc, &q, r"\n\n"), 2);
+    assert_eq!(doc.text(), "> a\n\n> b\n\n> c");
+    assert!(doc.undo());
+    assert_eq!(doc.text(), "> a\n> b\n> c");
+    assert!(doc.undo());
+    assert_eq!(doc.text(), "a\nb\nc");
+}
+
+#[test]
+fn replace_one_then_next_and_undo() {
+    // 앱의 바꾸기와 같은 경로: 선택이 매치면 그 범위만 바꾸고(Undo 한 단계), 다음 매치는 넣은 문자열 뒤에서 찾는다
+    let mut doc = document("cat cat cat");
+    let q = query("cat", opts(false, true, true));
+    let first = q.find_all(doc.text())[0].clone();
+    let rep = q.replacement_for(doc.text(), &first, "cats").unwrap();
+    doc.break_undo_group();
+    assert!(doc.replace_range(first, &rep));
+    doc.break_undo_group();
+    assert_eq!(doc.text(), "cats cat cat");
+    assert_eq!(doc.cursor_char_range(), 4..4, "커서는 넣은 문자열 끝");
+    // 다음 매치: 커서 이후 첫 매치 (넣은 `cats`는 단어 단위라 매치가 아님)
+    let matches = q.find_all(doc.text());
+    let next = next_match_index(&matches, 4, true).unwrap();
+    assert_eq!(matches[next], 5..8);
+    // 선택이 매치가 아니면 바꾸지 않는다
+    assert_eq!(q.replacement_for(doc.text(), &(0..4), "x"), None);
+    assert!(doc.undo());
+    assert_eq!(doc.text(), "cat cat cat");
 }

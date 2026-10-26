@@ -117,8 +117,11 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "search",
         package: "my-notepad",
-        args: &["spikes/samples/text-1mb.txt", "spikes/samples/text-10mb.txt"],
-        description: "P4-04 찾기 바·P4-03 백그라운드 검색 (찾기 확인 문서 사본 + 1MB 로그 + 10MB 로그(읽기 전용 뷰어) — 샘플: cargo xtask gen-samples)",
+        args: &[
+            "spikes/samples/text-1mb.txt",
+            "spikes/samples/text-10mb.txt",
+        ],
+        description: "P4-04 찾기 바·P4-03 백그라운드 검색·P4-05 바꾸기 (찾기 확인 문서 사본 + 1MB 로그 + 10MB 로그(읽기 전용 뷰어) — 샘플: cargo xtask gen-samples)",
         wait: false,
         work_files: &["tests/fixtures/editor/search_ko.txt"],
     },
