@@ -15,11 +15,16 @@
 //!   읽히므로 뒤에 글자를 붙이려면 `${1}a`로 쓴다. **일반 모드**의 바꿀 문자열은 글자 그대로 넣는다 (VS Code·Notepad++
 //!   기본 모드와 같음). 어느 모드든 바꿀 문자열의 `CRLF`·`CR`은 `LF`로 바꾼다 (문서 내부 표현, 저장할 때 문서 줄바꿈으로).
 //!   모두 바꾸기는 [`SearchQuery::matches`]와 같은 매치(단어 단위·빈 매치 규칙 포함)를 바꾼다.
-//! - 백그라운드 수행·취소는 P4-03에서 붙인다.
+//! - 백그라운드 검색(P4-03): [`SearchJob`]이 작업 스레드에서 문서 사본을 찾고 결과를 채널로 넘긴다.
+//!   작업을 버리면(새 검색어로 바꾸면) 취소 표시를 세워 스레드가 곧 멈추고 결과도 보내지 않는다.
+//!   어떤 조건으로 찾은 결과인지 확인하고 오래된 결과를 버리는 일은 작업을 가진 쪽(UI)이 맡는다.
 
 use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use regex::{Regex, RegexBuilder};
 
@@ -362,6 +367,103 @@ pub fn prev_match_index(
 pub fn current_match_index(matches: &[Range<usize>], selection: &Range<usize>) -> Option<usize> {
     let i = matches.partition_point(|m| m.start < selection.start);
     (matches.get(i) == Some(selection)).then_some(i)
+}
+
+/// 취소 표시를 확인하는 매치 간격 (매치마다 원자 변수를 읽지 않게).
+const CANCEL_CHECK_EVERY: usize = 1024;
+
+/// [`SearchJob`] 결과 위치의 단위.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeUnit {
+    /// 바이트 범위 (읽기 전용 뷰어)
+    Bytes,
+    /// 문자 인덱스 범위 (편집 위젯 커서 단위)
+    Chars,
+}
+
+/// 백그라운드 검색 상태.
+#[derive(Debug, PartialEq, Eq)]
+pub enum JobPoll {
+    /// 아직 찾는 중
+    Running,
+    /// 다 찾았다 (매치 범위, 요청한 단위)
+    Done(Vec<Range<usize>>),
+    /// 스레드가 결과 없이 끝났다 (취소·패닉)
+    Lost,
+}
+
+/// 작업 스레드에서 도는 검색 하나. 버리면 취소된다.
+#[derive(Debug)]
+pub struct SearchJob {
+    cancel: Arc<AtomicBool>,
+    rx: Receiver<Vec<Range<usize>>>,
+}
+
+impl SearchJob {
+    /// `text` 사본에서 `query`로 모든 매치를 찾는 스레드를 띄운다. 다 찾으면 결과를 보낸 뒤 `notify`를 부른다
+    /// (UI 다시 그리기 요청). 결과는 `unit` 단위로 바꿔 보낸다.
+    pub fn spawn(
+        query: SearchQuery,
+        text: String,
+        unit: RangeUnit,
+        notify: impl Fn() + Send + 'static,
+    ) -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let flag = Arc::clone(&cancel);
+        std::thread::Builder::new()
+            .name("search".to_owned())
+            .spawn(move || {
+                let Some(ranges) = find_all_cancellable(&query, &text, &flag) else {
+                    return;
+                };
+                let ranges = match unit {
+                    RangeUnit::Bytes => ranges,
+                    RangeUnit::Chars => byte_ranges_to_char_ranges(&text, &ranges),
+                };
+                if !flag.load(Ordering::Relaxed) && tx.send(ranges).is_ok() {
+                    notify();
+                }
+            })
+            .expect("검색 스레드 생성");
+        Self { cancel, rx }
+    }
+
+    /// 결과가 왔는지 확인한다 (기다리지 않음).
+    pub fn poll(&self) -> JobPoll {
+        match self.rx.try_recv() {
+            Ok(ranges) => JobPoll::Done(ranges),
+            Err(TryRecvError::Empty) => JobPoll::Running,
+            Err(TryRecvError::Disconnected) => JobPoll::Lost,
+        }
+    }
+
+    /// 결과가 올 때까지 기다린다 (테스트·측정용). 취소됐으면 `None`.
+    pub fn wait(self) -> Option<Vec<Range<usize>>> {
+        self.rx.recv().ok()
+    }
+}
+
+impl Drop for SearchJob {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// 모든 매치를 찾되 취소 표시가 서면 `None`.
+fn find_all_cancellable(
+    query: &SearchQuery,
+    text: &str,
+    cancel: &AtomicBool,
+) -> Option<Vec<Range<usize>>> {
+    let mut ranges = Vec::new();
+    for range in query.matches(text) {
+        if ranges.len() % CANCEL_CHECK_EVERY == 0 && cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        ranges.push(range);
+    }
+    (!cancel.load(Ordering::Relaxed)).then_some(ranges)
 }
 
 /// 바이트 범위 목록을 문자 인덱스 범위로 한 번에 변환한다.

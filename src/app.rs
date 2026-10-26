@@ -33,7 +33,7 @@ use crate::core::encoding::{TextEncoding, decode_with_encoding, find_unmappable_
 use crate::core::file_io::{self, FileIoErrorKind, OpenMode, OpenOutcome, SaveError, SizePolicy};
 use crate::core::highlight::HighlightOptions;
 use crate::core::line_ending::LineEnding;
-use crate::core::search::SearchOptions;
+use crate::core::search::{SearchOptions, char_range_to_byte_range};
 use crate::fonts;
 use crate::tabs::{ExternalChange, Tabs};
 use crate::ui::{
@@ -126,6 +126,8 @@ pub struct NotepadApp {
     highlight: HighlightOptions,
     /// 찾기 바 (P4-04)
     search: SearchBar,
+    /// 큰 문서를 찾는 중에 누른 다음(`true`)/이전 찾기 — 결과가 나오면 실행한다 (P4-03)
+    pending_step: Option<bool>,
     theme: ThemeMode,
     last_command: Option<String>,
 
@@ -208,6 +210,7 @@ impl NotepadApp {
                 whole_word: settings.search_whole_word,
                 wrap_around: settings.search_wrap_around,
             }),
+            pending_step: None,
             theme: settings.theme,
             last_command: None,
             measure: None,
@@ -480,10 +483,7 @@ impl NotepadApp {
             Command::ShowWindowList => self.dialogs.push_back(Dialog::window_list()),
 
             // ── 검색 (바꾸기 줄은 P4-05 — 그때까지 바꾸기도 찾기 바를 연다) ──
-            Command::Find | Command::Replace => {
-                let tab = self.tabs.active();
-                self.search.open(tab.viewer.is_none().then_some(&tab.doc));
-            }
+            Command::Find | Command::Replace => self.open_search(),
             Command::FindNext => self.find_step(ctx, true),
             Command::FindPrev => self.find_step(ctx, false),
             Command::ToggleSearchWrapAround => self.search.toggle_wrap_around(),
@@ -568,21 +568,45 @@ impl NotepadApp {
 
     // ── 찾기 (P4-04) ──
 
+    /// 활성 탭의 선택 범위 — 편집 탭은 문자, 뷰어 탭은 바이트 (찾기 매치와 같은 단위).
+    fn active_selection(&self) -> Range<usize> {
+        let tab = self.tabs.active();
+        match &tab.viewer {
+            Some(viewer) => viewer.selection(),
+            None => tab.doc.cursor_char_range(),
+        }
+    }
+
+    /// 찾기 바를 연다. 활성 탭에서 한 줄 안을 선택해 두었으면 검색어로 채운다.
+    fn open_search(&mut self) {
+        let tab = self.tabs.active();
+        let selected = match &tab.viewer {
+            Some(viewer) => viewer.selected_text(&tab.doc).map(str::to_owned),
+            None => {
+                let text = tab.doc.text();
+                Some(text[char_range_to_byte_range(text, tab.doc.cursor_char_range())].to_owned())
+            }
+        };
+        self.search.open(selected.as_deref());
+    }
+
     /// 다음/이전 찾기 (`F3`·`Shift+F3`·찾기 바 `Enter`). 검색어가 없으면 찾기 바를 연다.
     /// 찾기 바가 닫혀 있어도 마지막 검색어로 이동한다 (Notepad++·VS Code와 같음).
+    /// 큰 문서를 아직 찾는 중이면 결과가 나온 뒤 이동한다.
     fn find_step(&mut self, ctx: &egui::Context, forward: bool) {
         if !self.search.has_pattern() {
-            let tab = self.tabs.active();
-            self.search.open(tab.viewer.is_none().then_some(&tab.doc));
+            self.open_search();
             return;
         }
         let tab = self.tabs.active();
-        if tab.viewer.is_some() {
-            self.show_notice(ctx, "큰 파일 뷰어에서는 아직 찾을 수 없습니다");
+        self.search
+            .refresh(ctx, tab.id(), &tab.doc, tab.viewer.is_some());
+        if !self.search.is_ready() {
+            self.pending_step = Some(forward);
             return;
         }
-        self.search.refresh(tab.id(), &tab.doc, true);
-        match self.search.step(&tab.doc, forward) {
+        self.pending_step = None;
+        match self.search.step(&self.active_selection(), forward) {
             Step::Moved(range) => self.reveal_match(range),
             Step::Wrapped(range) => {
                 self.reveal_match(range);
@@ -608,15 +632,18 @@ impl NotepadApp {
         }
     }
 
-    /// 찾은 매치(문자 범위)를 선택하고 보이게 한다. 미리보기만 보이는 Markdown 탭은 분할로 바꿔 소스를 보여 준다.
+    /// 찾은 매치(탭 단위 범위)를 선택하고 보이게 한다. 미리보기만 보이는 Markdown 탭은 분할로 바꿔 소스를 보여 준다.
     fn reveal_match(&mut self, range: Range<usize>) {
         let tab = self.tabs.active_mut();
+        if let Some(viewer) = &mut tab.viewer {
+            viewer.select_and_reveal(&tab.doc, range);
+            return;
+        }
         tab.editor.select_and_reveal(&mut tab.doc, range);
         if tab.doc.is_markdown() && tab.view_mode == ViewMode::Preview {
             self.set_view_mode(ViewMode::Split);
         }
     }
-
     /// 찾기 바를 닫고 본문으로 포커스를 돌린다 (커서는 마지막으로 이동한 매치에 남는다).
     fn close_search(&mut self) {
         self.search.close();
@@ -1529,30 +1556,36 @@ impl eframe::App for NotepadApp {
         }
 
         // 5-1. 찾기 바 (에디터 위, 사이드바 오른쪽 — ui-spec §1)
+        let mut search_event = None;
         if self.search.is_open() {
-            let tab = self.tabs.active();
-            let viewer = tab.viewer.is_some();
-            let selection = tab.doc.cursor_char_range();
-            let mut event = None;
+            let selection = self.active_selection();
             egui::Panel::top("search_bar").show(ui, |ui| {
-                event = self.search.show(ui, &palette, &selection, viewer);
+                search_event = self.search.show(ui, &palette, &selection);
             });
-            // 검색어·옵션이 바뀌었으면 커서 이후 첫 매치로 바로 이동한다 (카운트는 다음 프레임에 갱신).
+        }
+        // 매치를 찾거나 작업 스레드의 결과를 받는다. 검색어·옵션이 바뀐 결과가 나왔으면 커서 이후 첫 매치로,
+        // 찾는 중에 누른 다음/이전 찾기는 결과가 나온 뒤 실행한다.
+        if self.search.is_open() || self.pending_step.is_some() {
             let tab = self.tabs.active();
-            if self.search.refresh(tab.id(), &tab.doc, !viewer) {
-                ctx.request_repaint();
-                if let Some(range) = self.search.first_from_cursor(&tab.doc) {
-                    self.reveal_match(range);
-                }
+            if self
+                .search
+                .refresh(&ctx, tab.id(), &tab.doc, tab.viewer.is_some())
+                && let Some(range) = self.search.first_from(&self.active_selection())
+            {
+                self.reveal_match(range);
             }
-            match event {
-                Some(BarEvent::Next) => self.find_step(&ctx, true),
-                Some(BarEvent::Prev) => self.find_step(&ctx, false),
-                Some(BarEvent::Close) => self.close_search(),
-                None => {}
+            if self.search.is_ready()
+                && let Some(forward) = self.pending_step.take()
+            {
+                self.find_step(&ctx, forward);
             }
         }
-
+        match search_event {
+            Some(BarEvent::Next) => self.find_step(&ctx, true),
+            Some(BarEvent::Prev) => self.find_step(&ctx, false),
+            Some(BarEvent::Close) => self.close_search(),
+            None => {}
+        }
         // 6. 본문 영역: 활성 탭 에디터
         let font_size = ui.style().text_styles[&egui::TextStyle::Monospace].size * self.zoom;
         let options = EditorOptions {
@@ -1592,7 +1625,13 @@ impl eframe::App for NotepadApp {
                             switch_to_edit = true;
                         }
                     }
-                    viewer.show(ui, &tab.doc, &options.font, &palette);
+                    viewer.show(
+                        ui,
+                        &tab.doc,
+                        &options.font,
+                        &palette,
+                        options.search.as_ref(),
+                    );
                 } else {
                     if tab.size_notice {
                         match viewer::size_banner(ui, &palette) {
