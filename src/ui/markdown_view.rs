@@ -21,13 +21,18 @@
 //!   원시 HTML은 회색 원문(`<br>`만 줄바꿈), Mermaid·수식 코드 블록에는 "미리보기 미지원" 라벨.
 //! - 링크(P3-09): 마우스를 올리면 주소 툴팁, 누르면 [`LinkAction`]으로 앱에 알린다 (외부 주소·파일 열기·안내).
 //!   문서 안 `#앵커`는 미리보기가 직접 그 제목으로 스크롤한다. 대상 파일이 없는 링크는 오류 색으로 그린다.
+//! - 찾기(P4-06, 미리보기 단독 모드): 미리보기에 **보이는 글자**에서 찾는다. 블록마다 그리는 글자 조각(문단·제목·
+//!   코드·표 칸 …)을 그리는 순서대로 모아 매치 수를 세고([`count_matches`]), 그릴 때 같은 조각의 매치에 배경을
+//!   칠한다([`mark_find`]). 두 쪽 모두 스팬 글자를 [`span_text`]로 만들어 어긋나지 않게 한다. 현재 매치는 전체 번호로
+//!   기억하고, 이동하면 그 블록으로 스크롤한 뒤 그려진 매치 위치가 화면 밖이면 한 번 더 맞춘다.
+//!   원시 HTML 블록·Front Matter·이미지 자리 표시는 찾지 않는다.
 
 use eframe::egui::{
     self, Align, Color32, FontFamily, FontId, RichText, Sense, Stroke, TextFormat, TextStyle,
     text::{CCursor, LayoutJob},
 };
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
@@ -40,6 +45,7 @@ use crate::core::link::{self, LinkTarget};
 use crate::core::markdown::{
     self, Block, BlockKind, Inlines, ListItem, MarkdownCache, Span, SpanKind,
 };
+use crate::core::search::{SearchOptions, SearchQuery, byte_ranges_to_char_ranges};
 use crate::fonts::ICON_FAMILY;
 use crate::ui::preview_images::{ImageCache, TextureState};
 use crate::ui::theme::Palette;
@@ -93,6 +99,63 @@ pub struct PreviewState {
     anchor: Option<ViewAnchor>,
     /// 파싱이 끝나면 이 제목 앵커로 스크롤한다 (다른 문서의 `파일.md#앵커` 링크로 열었을 때)
     pending_anchor: Option<String>,
+    /// 미리보기 찾기 (P4-06)
+    find: Option<PreviewFind>,
+}
+
+/// 미리보기 찾기 이동 결과 (P4-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewStep {
+    Moved,
+    /// 문서 끝(이전 찾기는 처음)을 지나 반대쪽 끝에서 이어 찾았다
+    Wrapped,
+    /// Wrap Around를 꺼 둔 상태에서 더 찾을 매치가 없다
+    End,
+    NoMatch,
+}
+
+/// 미리보기 찾기 상태.
+#[derive(Debug)]
+struct PreviewFind {
+    query: SearchQuery,
+    pattern: String,
+    options: SearchOptions,
+    /// 매치 수를 센 파싱 결과
+    counted_for: Option<Arc<markdown::Document>>,
+    /// `prefix[i]` = 최상위 블록 i 앞까지의 매치 수 (길이 = 블록 수 + 1)
+    prefix: Vec<usize>,
+    /// 현재 매치 (전체 번호)
+    current: Option<usize>,
+    /// 검색 조건이 바뀌어, 다 세면 화면 맨 위 이후 첫 매치를 고른다
+    pick_first: bool,
+    /// 현재 매치가 보이도록 스크롤할 남은 프레임 수 (블록으로 옮긴 뒤 그려진 위치로 한 번 더 맞춘다)
+    reveal: u8,
+}
+
+impl PreviewFind {
+    fn total(&self) -> usize {
+        self.prefix.last().copied().unwrap_or(0)
+    }
+
+    /// 전체 번호 → (최상위 블록, 블록 안 순번)
+    fn locate(&self, index: usize) -> Option<(usize, usize)> {
+        if index >= self.total() {
+            return None;
+        }
+        let block = self.prefix.partition_point(|&p| p <= index) - 1;
+        Some((block, index - self.prefix[block]))
+    }
+}
+
+/// 화면 맨 위(스크롤 위치 `offset_y`) 이후 처음 보이는 매치의 전체 번호. 없으면 첫 매치.
+fn first_match_from(prefix: &[usize], positions: &[BlockPos], offset_y: f32) -> Option<usize> {
+    let total = prefix.last().copied().unwrap_or(0);
+    if total == 0 {
+        return None;
+    }
+    let from = positions.partition_point(|p| p.top + p.height <= offset_y);
+    let index = prefix.get(from).copied().unwrap_or(total);
+    Some(if index < total { index } else { 0 })
 }
 
 /// 화면 맨 위 블록: (원문 해시, 순번, 그때의 위치)
@@ -136,7 +199,65 @@ impl PreviewState {
             changed_at: 0.0,
             anchor: None,
             pending_anchor: None,
+            find: None,
         }
+    }
+
+    /// 미리보기에서 찾을 조건을 정한다 (미리보기 단독 모드에서 찾기 바가 열려 있는 동안 매 프레임).
+    /// `None`이면 찾지 않고 강조도 지운다. 검색어·옵션이 바뀌면 다시 세고 화면 맨 위 이후 첫 매치로 간다.
+    pub fn set_find(&mut self, find: Option<(SearchQuery, &str, SearchOptions)>) {
+        let Some((query, pattern, options)) = find else {
+            self.find = None;
+            return;
+        };
+        if self
+            .find
+            .as_ref()
+            .is_some_and(|f| f.pattern == pattern && f.options == options)
+        {
+            return;
+        }
+        self.find = Some(PreviewFind {
+            query,
+            pattern: pattern.to_owned(),
+            options,
+            counted_for: None,
+            prefix: Vec::new(),
+            current: None,
+            pick_first: true,
+            reveal: 0,
+        });
+    }
+
+    /// 찾기 상태 `(현재 매치 번호, 매치 수)` — 아직 세지 않았으면 `None`.
+    pub fn find_status(&self) -> Option<(Option<usize>, usize)> {
+        let find = self.find.as_ref()?;
+        find.counted_for.as_ref()?;
+        Some((find.current, find.total()))
+    }
+
+    /// 다음(`forward`)/이전 매치로 옮긴다. 현재 매치가 없으면 화면 맨 위 이후 첫 매치로.
+    pub fn find_step(&mut self, forward: bool, wrap_around: bool) -> PreviewStep {
+        let Some(find) = self.find.as_mut().filter(|f| f.total() > 0) else {
+            return PreviewStep::NoMatch;
+        };
+        let total = find.total();
+        let (next, step) = match find.current {
+            None => (
+                first_match_from(&find.prefix, &self.positions, self.offset_y),
+                PreviewStep::Moved,
+            ),
+            Some(c) if forward && c + 1 < total => (Some(c + 1), PreviewStep::Moved),
+            Some(c) if !forward && c > 0 => (Some(c - 1), PreviewStep::Moved),
+            Some(_) if !wrap_around => (None, PreviewStep::End),
+            Some(_) if forward => (Some(0), PreviewStep::Wrapped),
+            Some(_) => (Some(total - 1), PreviewStep::Wrapped),
+        };
+        if next.is_some() {
+            find.current = next;
+            find.reveal = 3;
+        }
+        step
     }
 
     /// 다음에 그릴 때(큰 문서는 파싱이 끝난 뒤) `anchor` 제목으로 스크롤한다.
@@ -268,6 +389,20 @@ impl PreviewState {
             }
         };
         self.parsed = Some(std::sync::Arc::clone(&parsed));
+        // 미리보기 찾기: 파싱 결과나 조건이 바뀌었으면 블록마다 매치를 다시 센다
+        if let Some(find) = &mut self.find
+            && !(self.cache.is_parsing() && parsed.blocks.is_empty())
+            && !find
+                .counted_for
+                .as_ref()
+                .is_some_and(|d| Arc::ptr_eq(d, &parsed))
+        {
+            find.prefix = count_matches(&parsed.blocks, &find.query, &parsed.footnotes);
+            find.counted_for = Some(Arc::clone(&parsed));
+            let total = find.total();
+            find.current = find.current.filter(|&c| c < total);
+            ui.ctx().request_repaint();
+        }
         self.images.borrow_mut().begin_frame(ui.ctx());
         let doc_dir = doc.path().and_then(Path::parent);
         let mut style = Style::new(ui, zoom, palette, doc_dir, &self.images, &parsed.footnotes);
@@ -300,6 +435,34 @@ impl PreviewState {
                     }
                     None => link_action = Some(LinkAction::Notice(missing_anchor(&anchor))),
                 }
+            }
+            // 찾기: 조건이 바뀐 뒤 처음 센 결과면 화면 맨 위 이후 첫 매치로, 현재 매치 블록이 화면 밖이면 그 블록으로
+            if let Some(find) = &mut self.find
+                && find.counted_for.is_some()
+            {
+                if std::mem::take(&mut find.pick_first) {
+                    find.current = first_match_from(&find.prefix, &self.positions, self.offset_y);
+                    find.reveal = if find.current.is_some() { 3 } else { 0 };
+                }
+                if find.reveal > 0
+                    && self.pending_offset.is_none()
+                    && let Some((block, _)) = find.current.and_then(|c| find.locate(c))
+                    && let Some(pos) = self.positions.get(block)
+                {
+                    let visible = self.offset_y..self.offset_y + self.view_height;
+                    if !(visible.contains(&pos.top) && visible.contains(&(pos.top + pos.height))) {
+                        self.pending_offset = Some((pos.top - self.view_height / 3.0).max(0.0));
+                    }
+                }
+                style.find = Some(FindPaint {
+                    query: find.query.clone(),
+                    match_color: palette.search_match,
+                    current_color: palette.search_current,
+                    current: find.current.and_then(|c| find.locate(c)),
+                    block: Cell::new(None),
+                    ordinal: Cell::new(0),
+                    current_rect: Cell::new(None),
+                });
             }
             // 지난 프레임 맨 위 블록이 움직였으면(위쪽 블록의 높이가 바뀜) 같은 만큼 스크롤해 보던 내용을 고정
             if self.pending_offset.is_none()
@@ -366,6 +529,28 @@ impl PreviewState {
         if let Some(line) = self.pending_top_line.take() {
             self.pending_offset = Some(line_to_y(&self.positions, line));
             ui.ctx().request_repaint();
+        }
+        // 찾기: 그려진 현재 매치가 화면 위·아래 밖이면 가운데로 (긴 블록 안의 매치).
+        // 블록으로 옮긴 프레임에는 아직 그려지지 않았을 수 있어 몇 프레임 더 확인한다.
+        let drawn = style.find.as_ref().and_then(|f| f.current_rect.get());
+        if let Some(find) = &mut self.find
+            && find.reveal > 0
+        {
+            find.reveal -= 1;
+            let view = output.inner_rect;
+            match drawn {
+                Some(rect) if rect.top() >= view.top() && rect.bottom() <= view.bottom() => {
+                    find.reveal = 0;
+                }
+                Some(rect) if self.pending_offset.is_none() => {
+                    let content_y = rect.center().y - view.top() + self.offset_y;
+                    self.pending_offset = Some((content_y - view.height() / 2.0).max(0.0));
+                }
+                _ => {}
+            }
+            if find.reveal > 0 {
+                ui.ctx().request_repaint();
+            }
         }
 
         self.images.borrow_mut().end_frame();
@@ -608,6 +793,23 @@ struct Style<'a> {
     jump: RefCell<Option<Jump>>,
     /// 이번 프레임에 본 링크의 대상 없음 여부 (주소 → 깨짐)
     broken_links: RefCell<HashMap<String, bool>>,
+    /// 미리보기 찾기 강조 (P4-06)
+    find: Option<FindPaint>,
+}
+
+/// 그리는 동안의 미리보기 찾기 강조 상태.
+struct FindPaint {
+    query: SearchQuery,
+    match_color: Color32,
+    current_color: Color32,
+    /// 현재 매치 (최상위 블록, 블록 안 순번)
+    current: Option<(usize, usize)>,
+    /// 지금 화면에 그리는 최상위 블록 (높이 측정용으로 그릴 때는 `None` — 칠하지 않는다)
+    block: Cell<Option<usize>>,
+    /// 지금 블록에서 지금까지 칠한 매치 수 (블록 안 순번)
+    ordinal: Cell<usize>,
+    /// 이번 프레임에 그린 현재 매치의 화면 위치
+    current_rect: Cell<Option<egui::Rect>>,
 }
 
 impl<'a> Style<'a> {
@@ -635,6 +837,7 @@ impl<'a> Style<'a> {
             footnotes,
             jump: RefCell::new(None),
             broken_links: RefCell::new(HashMap::new()),
+            find: None,
         }
     }
 
@@ -652,10 +855,7 @@ impl<'a> Style<'a> {
 
     /// 각주 화면 번호 문자열 (참조가 없으면 이름 그대로).
     fn footnote_mark(&self, label: &str) -> String {
-        self.footnotes
-            .iter()
-            .position(|l| l == label)
-            .map_or_else(|| label.to_owned(), |i| (i + 1).to_string())
+        footnote_mark(self.footnotes, label)
     }
 
     /// 제목 크기: 본문 크기의 배율 (GitHub 미리보기에 가깝게 H1 = 2배, P3-02 사용자 요청).
@@ -670,6 +870,175 @@ impl<'a> Style<'a> {
         };
         self.body * factor
     }
+}
+
+/// 각주 화면 번호 문자열 (참조가 없으면 이름 그대로). `footnotes`는 처음 참조한 순서의 각주 이름.
+fn footnote_mark(footnotes: &[String], label: &str) -> String {
+    footnotes
+        .iter()
+        .position(|l| l == label)
+        .map_or_else(|| label.to_owned(), |i| (i + 1).to_string())
+}
+
+/// 스팬이 미리보기에 그려지는 글자 — 그리기([`inline_job_marked`])와 찾기 매치 세기([`count_matches`])가 함께 쓴다.
+fn span_text<'s>(span: &'s Span, footnotes: &[String]) -> std::borrow::Cow<'s, str> {
+    match &span.kind {
+        SpanKind::Text | SpanKind::Code => span.text.as_str().into(),
+        SpanKind::Html if is_br(&span.text) => "\n".into(),
+        SpanKind::Html => span.text.as_str().into(),
+        SpanKind::Image { .. } => format!("[이미지: {}]", span.text).into(),
+        SpanKind::FootnoteRef => format!("[{}]", footnote_mark(footnotes, &span.text)).into(),
+    }
+}
+
+/// 스팬들의 그려지는 글자 (라벨 하나).
+fn spans_text(spans: &[Span], footnotes: &[String]) -> String {
+    spans.iter().map(|s| span_text(s, footnotes)).collect()
+}
+
+/// 블록이 미리보기에 그리는 글자 조각들 — 그리는 순서와 같다 (찾기 대상: 문단·제목·목록·인용·코드·표 칸·각주).
+/// 원시 HTML 블록·Front Matter·구분선·이미지는 찾지 않는다 (칠하는 쪽도 마찬가지).
+fn block_segments(block: &Block, footnotes: &[String], out: &mut Vec<String>) {
+    match &block.kind {
+        BlockKind::Heading { text, .. } | BlockKind::Paragraph(text) => {
+            // [`inline_text`]처럼 이미지에서 라벨이 나뉜다
+            let mut start = 0;
+            for (i, span) in text.iter().enumerate() {
+                if matches!(span.kind, SpanKind::Image { .. }) {
+                    if start < i {
+                        out.push(spans_text(&text[start..i], footnotes));
+                    }
+                    start = i + 1;
+                }
+            }
+            if start < text.len() || text.is_empty() {
+                out.push(spans_text(&text[start..], footnotes));
+            }
+        }
+        BlockKind::List { items, .. } => {
+            for item in items {
+                for child in &item.blocks {
+                    block_segments(child, footnotes, out);
+                }
+            }
+        }
+        BlockKind::Quote(children)
+        | BlockKind::Footnote {
+            blocks: children, ..
+        } => {
+            for child in children {
+                block_segments(child, footnotes, out);
+            }
+        }
+        BlockKind::Code { text, .. } => out.push(text.clone()),
+        BlockKind::Table { head, rows, .. } => {
+            // [`table`]처럼 가장 긴 행에 맞춰 빈 칸을 채운다
+            let columns = rows.iter().map(Vec::len).fold(head.len(), usize::max);
+            for cells in std::iter::once(head).chain(rows) {
+                for c in 0..columns {
+                    out.push(
+                        cells
+                            .get(c)
+                            .map_or_else(String::new, |cell| spans_text(cell, footnotes)),
+                    );
+                }
+            }
+        }
+        BlockKind::Rule | BlockKind::Html(_) | BlockKind::FrontMatter(_) => {}
+    }
+}
+
+/// 최상위 블록마다 미리보기 글자의 매치 수 누적 (`prefix[i]` = 블록 i 앞까지, 길이 = 블록 수 + 1).
+fn count_matches(blocks: &[Block], query: &SearchQuery, footnotes: &[String]) -> Vec<usize> {
+    let mut prefix = Vec::with_capacity(blocks.len() + 1);
+    let mut total = 0;
+    let mut segments = Vec::new();
+    prefix.push(0);
+    for block in blocks {
+        segments.clear();
+        block_segments(block, footnotes, &mut segments);
+        total += segments.iter().map(|s| query.count(s)).sum::<usize>();
+        prefix.push(total);
+    }
+    prefix
+}
+
+/// 미리보기 찾기: 화면에 그리는 블록의 글자 조각 `job`에서 매치에 배경을 칠한다 (높이 측정 때는 하지 않음).
+/// 현재 매치가 이 조각에 있으면 그 글자 범위(문자 인덱스)를 돌려준다.
+fn mark_find(job: &mut LayoutJob, style: &Style) -> Option<Range<usize>> {
+    let find = style.find.as_ref()?;
+    let block = find.block.get()?;
+    let matches = find.query.find_all(&job.text);
+    if matches.is_empty() {
+        return None;
+    }
+    let mut current = None;
+    let mut paints = Vec::with_capacity(matches.len());
+    for range in matches {
+        let n = find.ordinal.get();
+        find.ordinal.set(n + 1);
+        if find.current == Some((block, n)) {
+            current = byte_ranges_to_char_ranges(&job.text, std::slice::from_ref(&range)).pop();
+            paints.push((range, find.current_color));
+        } else {
+            paints.push((range, find.match_color));
+        }
+    }
+    paint_backgrounds(job, &paints);
+    current
+}
+
+/// `job`의 글자 범위(바이트, 오름차순·겹침 없음)에 배경색을 칠한다 — 걸친 구간(section)을 나눈다.
+fn paint_backgrounds(job: &mut LayoutJob, paints: &[(Range<usize>, Color32)]) {
+    let mut sections = Vec::with_capacity(job.sections.len() + paints.len() * 2);
+    for section in job.sections.drain(..) {
+        let (mut pos, end) = (section.byte_range.start.0, section.byte_range.end.0);
+        let mut leading_space = section.leading_space;
+        let mut push = |range: Range<usize>, background: Option<Color32>| {
+            let mut format = section.format.clone();
+            if let Some(color) = background {
+                format.background = color;
+            }
+            sections.push(egui::text::LayoutSection {
+                leading_space: std::mem::take(&mut leading_space),
+                byte_range: egui::text::ByteIndex(range.start)..egui::text::ByteIndex(range.end),
+                format,
+            });
+        };
+        for (range, color) in paints {
+            // 빈 매치(`^` 등)는 칠할 글자가 없다
+            if range.is_empty() || range.start >= end || range.end <= pos {
+                continue;
+            }
+            let (start, stop) = (range.start.max(pos), range.end.min(end));
+            if start > pos {
+                push(pos..start, None);
+            }
+            push(start..stop, Some(*color));
+            pos = stop;
+        }
+        if pos < end {
+            push(pos..end, None);
+        }
+    }
+    job.sections = sections;
+}
+
+/// 현재 매치(`chars`, 글자 범위)가 그려진 화면 위치를 기록한다. `origin`은 `galley`의 화면 위치.
+fn note_current(style: &Style, galley: &egui::Galley, origin: egui::Pos2, chars: Range<usize>) {
+    let Some(find) = &style.find else {
+        return;
+    };
+    let rect = if chars.is_empty() {
+        galley.pos_from_cursor(CCursor::new(chars.start))
+    } else {
+        range_rects(galley, chars)
+            .into_iter()
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(egui::Rect::NOTHING)
+    };
+    find.current_rect
+        .set(Some(rect.translate(origin.to_vec2())));
 }
 
 /// 최상위 블록 `index` 앞 여백: 위젯 간격 + 한 줄 여백, 제목 앞은 조금 더 (가상 스크롤 전과 같은 배치).
@@ -824,7 +1193,14 @@ impl HeightCache {
                     .max_rect(area),
             );
             child.set_width(width);
+            if let Some(find) = &style.find {
+                find.block.set(Some(i));
+                find.ordinal.set(0);
+            }
             render_block(&mut child, block, style, 0);
+            if let Some(find) = &style.find {
+                find.block.set(None);
+            }
             let rect = child.min_rect();
             self.rendered += 1;
             if let Some((line, color)) = style.cursor
@@ -1065,13 +1441,18 @@ fn code_block(ui: &mut egui::Ui, lang: &str, text: &str, style: &Style, salt: us
                         .visuals()
                         .override_text_color
                         .unwrap_or(ui.visuals().text_color());
-                    let job = LayoutJob::simple(
+                    let mut job = LayoutJob::simple(
                         text.to_owned(),
                         FontId::monospace(style.body),
                         color,
                         f32::INFINITY,
                     );
-                    ui.add(egui::Label::new(job).extend());
+                    let current = mark_find(&mut job, style);
+                    let galley = ui.fonts_mut(|f| f.layout_job(job));
+                    let response = ui.add(egui::Label::new(Arc::clone(&galley)).extend());
+                    if let Some(chars) = current {
+                        note_current(style, &galley, response.rect.min, chars);
+                    }
                 });
         });
 }
@@ -1117,13 +1498,21 @@ fn table(
         .collect();
     let caps = column_widths(&natural, ui.available_width(), CELL_PAD.x * 2.0 + 1.0);
 
-    let galleys: Vec<Vec<Arc<egui::Galley>>> = (0..row_count)
-        .map(|r| {
-            (0..columns)
-                .map(|c| cell_galley(ui, cell(r, c), r == 0, style, caps[c]))
-                .collect()
-        })
-        .collect();
+    // 실제로 그릴 칸 (찾기 매치는 여기서만 칠한다 — 위의 내용 폭 측정은 칠하지 않음)
+    let mut current_cell = None;
+    let mut galleys: Vec<Vec<Arc<egui::Galley>>> = Vec::with_capacity(row_count);
+    for r in 0..row_count {
+        let mut row = Vec::with_capacity(columns);
+        for (c, &cap) in caps.iter().enumerate() {
+            let mut job = inline_job(ui, cell(r, c), style.body, r == 0, style);
+            job.wrap.max_width = cap;
+            if let Some(chars) = mark_find(&mut job, style) {
+                current_cell = Some((r, c, chars));
+            }
+            row.push(ui.fonts_mut(|f| f.layout_job(job)));
+        }
+        galleys.push(row);
+    }
     let widths: Vec<f32> = (0..columns)
         .map(|c| {
             let text = galleys
@@ -1170,6 +1559,12 @@ fn table(
                         egui::Rect::from_min_size(pos, galley.size()),
                         egui::Label::new(Arc::clone(galley)),
                     );
+                    if let Some((_, _, chars)) = current_cell
+                        .clone()
+                        .filter(|&(cr, cc, _)| (cr, cc) == (r, c))
+                    {
+                        note_current(style, galley, pos, chars);
+                    }
                     x += w;
                 }
                 y += h;
@@ -1316,36 +1711,29 @@ fn inline_job_marked(
         if linked {
             format.underline = Stroke::new(1.0, link_color);
         }
-        let text: std::borrow::Cow<'_, str> = match &span.kind {
-            SpanKind::Text => span.text.as_str().into(),
+        // 글자는 [`span_text`] (찾기 매치 세기와 같은 글자), 여기서는 모양만 정한다
+        match &span.kind {
+            SpanKind::Text => {}
             SpanKind::Code => {
                 // 인라인 코드는 본문 크기의 고정폭 + 배경
                 format.font_id = FontId::new(style.body.min(size), FontFamily::Monospace);
                 format.background = style.code_bg;
-                span.text.as_str().into()
             }
+            // 원시 HTML은 실행하지 않고 회색 원문으로, `<br>`만 줄바꿈 (§3.8-4)
+            SpanKind::Html if is_br(&span.text) => {}
             SpanKind::Html => {
-                // 원시 HTML은 실행하지 않고 회색 원문으로, `<br>`만 줄바꿈 (§3.8-4)
-                if is_br(&span.text) {
-                    "\n".into()
-                } else {
-                    format.font_id = FontId::new(style.body.min(size), FontFamily::Monospace);
-                    format.color = weak;
-                    span.text.as_str().into()
-                }
-            }
-            SpanKind::Image { .. } => {
-                // 문단 밖(제목·표 칸)의 이미지는 대체 텍스트로 (문단 안 이미지는 [`inline_text`]가 그린다)
+                format.font_id = FontId::new(style.body.min(size), FontFamily::Monospace);
                 format.color = weak;
-                format!("[이미지: {}]", span.text).into()
             }
+            // 문단 밖(제목·표 칸)의 이미지는 대체 텍스트로 (문단 안 이미지는 [`inline_text`]가 그린다)
+            SpanKind::Image { .. } => format.color = weak,
             SpanKind::FootnoteRef => {
                 format.font_id = FontId::proportional(size * 0.75);
                 format.color = visuals.hyperlink_color;
                 format.valign = Align::TOP;
-                format!("[{}]", style.footnote_mark(&span.text)).into()
             }
-        };
+        }
+        let text = span_text(span, style.footnotes);
         let len = text.chars().count();
         if span.kind == SpanKind::FootnoteRef {
             marks
@@ -1383,13 +1771,17 @@ fn inline_text(ui: &mut egui::Ui, spans: &[Span], size: f32, all_strong: bool, s
 
 /// 글자 라벨. 각주 참조 번호는 눌러서 각주로, 링크는 눌러서 대상으로 이동한다 (마우스를 올리면 주소 툴팁).
 fn rich_label(ui: &mut egui::Ui, spans: &[Span], size: f32, all_strong: bool, style: &Style) {
-    let (job, marks) = inline_job_marked(ui, spans, size, all_strong, style);
-    if marks.footnotes.is_empty() && marks.links.is_empty() {
+    let (mut job, marks) = inline_job_marked(ui, spans, size, all_strong, style);
+    let current = mark_find(&mut job, style);
+    if marks.footnotes.is_empty() && marks.links.is_empty() && current.is_none() {
         ui.label(job);
         return;
     }
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let response = ui.add(egui::Label::new(Arc::clone(&galley)));
+    if let Some(chars) = current {
+        note_current(style, &galley, response.rect.min, chars);
+    }
     let origin = response.rect.min.to_vec2();
     for (range, url) in marks.links {
         let tip = if style.link_broken(&url) {
@@ -1621,6 +2013,136 @@ mod tests {
         let mut d = Document::new_untitled(1);
         d.set_text(text);
         d
+    }
+
+    /// 찾기 프레임: (현재 매치 색으로 칠한 글자들, 나머지 매치 색으로 칠한 조각 수)
+    fn find_frame(
+        ctx: &egui::Context,
+        state: &mut PreviewState,
+        doc: &Document,
+    ) -> (Vec<String>, usize) {
+        let palette = Palette::light();
+        let raw = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 800.0))),
+            ..Default::default()
+        };
+        let mut full = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                state.show(ui, doc, 1.0, &palette, None);
+            });
+        });
+        full.textures_delta.clear();
+        let (mut current, mut others) = (Vec::new(), 0);
+        for clipped in &full.shapes {
+            if let egui::Shape::Text(t) = &clipped.shape {
+                let job = &t.galley.job;
+                for section in &job.sections {
+                    let range = section.byte_range.start.0..section.byte_range.end.0;
+                    if section.format.background == palette.search_current {
+                        current.push(job.text[range].to_owned());
+                    } else if section.format.background == palette.search_match {
+                        others += 1;
+                    }
+                }
+            }
+        }
+        (current, others)
+    }
+
+    fn find_query(pattern: &str) -> (SearchQuery, &str, SearchOptions) {
+        let options = SearchOptions::default();
+        (
+            SearchQuery::new(pattern, &options).unwrap(),
+            pattern,
+            options,
+        )
+    }
+
+    /// 세는 쪽(`count_matches`)과 칠하는 쪽(`mark_find`)이 같은 매치를 본다: 모든 번호의 매치가 정확히 한 번
+    /// 현재 매치로 칠해지고, 원시 HTML 블록은 찾지 않는다.
+    #[test]
+    fn preview_find_counts_and_paints_the_same_matches() {
+        let text = "# 검색 제목\n\n\
+                    문단의 검색 단어와 `검색` 코드, [검색 링크](https://example.com) 그리고 각주[^1].\n\n\
+                    - 목록 검색\n  - 중첩 검색\n\n\
+                    > 인용 검색\n\n\
+                    ```rust\nlet 검색 = 1;\n```\n\n\
+                    | 머리 | 검색 |\n| --- | --- |\n| 검색 |\n\n\
+                    <div>검색 html</div>\n\n\
+                    [^1]: 각주 검색\n";
+        let d = doc(text);
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        frame(&ctx, &mut state, &d);
+        assert_eq!(state.find_status(), None, "찾기 전");
+
+        state.set_find(Some(find_query("검색")));
+        for _ in 0..3 {
+            find_frame(&ctx, &mut state, &d);
+        }
+        // 제목 1 · 문단 3(글자·코드·링크) · 목록 2 · 인용 1 · 코드 1 · 표 2 · 각주 1 (HTML 블록 제외)
+        assert_eq!(state.find_status(), Some((Some(0), 11)));
+
+        for i in 0..11 {
+            let (current, others) = find_frame(&ctx, &mut state, &d);
+            assert_eq!(current, ["검색"], "{i}번째 매치가 현재 매치로 칠해진다");
+            assert_eq!(others, 10, "{i}: 나머지 매치");
+            assert_eq!(state.find_status(), Some((Some(i), 11)));
+            let step = state.find_step(true, true);
+            assert_eq!(
+                step,
+                if i == 10 {
+                    PreviewStep::Wrapped
+                } else {
+                    PreviewStep::Moved
+                }
+            );
+            find_frame(&ctx, &mut state, &d);
+        }
+        assert_eq!(state.find_status(), Some((Some(0), 11)));
+        assert_eq!(state.find_step(false, false), PreviewStep::End);
+
+        // 끄면 강조도 사라진다
+        state.set_find(None);
+        let (current, others) = find_frame(&ctx, &mut state, &d);
+        assert!(current.is_empty() && others == 0);
+        assert_eq!(state.find_step(true, true), PreviewStep::NoMatch);
+    }
+
+    #[test]
+    fn preview_find_scrolls_to_match_far_below() {
+        let mut text = String::new();
+        for i in 0..300 {
+            text.push_str(&format!("{i}번째 문단 내용입니다.\n\n"));
+        }
+        text.push_str("마지막 목표 문단\n");
+        let d = doc(&text);
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        frame(&ctx, &mut state, &d);
+        assert_eq!(state.offset_y(), 0.0);
+
+        state.set_find(Some(find_query("목표")));
+        let mut current = Vec::new();
+        for _ in 0..6 {
+            current = find_frame(&ctx, &mut state, &d).0;
+        }
+        assert_eq!(state.find_status(), Some((Some(0), 1)));
+        assert!(
+            state.offset_y() > 1000.0,
+            "매치 블록으로 스크롤 — {}",
+            state.offset_y()
+        );
+        assert_eq!(current, ["목표"], "화면에 현재 매치가 칠해져 있다");
+
+        // 검색어가 바뀌면 다시 세고, 화면 맨 위 이후 첫 매치로
+        state.set_find(Some(find_query("문단")));
+        for _ in 0..3 {
+            find_frame(&ctx, &mut state, &d);
+        }
+        let (index, total) = state.find_status().unwrap();
+        assert_eq!(total, 301);
+        assert!(index.unwrap() > 200, "화면 맨 위 이후 첫 매치 — {index:?}");
     }
 
     #[test]

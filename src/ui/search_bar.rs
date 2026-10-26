@@ -136,6 +136,8 @@ pub struct SearchBar {
     dirty: Option<(QueryKey, Instant)>,
     /// 검색어·옵션이 바뀌어, 결과가 나오면 첫 매치로 이동해야 한다.
     reveal_pending: bool,
+    /// 미리보기 단독 모드면 미리보기 찾기 상태 `Some(아직 안 셌으면 None | (현재 번호, 매치 수))` (P4-06)
+    preview: Option<Option<(Option<usize>, usize)>>,
 }
 
 impl SearchBar {
@@ -154,7 +156,19 @@ impl SearchBar {
             job: None,
             dirty: None,
             reveal_pending: false,
+            preview: None,
         }
+    }
+
+    /// 지금 검색어 (미리보기 찾기 조건용).
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    /// 미리보기 단독 모드에서는 카운트에 미리보기 찾기 상태를 쓴다 (`preview`가 `false`면 소스 매치).
+    /// `status`는 `(현재 매치 번호, 매치 수)`, 아직 세지 않았으면 `None`.
+    pub fn set_preview_status(&mut self, preview: bool, status: Option<(Option<usize>, usize)>) {
+        self.preview = preview.then_some(status);
     }
 
     pub fn is_open(&self) -> bool {
@@ -461,7 +475,7 @@ impl SearchBar {
             })
             .map(SearchError::to_string);
         let count = self.count_label(selection);
-        let no_result = self.has_pattern() && self.matches().is_some_and(|m| m.is_empty());
+        let no_result = count == "결과 없음";
         let can_move = self.has_pattern() && self.error().is_none();
         let icon = |g: &str| RichText::new(g).family(FontFamily::Name(ICON_FAMILY.into()));
         let mut toggle_width = 0.0;
@@ -631,6 +645,15 @@ impl SearchBar {
         }
         if self.error().is_some() {
             return "정규식 오류".to_owned();
+        }
+        // 미리보기 단독 모드: 미리보기 글자의 매치 수 (P4-06)
+        if let Some(status) = self.preview {
+            return match status {
+                None => "찾는 중…".to_owned(),
+                Some((_, 0)) => "결과 없음".to_owned(),
+                Some((Some(i), total)) => format!("{} / {total}", i + 1),
+                Some((None, total)) => format!("? / {total}"),
+            };
         }
         match self.matches() {
             None => "찾는 중…".to_owned(),
