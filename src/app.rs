@@ -116,6 +116,8 @@ pub struct NotepadApp {
     font_defs: egui::FontDefinitions,
     /// 지난 프레임에 창이 포커스를 가졌는지 (포커스를 다시 얻으면 외부 변경 확인)
     window_focused: bool,
+    /// 기동 후 창이 화면 안에 있는지 확인했는지
+    window_checked: bool,
     zoom: f32,
     /// Markdown 분할 비율 (P3-06)
     split_ratio: f32,
@@ -191,6 +193,7 @@ impl NotepadApp {
             tab_spaces: settings.tab_spaces,
             font_defs,
             window_focused: false,
+            window_checked: false,
             zoom: settings.zoom,
             split_ratio: settings.split_ratio,
             scroll_sync: true,
@@ -293,6 +296,26 @@ impl NotepadApp {
             search_wrap_around: search.wrap_around,
             theme: self.theme,
             ..self.settings.clone()
+        }
+    }
+
+    /// 되살린 창 위치가 지금 모니터 배치에서 어느 화면에도 걸리지 않으면(모니터를 떼어 냈거나 배치를 바꾼 경우)
+    /// 주 모니터 안으로 옮긴다. 창 위치가 처음 알려진 프레임에 한 번만 확인한다.
+    fn ensure_window_on_screen(&mut self, ctx: &egui::Context) {
+        if self.window_checked {
+            return;
+        }
+        let (outer, ppp) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.native_pixels_per_point)
+        });
+        let (Some(outer), Some(ppp)) = (outer, ppp) else {
+            return;
+        };
+        self.window_checked = true;
+        if !title_bar_on_screen(outer, ppp) {
+            log::warn!("창이 화면 밖에 있어 주 모니터 안으로 옮김 (저장된 위치 {outer:?})");
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(80.0, 80.0)));
         }
     }
 
@@ -1691,6 +1714,7 @@ impl eframe::App for NotepadApp {
         self.update_window_title(&ctx);
 
         // 10. 설정 자동 저장 (P2-08)
+        self.ensure_window_on_screen(&ctx);
         self.track_window_geometry(&ctx);
         self.autosave_settings(&ctx);
     }
@@ -1701,6 +1725,41 @@ impl eframe::App for NotepadApp {
 }
 
 /// 두 경로가 같은 파일인지 (실제 경로로 비교, 실패하면 그대로 비교).
+/// 창 위쪽 띠(제목 표시줄, 좌우 끝 조금 제외)가 연결된 모니터 중 하나에라도 걸리는지.
+///
+/// `outer`는 egui 논리 좌표, `ppp`는 물리 픽셀 배율 — winit이 물리 좌표를 배율로 나눈 값이므로 곱해 되돌린다.
+#[cfg(windows)]
+fn title_bar_on_screen(outer: egui::Rect, ppp: f32) -> bool {
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MonitorFromRect(rect: *const Rect, flags: u32) -> *mut std::ffi::c_void;
+    }
+    const MONITOR_DEFAULTTONULL: u32 = 0;
+
+    let inset = (outer.width() / 4.0).min(100.0);
+    let rect = Rect {
+        left: ((outer.left() + inset) * ppp) as i32,
+        top: (outer.top() * ppp) as i32,
+        right: ((outer.right() - inset) * ppp) as i32,
+        bottom: ((outer.top() + 30.0) * ppp) as i32,
+    };
+    // SAFETY: 유효한 `RECT`를 가리키는 포인터만 넘기고, 돌려받은 모니터 핸들은 null 여부만 본다.
+    !unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) }.is_null()
+}
+
+/// macOS 등은 OS가 화면 밖 창을 화면 안으로 옮겨 준다.
+#[cfg(not(windows))]
+fn title_bar_on_screen(_outer: egui::Rect, _ppp: f32) -> bool {
+    true
+}
+
 fn same_path(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
