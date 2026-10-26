@@ -948,7 +948,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [x] 반영된 항목을 사용자가 재확인하고 백로그에서 닫는다 — 해당 없음 (반영 항목 0건)
 
 ### 🚦 게이트 G4 — 검색·치환 통합 시나리오
-- **현황 (2026-10-26)**: 🤖 통과(아래) · 🎨 `필수` 0건 · 👤 대기 — 준비: `cargo xtask try g4` (작업 사본 `target/try-g4/`: `text-1mb.txt` 1,048,577 B 로그 · `search.rs` 코드 · `search_ko.txt` 한글 확인 문서. 저장해도 원본은 그대로)
+- **현황 (2026-10-26)**: 🤖 통과(아래) · 🎨 `필수` 0건 · 👤 대기 — **공통 항목은 macOS에서** [macos-checklist.md §5](macos-checklist.md) (Phase 4 기능 macOS 확인 겸함), **Windows 전용 G1-1(메모장 ANSI 한글 라운드트립)만 Windows에서**. 준비: `cargo xtask try g4` (작업 사본 `target/try-g4/`: `text-1mb.txt` 1,048,577 B 로그 · `search.rs` 코드 · `search_ko.txt` 한글 확인 문서. 저장해도 원본은 그대로)
 - 🤖 전체 테스트·CI 녹색, 검색 성능 기준 충족 — ✅ 2026-10-26 (CI `main` P4-05 병합부터 Windows·macOS 녹색 — P4-03 병합 실행은 xtask fmt 차이로 실패, P4-05에서 수정 · 10MB 매치 카운트 최대 41.5ms ≤ 200ms · 10MB 검색 중 프레임 최대 8.82ms ≤ 16ms, §9.3)
 - 🎨 UX 백로그 `필수` 0건 — ✅ 2026-10-26 (P4-UX)
 - 👤 **통합 시나리오**
