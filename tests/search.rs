@@ -1,17 +1,22 @@
-//! P4-01 검색 엔진 통합 테스트 (PLAN.md §3.2-2).
+//! P4-01 검색 엔진·P4-02 치환 엔진 통합 테스트 (PLAN.md §3.2-2).
 //!
 //! 검증 항목 (WORKPLAN.md P4-01):
 //! - 옵션 조합(정규식·대소문자·단어 단위·Wrap Around)별 매치
 //! - 한글·이모지·결합 문자 포함 문서의 바이트↔문자 오프셋 정확성
 //! - 잘못된 정규식 → 오류 메시지
 //! - 10MB 파일 매치 카운트 ≤ 200ms (측정용, 릴리스 빌드)
+//!
+//! 검증 항목 (WORKPLAN.md P4-02):
+//! - 캡처 그룹(`$1`·`${name}`)·이스케이프(`\n`·`\t`)·빈 매치(`^`·`$`) 치환
+//! - 줄바꿈 정규화(`LF` 내부 표현)와의 상호작용
 
 use std::ops::Range;
 use std::time::Instant;
 
+use my_notepad::core::line_ending::{LineEnding, apply_line_ending, normalize_to_lf};
 use my_notepad::core::search::{
-    SearchError, SearchOptions, SearchQuery, byte_ranges_to_char_ranges, char_range_to_byte_range,
-    next_match_index, prev_match_index,
+    ReplaceAll, SearchError, SearchOptions, SearchQuery, byte_ranges_to_char_ranges,
+    char_range_to_byte_range, next_match_index, prev_match_index,
 };
 
 fn opts(regex: bool, match_case: bool, whole_word: bool) -> SearchOptions {
@@ -377,4 +382,214 @@ fn count_time_10mb() {
         worst <= 200.0,
         "10MB 매치 카운트 ≤ 200ms — 최대 {worst:.1}ms"
     );
+}
+
+// ── P4-02 치환 엔진 ──
+
+/// 모두 바꾸기 결과 `(텍스트, 개수)`
+fn replace(
+    text: &str,
+    pattern: &str,
+    replacement: &str,
+    options: SearchOptions,
+) -> (String, usize) {
+    let ReplaceAll { text, count } = query(pattern, options).replace_all(text, replacement);
+    (text, count)
+}
+
+#[test]
+fn replace_capture_groups() {
+    let re = opts(true, true, false);
+    assert_eq!(
+        replace("10-20, 3-4", r"(\d+)-(\d+)", "$2-$1", re),
+        ("20-10, 4-3".to_owned(), 2)
+    );
+    // 이름 있는 그룹 (`(?P<name>…)`·`(?<name>…)` 둘 다)
+    assert_eq!(
+        replace(
+            "2026-10, 1999-01",
+            r"(?P<y>\d{4})-(?<m>\d{2})",
+            "${m}/${y}",
+            re
+        ),
+        ("10/2026, 01/1999".to_owned(), 2)
+    );
+    // `$0`은 매치 전체, `$$`는 `$` 글자
+    assert_eq!(
+        replace("a1 b22", r"\d+", "$$$0", re),
+        ("a$1 b$22".to_owned(), 2)
+    );
+    // `$1a`는 그룹 이름 `1a`(없음 → 빈 문자열), 뒤에 글자를 붙이려면 `${1}a`
+    assert_eq!(replace("b", "(b)", "$1a", re), (String::new(), 1));
+    assert_eq!(replace("b", "(b)", "${1}a", re), ("ba".to_owned(), 1));
+    // 매치되지 않은 선택 그룹은 빈 문자열
+    assert_eq!(replace("ac", "a(b)?c", "[$1]", re), ("[]".to_owned(), 1));
+    // 한글 그룹
+    assert_eq!(
+        replace("홍길동 님, 김철수 님", r"(\S+) 님", "$1 씨", re),
+        ("홍길동 씨, 김철수 씨".to_owned(), 2)
+    );
+}
+
+#[test]
+fn replace_escapes_in_regex_mode() {
+    let re = opts(true, true, false);
+    assert_eq!(
+        replace("a, b, c", ", ", r"\n", re),
+        ("a\nb\nc".to_owned(), 2)
+    );
+    assert_eq!(replace("a b", " ", r"\t", re), ("a\tb".to_owned(), 1));
+    assert_eq!(replace("a b", " ", r"\\", re), ("a\\b".to_owned(), 1));
+    // 이스케이프와 그룹을 함께
+    assert_eq!(
+        replace("k=v", r"(\w)=(\w)", r"$1\t$2\n", re),
+        ("k\tv\n".to_owned(), 1)
+    );
+    // `\\n`은 백슬래시 + n, 그 밖의 `\x`와 끝의 `\`는 그대로
+    assert_eq!(replace("a", "a", r"\\n", re), ("\\n".to_owned(), 1));
+    assert_eq!(replace("a", "a", r"\d\", re), ("\\d\\".to_owned(), 1));
+}
+
+#[test]
+fn replace_is_literal_in_plain_mode() {
+    let plain = opts(false, true, false);
+    // 일반 모드에서는 `$1`·`\n`을 해석하지 않는다
+    assert_eq!(
+        replace("price: 10", "10", r"$1\n${x}", plain),
+        (r"price: $1\n${x}".to_owned(), 1)
+    );
+    assert_eq!(
+        replace("a.b a.b", "a.b", "(x)", plain),
+        ("(x) (x)".to_owned(), 2)
+    );
+}
+
+#[test]
+fn replace_follows_search_options() {
+    // 단어 단위: `category`·`cats`는 그대로
+    assert_eq!(
+        replace(
+            "cat category cats cat.",
+            "cat",
+            "dog",
+            opts(false, true, true)
+        ),
+        ("dog category cats dog.".to_owned(), 2)
+    );
+    // 대소문자 무시
+    assert_eq!(
+        replace(
+            "Error error ERROR",
+            "error",
+            "ok",
+            opts(false, false, false)
+        ),
+        ("ok ok ok".to_owned(), 3)
+    );
+    // 개수는 찾기 카운트와 같다
+    let text = "검색 검색어 검색을 다시 검색";
+    let q = query("검색", opts(false, true, true));
+    assert_eq!(q.replace_all(text, "찾기").count, q.count(text));
+    assert_eq!(
+        q.replace_all(text, "찾기").text,
+        "찾기 검색어 검색을 다시 찾기"
+    );
+}
+
+#[test]
+fn replace_empty_matches() {
+    let re = opts(true, true, false);
+    // `^`: 줄마다 앞에 붙인다 — 끝 개행 뒤의 빈 줄도 한 줄이다 (에디터에서 커서가 갈 수 있는 줄)
+    assert_eq!(
+        replace("a\nb\n", "^", "> ", re),
+        ("> a\n> b\n> ".to_owned(), 3)
+    );
+    assert_eq!(replace("a\nb", "^", "> ", re), ("> a\n> b".to_owned(), 2));
+    // `$`: 줄마다 끝에 붙인다
+    assert_eq!(replace("a\nb", "$", ";", re), ("a;\nb;".to_owned(), 2));
+    // 빈 줄 지우기 (`^\n`)
+    assert_eq!(
+        replace("a\n\n\nb\n", r"^\n", "", re),
+        ("a\nb\n".to_owned(), 2)
+    );
+    // 글자 사이 빈 매치: 글자 단위로 진행하고 한글 글자 중간에 끼우지 않는다
+    assert_eq!(replace("가나", "x*", "-", re), ("-가-나-".to_owned(), 3));
+    // 비어 있지 않은 매치 바로 뒤의 빈 매치는 바꾸지 않는다 (찾기와 같은 규칙)
+    assert_eq!(replace("baac", "a*", "-", re), ("-b-c-".to_owned(), 3));
+}
+
+#[test]
+fn replace_interacts_with_lf_normalization() {
+    // CRLF 파일은 열 때 `LF`로 정규화된다 → 정규식 `\n`으로 줄을 합치고, `\r\n`은 매치되지 않는다
+    let text = normalize_to_lf("one\r\ntwo\r\nthree\r\n");
+    let re = opts(true, true, false);
+    assert_eq!(
+        replace(&text, r"\n(\w)", " $1", re),
+        ("one two three\n".to_owned(), 2)
+    );
+    assert_eq!(replace(&text, r"\r\n", " ", re).1, 0);
+    assert_eq!(replace(&text, r"\r", " ", re).1, 0);
+
+    // 바꿀 문자열 안의 CRLF·CR(붙여넣기 등)도 `LF`로 넣는다 — 일반·정규식 모드 모두
+    let (plain, _) = replace("a|b", "|", "\r\n", opts(false, true, false));
+    assert_eq!(plain, "a\nb");
+    let (regex, _) = replace("a|b", r"\|", "x\ry", re);
+    assert_eq!(regex, "ax\nyb");
+    assert!(!plain.contains('\r') && !regex.contains('\r'));
+
+    // 줄을 나눈 결과를 CRLF 문서로 저장하면 새 줄도 CRLF가 된다
+    let (split, _) = replace(&text, "two", r"two\nhalf", re);
+    assert_eq!(
+        apply_line_ending(&split, LineEnding::CrLf),
+        "one\r\ntwo\r\nhalf\r\nthree\r\n"
+    );
+}
+
+#[test]
+fn replace_without_matches_keeps_text() {
+    assert_eq!(
+        replace("abc", "zz", "x", SearchOptions::default()),
+        ("abc".to_owned(), 0)
+    );
+    let empty = SearchQuery::new("", &SearchOptions::default()).unwrap();
+    assert_eq!(
+        empty.replace_all("abc", "x"),
+        ReplaceAll {
+            text: "abc".to_owned(),
+            count: 0
+        }
+    );
+}
+
+#[test]
+fn replacement_for_single_match() {
+    let text = "ab ab xab";
+    let q = query("ab", opts(false, true, true));
+    assert_eq!(q.replacement_for(text, &(3..5), "X").as_deref(), Some("X"));
+    // 매치가 아닌 범위·단어 중간·텍스트 밖·글자 중간은 `None` (오래된 매치를 바꾸지 않게)
+    assert_eq!(q.replacement_for(text, &(1..3), "X"), None);
+    assert_eq!(
+        q.replacement_for(text, &(7..9), "X"),
+        None,
+        "단어 중간 `xab`"
+    );
+    assert_eq!(q.replacement_for(text, &(8..20), "X"), None);
+    assert_eq!(
+        query("가", SearchOptions::default()).replacement_for("가", &(1..3), "X"),
+        None
+    );
+
+    // 정규식 그룹·이스케이프
+    let q = query(r"(\w)(\w)", opts(true, true, false));
+    assert_eq!(
+        q.replacement_for("ab cd", &(3..5), r"$2$1\t").as_deref(),
+        Some("dc\t")
+    );
+    // `^`처럼 앞 문맥이 필요한 매치도 같은 위치에서 판정
+    let q = query(r"^\w", opts(true, true, false));
+    assert_eq!(
+        q.replacement_for("a\nb", &(2..3), "X").as_deref(),
+        Some("X")
+    );
+    assert_eq!(q.replacement_for("ab", &(1..2), "X"), None);
 }
