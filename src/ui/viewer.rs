@@ -9,6 +9,8 @@
 //! - 캐럿·선택은 문서(`LF` 정규화) 바이트 오프셋으로 기억. 마우스 클릭·드래그·`Shift`+클릭, 방향키·`Home`/`End`·
 //!   `PageUp`/`PageDown`·`Ctrl+Home`/`End`(`Shift`로 선택 확장), `Ctrl/Cmd+A`, `Ctrl/Cmd+C`
 //! - 아주 긴 줄(압축된 로그 등)은 앞 [`MAX_RENDER_CHARS`]자까지만 그린다 (한 줄 레이아웃이 프레임을 막지 않게)
+//! - 찾기(P4-03): 보이는 줄의 매치(바이트 범위)만 `search_match`로, 선택과 같은 매치는 `search_current`로 칠한다.
+//!   매치로 이동하면 그 줄이 화면 밖일 때 가운데로 스크롤한다
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -20,6 +22,7 @@ use eframe::egui::{
 
 use crate::core::buffer::{LineIndex, byte_to_char_offset, char_to_byte_offset};
 use crate::core::document::Document;
+use crate::ui::editor::SearchMarks;
 use crate::ui::theme::Palette;
 
 /// 한 줄에서 그리는 최대 글자 수.
@@ -60,6 +63,8 @@ pub struct ViewerState {
     selected_chars: usize,
     /// 다음 프레임에 캐럿이 보이도록 스크롤
     scroll_to_caret: bool,
+    /// 다음 프레임에 캐럿 줄이 화면 밖이면 가운데로 스크롤 (찾기 이동)
+    reveal_selection: bool,
     /// 지난 프레임의 맨 위 줄 (소수 = 줄 안에서 스크롤된 비율)
     top_line: f64,
     /// 지난 프레임의 화면 높이·글 영역 폭·가로 스크롤 위치 (px)
@@ -85,6 +90,7 @@ impl ViewerState {
             preferred_col: None,
             selected_chars: 0,
             scroll_to_caret: false,
+            reveal_selection: false,
             top_line: 0.0,
             view_height: 400.0,
             row_height: 18.0,
@@ -131,6 +137,14 @@ impl ViewerState {
         self.preferred_col = None;
         self.pending_top_line = Some(line.saturating_sub(self.page_lines() / 2) as f64);
         self.focus_requested = true;
+    }
+
+    /// 바이트 범위 `range`를 선택하고(캐럿은 끝), 그 줄이 화면 밖이면 가운데로 스크롤한다 (찾기 이동, P4-03).
+    /// 포커스는 옮기지 않는다.
+    pub fn select_and_reveal(&mut self, doc: &Document, range: Range<usize>) {
+        self.set_selection(doc, range.start, range.end);
+        self.preferred_col = None;
+        self.reveal_selection = true;
     }
 
     /// 지난 프레임의 맨 위 줄 (0-기반, 소수 포함).
@@ -220,8 +234,15 @@ impl ViewerState {
         ((self.view_height / self.row_height).floor() as usize).max(1)
     }
 
-    /// 뷰어를 그리고 입력을 처리한다. 남은 영역을 모두 차지한다.
-    pub fn show(&mut self, ui: &mut egui::Ui, doc: &Document, font: &FontId, palette: &Palette) {
+    /// 뷰어를 그리고 입력을 처리한다. 남은 영역을 모두 차지한다. `search`는 강조할 찾기 매치(바이트 범위).
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &Document,
+        font: &FontId,
+        palette: &Palette,
+        search: Option<&SearchMarks>,
+    ) {
         let text = doc.text();
         let index = doc.line_index();
         let line_count = index.line_count();
@@ -266,14 +287,26 @@ impl ViewerState {
             }
         };
 
-        // 캐럿이 보이도록 (세로·가로)
-        if std::mem::take(&mut self.scroll_to_caret) && self.pending_top_line.is_none() {
+        // 찾기 이동: 캐럿 줄이 화면 밖이면 가운데로 (가로는 아래 캐럿 처리)
+        if std::mem::take(&mut self.reveal_selection) {
             let caret_line = index.line_of_byte(self.caret) as f64;
             let rows = (view_height / row_height) as f64;
-            if caret_line < self.top_line {
-                self.pending_top_line = Some(caret_line);
-            } else if caret_line + 1.0 > self.top_line + rows {
-                self.pending_top_line = Some(caret_line + 1.0 - rows);
+            if caret_line < self.top_line || caret_line + 1.0 > self.top_line + rows {
+                self.pending_top_line = Some((caret_line - (rows / 2.0).floor()).max(0.0));
+            }
+            self.scroll_to_caret = true;
+        }
+
+        // 캐럿이 보이도록 (세로는 다른 스크롤 요청이 없을 때만, 가로는 항상)
+        if std::mem::take(&mut self.scroll_to_caret) {
+            let caret_line = index.line_of_byte(self.caret) as f64;
+            let rows = (view_height / row_height) as f64;
+            if self.pending_top_line.is_none() {
+                if caret_line < self.top_line {
+                    self.pending_top_line = Some(caret_line);
+                } else if caret_line + 1.0 > self.top_line + rows {
+                    self.pending_top_line = Some(caret_line + 1.0 - rows);
+                }
             }
             if let Some((range, galley)) = layout(ui, caret_line as usize) {
                 let col = byte_to_char_offset(&text[range.clone()], self.caret - range.start);
@@ -336,6 +369,9 @@ impl ViewerState {
             let selection_color = ui.visuals().selection.bg_fill;
             let caret_line = index.line_of_byte(self.caret);
             let sel = self.selection();
+            let marks = search
+                .filter(|s| s.text_len == text.len())
+                .map(|s| s.ranges.as_slice());
 
             // 보이는 줄만 레이아웃한다.
             let lines: Vec<(usize, Range<usize>, Arc<Galley>)> = (first..last)
@@ -443,6 +479,37 @@ impl ViewerState {
                             0.0,
                             selection_color,
                         );
+                    }
+                }
+
+                // 찾기 매치 (줄에 걸친 부분만, 현재 매치 = 선택과 같은 매치)
+                if let Some(marks) = marks {
+                    let line_text = &text[range.clone()];
+                    let first = marks.partition_point(|m| m.end <= range.start);
+                    for m in marks[first..].iter().take_while(|m| m.start <= range.end) {
+                        let a =
+                            byte_to_char_offset(line_text, m.start.max(range.start) - range.start);
+                        let b = byte_to_char_offset(line_text, m.end.min(range.end) - range.start);
+                        let x0 = galley.pos_from_cursor(CCursor::new(a)).min.x;
+                        let mut x1 = galley.pos_from_cursor(CCursor::new(b)).min.x;
+                        // 줄바꿈까지 걸친 매치는 줄 끝에 작은 표시 (선택과 같게)
+                        if m.end > range.end {
+                            x1 += char_width * 0.6;
+                        }
+                        if x1 > x0 {
+                            text_painter.rect_filled(
+                                Rect::from_min_max(
+                                    Pos2::new(text_left + x0, y),
+                                    Pos2::new(text_left + x1, y + row_height),
+                                ),
+                                0.0,
+                                if *m == sel {
+                                    palette.search_current
+                                } else {
+                                    palette.search_match
+                                },
+                            );
+                        }
                     }
                 }
 
@@ -783,7 +850,7 @@ mod tests {
             };
             let mut full = ctx.run_ui(raw, |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
-                    v.show(ui, &d, &FontId::monospace(14.0), &palette);
+                    v.show(ui, &d, &FontId::monospace(14.0), &palette, None);
                 });
             });
             full.textures_delta.clear();
@@ -841,6 +908,90 @@ mod tests {
     }
 
     #[test]
+    fn find_reveals_match_and_paints_marks() {
+        let text: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        let d = doc(&text);
+        let ranges: Vec<Range<usize>> = text
+            .match_indices("line")
+            .map(|(i, s)| i..i + s.len())
+            .collect();
+        let marks = SearchMarks {
+            ranges: Arc::new(ranges.clone()),
+            text_len: text.len(),
+        };
+        let palette = Palette::dark();
+        let ctx = egui::Context::default();
+        let mut v = ViewerState::new(10);
+        let frame = |v: &mut ViewerState| {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 600.0))),
+                ..Default::default()
+            };
+            let mut full = ctx.run_ui(raw, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    v.show(ui, &d, &FontId::monospace(14.0), &palette, Some(&marks));
+                });
+            });
+            full.textures_delta.clear();
+            let mut fills = Vec::new();
+            for clipped in &full.shapes {
+                if let egui::Shape::Rect(r) = &clipped.shape {
+                    fills.push(r.fill);
+                }
+            }
+            fills
+        };
+        frame(&mut v);
+
+        // 화면 밖 매치 → 선택(캐럿은 끝)하고 그 줄이 화면 가운데쯤으로, 포커스는 옮기지 않음
+        v.focus_requested = false;
+        v.select_and_reveal(&d, ranges[500].clone());
+        assert_eq!(v.selection(), ranges[500]);
+        assert_eq!(v.caret(), ranges[500].end);
+        frame(&mut v);
+        let fills = frame(&mut v);
+        let rows = (v.view_height / v.row_height) as f64;
+        assert!(
+            (v.top_line() + rows / 2.0 - 500.0).abs() < 2.0,
+            "맨 위 줄 {}",
+            v.top_line()
+        );
+        let count = |c| fills.iter().filter(|&&x| x == c).count();
+        assert_eq!(count(palette.search_current), 1, "선택과 같은 현재 매치");
+        assert!(
+            count(palette.search_match) as f64 >= rows - 2.0,
+            "보이는 줄의 다른 매치"
+        );
+
+        // 이미 보이는 매치 → 스크롤하지 않는다
+        let top = v.top_line();
+        v.select_and_reveal(&d, ranges[505].clone());
+        frame(&mut v);
+        frame(&mut v);
+        assert_eq!(v.top_line(), top);
+
+        // 텍스트 길이가 다른(오래된) 매치는 그리지 않는다
+        let stale = SearchMarks {
+            ranges: marks.ranges.clone(),
+            text_len: 1,
+        };
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 600.0))),
+            ..Default::default()
+        };
+        let mut full = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                v.show(ui, &d, &FontId::monospace(14.0), &palette, Some(&stale));
+            });
+        });
+        full.textures_delta.clear();
+        assert!(full.shapes.iter().all(|c| !matches!(
+            &c.shape,
+            egui::Shape::Rect(r) if r.fill == palette.search_match
+        )));
+    }
+
+    #[test]
     fn helpers_handle_long_lines_and_boundaries() {
         let long = "가".repeat(MAX_RENDER_CHARS + 10);
         assert_eq!(
@@ -867,7 +1018,7 @@ mod tests {
         };
         let mut full = ctx.run_ui(raw, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                v.show(ui, d, &FontId::monospace(14.0), &Palette::dark());
+                v.show(ui, d, &FontId::monospace(14.0), &Palette::dark(), None);
             });
         });
         full.textures_delta.clear();

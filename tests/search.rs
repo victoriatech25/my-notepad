@@ -9,14 +9,17 @@
 //! 검증 항목 (WORKPLAN.md P4-02):
 //! - 캡처 그룹(`$1`·`${name}`)·이스케이프(`\n`·`\t`)·빈 매치(`^`·`$`) 치환
 //! - 줄바꿈 정규화(`LF` 내부 표현)와의 상호작용
+//!
+//! 검증 항목 (WORKPLAN.md P4-03, 엔진 쪽 — 디바운스·폐기는 `ui::search_bar` 단위 테스트):
+//! - 백그라운드 작업 결과가 동기 검색과 같고, 작업을 버리면 취소된다
 
 use std::ops::Range;
 use std::time::Instant;
 
 use my_notepad::core::line_ending::{LineEnding, apply_line_ending, normalize_to_lf};
 use my_notepad::core::search::{
-    ReplaceAll, SearchError, SearchOptions, SearchQuery, byte_ranges_to_char_ranges,
-    char_range_to_byte_range, next_match_index, prev_match_index,
+    JobPoll, RangeUnit, ReplaceAll, SearchError, SearchJob, SearchOptions, SearchQuery,
+    byte_ranges_to_char_ranges, char_range_to_byte_range, next_match_index, prev_match_index,
 };
 
 fn opts(regex: bool, match_case: bool, whole_word: bool) -> SearchOptions {
@@ -592,4 +595,50 @@ fn replacement_for_single_match() {
         Some("X")
     );
     assert_eq!(q.replacement_for("ab", &(1..2), "X"), None);
+}
+
+// ── P4-03 백그라운드 검색 ──
+
+#[test]
+fn background_job_matches_synchronous_search() {
+    let text = "한글 검색 abc 검색\n".repeat(5000);
+    let q = query("검색", SearchOptions::default());
+    let bytes = q.find_all(&text);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let job = SearchJob::spawn(q.clone(), text.clone(), RangeUnit::Bytes, move || {
+        tx.send(()).unwrap();
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("다 찾으면 알림");
+    assert_eq!(job.poll(), JobPoll::Done(bytes.clone()));
+
+    let job = SearchJob::spawn(q, text.clone(), RangeUnit::Chars, || {});
+    assert_eq!(job.wait(), Some(byte_ranges_to_char_ranges(&text, &bytes)));
+}
+
+#[test]
+fn dropping_job_cancels_it() {
+    let text = text_10mb();
+    let q = query(r"\w+", opts(true, true, false));
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let started = Instant::now();
+    let job = SearchJob::spawn(q.clone(), text.clone(), RangeUnit::Bytes, move || {
+        let _ = tx.send(());
+    });
+    assert_eq!(job.poll(), JobPoll::Running);
+    drop(job);
+    // 취소된 작업은 결과도 알림도 보내지 않는다 (보낼 곳이 사라져 `notify`가 불리지 않음)
+    assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).is_err());
+    println!("취소 확인까지 {:?}", started.elapsed());
+
+    // 뒤이은 작업은 정상
+    let small = "ab ab";
+    let job = SearchJob::spawn(
+        query("ab", SearchOptions::default()),
+        small.to_owned(),
+        RangeUnit::Bytes,
+        || {},
+    );
+    assert_eq!(job.wait(), Some(vec![0..2, 3..5]));
 }
