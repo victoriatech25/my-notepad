@@ -41,7 +41,7 @@ use crate::ui::{
     dialogs::{self, Dialog, DialogOutcome},
     doc_view,
     editor::{self, EditorOptions},
-    markdown_view::LinkAction,
+    markdown_view::{LinkAction, PreviewStep},
     menu_bar::{self, MenuBarState, MenuTabEntry},
     search_bar::{BarEvent, SearchBar, Step},
     sidebar::{self, SidebarAction, SidebarState},
@@ -600,6 +600,18 @@ impl NotepadApp {
             self.open_search(false);
             return;
         }
+        // 미리보기 단독 모드: 미리보기 글자의 매치 사이를 옮긴다 (P4-06)
+        if self.preview_only() {
+            self.pending_step = None;
+            let wrap = self.search.options().wrap_around;
+            let step = self.tabs.active_mut().preview.find_step(forward, wrap);
+            match step {
+                PreviewStep::Wrapped => self.notice_step(ctx, forward, true),
+                PreviewStep::End => self.notice_step(ctx, forward, false),
+                PreviewStep::Moved | PreviewStep::NoMatch => {}
+            }
+            return;
+        }
         let tab = self.tabs.active();
         self.search
             .refresh(ctx, tab.id(), &tab.doc, tab.viewer.is_some());
@@ -612,38 +624,38 @@ impl NotepadApp {
             Step::Moved(range) => self.reveal_match(range),
             Step::Wrapped(range) => {
                 self.reveal_match(range);
-                self.show_notice(
-                    ctx,
-                    if forward {
-                        "문서 끝에 닿아 처음부터 다시 찾았습니다"
-                    } else {
-                        "문서 처음에 닿아 끝에서부터 다시 찾았습니다"
-                    },
-                );
+                self.notice_step(ctx, forward, true);
             }
-            Step::End => self.show_notice(
-                ctx,
-                if forward {
-                    "문서 끝까지 찾았습니다"
-                } else {
-                    "문서 처음까지 찾았습니다"
-                },
-            ),
+            Step::End => self.notice_step(ctx, forward, false),
             // 찾기 바의 카운트(`결과 없음`·`정규식 오류`)가 알려 준다.
             Step::NoMatch => {}
         }
     }
 
-    /// 찾은 매치(탭 단위 범위)를 선택하고 보이게 한다. 미리보기만 보이는 Markdown 탭은 분할로 바꿔 소스를 보여 준다.
+    /// 다음/이전 찾기가 문서 끝을 지나 이어 찾았거나(`wrapped`) 더 찾을 매치가 없을 때 상태 표시줄 안내.
+    fn notice_step(&mut self, ctx: &egui::Context, forward: bool, wrapped: bool) {
+        let text = match (forward, wrapped) {
+            (true, true) => "문서 끝에 닿아 처음부터 다시 찾았습니다",
+            (false, true) => "문서 처음에 닿아 끝에서부터 다시 찾았습니다",
+            (true, false) => "문서 끝까지 찾았습니다",
+            (false, false) => "문서 처음까지 찾았습니다",
+        };
+        self.show_notice(ctx, text);
+    }
+
+    /// 활성 탭이 Markdown 미리보기만 보이는지 — 이때 찾기는 미리보기 글자에서 한다 (P4-06).
+    /// 좁은 창의 분할 모드가 미리보기 쪽을 보이는 경우도 포함한다.
+    fn preview_only(&self) -> bool {
+        let tab = self.tabs.active();
+        tab.viewer.is_none() && tab.doc_view.shown() == Some(ViewMode::Preview)
+    }
+
+    /// 찾은 매치(탭 단위 범위)를 선택하고 보이게 한다 (소스·뷰어 — 미리보기 단독 모드는 미리보기가 직접 옮긴다).
     fn reveal_match(&mut self, range: Range<usize>) {
         let tab = self.tabs.active_mut();
-        if let Some(viewer) = &mut tab.viewer {
-            viewer.select_and_reveal(&tab.doc, range);
-            return;
-        }
-        tab.editor.select_and_reveal(&mut tab.doc, range);
-        if tab.doc.is_markdown() && tab.view_mode == ViewMode::Preview {
-            self.set_view_mode(ViewMode::Split);
+        match &mut tab.viewer {
+            Some(viewer) => viewer.select_and_reveal(&tab.doc, range),
+            None => tab.editor.select_and_reveal(&mut tab.doc, range),
         }
     }
     /// 바꾸기 (P4-05): 선택이 지금 텍스트의 매치면 바꾸고(Undo 한 단계), 다음 매치로 간다.
@@ -1617,10 +1629,14 @@ impl eframe::App for NotepadApp {
 
         // 5-1. 찾기 바 (에디터 위, 사이드바 오른쪽 — ui-spec §1)
         let mut search_event = None;
+        let preview_only = self.preview_only();
         if self.search.is_open() {
             let selection = self.active_selection();
             let tab = self.tabs.active();
-            let can_replace = tab.viewer.is_none() && !tab.doc.is_readonly();
+            let preview_status = preview_only.then(|| tab.preview.find_status()).flatten();
+            self.search.set_preview_status(preview_only, preview_status);
+            // 미리보기 단독 모드에서는 바꿀 위치(소스 선택)가 보이지 않으므로 바꾸기를 끈다
+            let can_replace = tab.viewer.is_none() && !tab.doc.is_readonly() && !preview_only;
             egui::Panel::top("search_bar").show(ui, |ui| {
                 search_event = self.search.show(ui, &palette, &selection, can_replace);
             });
@@ -1632,6 +1648,7 @@ impl eframe::App for NotepadApp {
             if self
                 .search
                 .refresh(&ctx, tab.id(), &tab.doc, tab.viewer.is_some())
+                && !preview_only
                 && let Some(range) = self.search.first_from(&self.active_selection())
             {
                 self.reveal_match(range);
@@ -1650,6 +1667,14 @@ impl eframe::App for NotepadApp {
             Some(BarEvent::ReplaceAll) => self.replace_all(&ctx),
             None => {}
         }
+        // 미리보기 단독 모드에서 찾기 바가 열려 있으면 미리보기 글자에서 찾는다 (그 밖에는 미리보기 찾기를 끈다)
+        let preview_query = (self.search.is_open() && self.preview_only())
+            .then(|| self.search.query())
+            .flatten();
+        self.tabs
+            .active_mut()
+            .preview
+            .set_find(preview_query.map(|q| (q, self.search.pattern(), self.search.options())));
         // 6. 본문 영역: 활성 탭 에디터
         let font_size = ui.style().text_styles[&egui::TextStyle::Monospace].size * self.zoom;
         let options = EditorOptions {

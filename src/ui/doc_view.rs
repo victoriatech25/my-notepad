@@ -166,6 +166,11 @@ fn sync_scroll(
     enabled: bool,
     applied: (bool, bool),
 ) {
+    // 찾기 이동으로 소스가 스크롤되는 중이면 화면 맨 위 줄이 아직 옛 위치다 — 지난 위치를 그대로 두어
+    // 새 화면이 그려진 뒤 움직임을 알아채 맞춘다 (P4-06)
+    if tab.editor.revealed_this_frame() {
+        return;
+    }
     let source = tab.doc.scroll_offset_y();
     let preview = tab.preview.offset_y();
     let state = &mut tab.doc_view;
@@ -599,6 +604,36 @@ mod tests {
         assert!(
             (source2 - preview2).abs() <= 1.0,
             "소스 {source2} · 미리보기 {preview2}"
+        );
+    }
+
+    /// 분할 모드 찾기 (P4-06): 소스에서 매치로 이동하면 미리보기가 스크롤 동기화로 따라온다.
+    #[test]
+    fn find_in_split_moves_source_and_preview_follows() {
+        let (ctx, mut tabs, mut ratio) = split_tabs(300);
+        let tab = tabs.active_mut();
+        let line = 400;
+        let start = tab
+            .doc
+            .line_index()
+            .char_of_line_col(tab.doc.text(), line, 1);
+        tab.editor.select_and_reveal(&mut tab.doc, start..start + 2);
+        frames(&ctx, &mut tabs, &mut ratio, 1200.0);
+        frames(&ctx, &mut tabs, &mut ratio, 1200.0);
+        let tab = tabs.active();
+        assert_eq!(
+            tab.doc.cursor_char_range(),
+            start..start + 2,
+            "소스에서 매치 선택"
+        );
+        let (source, preview) = top_lines(&tabs);
+        assert!(
+            source < (line - 1) as f32 && source > (line as f32) - 60.0,
+            "매치 줄이 소스 화면 안: 맨 위 {source}"
+        );
+        assert!(
+            (source - preview).abs() <= 1.5,
+            "미리보기가 따라온다: 소스 {source} · 미리보기 {preview}"
         );
     }
 

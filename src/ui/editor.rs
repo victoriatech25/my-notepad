@@ -100,6 +100,8 @@ pub struct EditorState {
     center_cursor: bool,
     /// 다음 프레임에 선택 범위가 화면 밖이면 보이도록 스크롤한다 (찾기 이동).
     reveal_selection: bool,
+    /// 찾기 이동 스크롤을 요청한 뒤 아직 화면이 따라오지 않은 프레임 수 (요청 프레임 + 적용 프레임)
+    revealed: u8,
     focus_requested: bool,
     highlight: Option<SmartHighlight>,
     /// 다음 프레임에 이 소스 줄(0부터, 소수 = 줄 안 위치)이 화면 맨 위에 오게 한다 (보기 모드 전환, P3-06).
@@ -163,6 +165,7 @@ impl EditorState {
             pending_scroll_y: None,
             center_cursor: false,
             reveal_selection: false,
+            revealed: 0,
             focus_requested: false,
             highlight: None,
             pending_top_line: None,
@@ -337,6 +340,12 @@ impl EditorState {
         self.reveal_selection = true;
     }
 
+    /// 찾기 이동 스크롤 중인지 — 요청한 프레임과 다음 프레임(스크롤 위치가 바뀌어도 [`Self::top_line`]은 아직 옛
+    /// 화면)에는 분할 모드 스크롤 동기화를 건너뛰고, 새 화면이 그려진 뒤 맞춘다 (P4-06).
+    pub fn revealed_this_frame(&self) -> bool {
+        self.revealed > 0
+    }
+
     /// 에디터가 처리하는 편집 커맨드를 실행한다. 처리했으면 `true`.
     ///
     /// 메뉴에서 실행되면 에디터가 포커스를 잃으므로, 문서에 저장된 선택 범위를 기준으로 동작하고 포커스를 되돌린다.
@@ -470,6 +479,11 @@ impl EditorState {
         let (match_color, current_color) = (palette.search_match, palette.search_current);
         let selection = doc.cursor_char_range();
         let reveal = std::mem::take(&mut self.reveal_selection);
+        self.revealed = if reveal {
+            2
+        } else {
+            self.revealed.saturating_sub(1)
+        };
         let syntax = self.update_syntax(doc, &ctx);
         let window = self.syntax_window(doc);
         let scratch = &mut self.scratch;
