@@ -1,1 +1,271 @@
-//! 정규식·일반 문자열 검색 및 치환, 바이트↔문자 오프셋 변환 (P4-01~03에서 구현).
+//! 찾기 바의 검색 엔진: 일반 문자열·정규식 검색, 매치 이동, 바이트↔문자 오프셋 변환 (PLAN.md §3.2-2, P4-01).
+//!
+//! - 일반 문자열도 [`regex::escape`]로 정규식으로 바꿔 같은 경로로 찾는다 (옵션 처리를 한 곳에 모은다).
+//! - 정규식 문법은 Rust `regex`를 따른다 — **전후방 탐색(lookaround)과 역참조는 지원하지 않는다**.
+//!   `^`·`$`는 줄 단위(multi-line)로 동작한다. 잘못된 패턴은 [`SearchError`]로 알린다.
+//! - 대소문자 무시는 `regex`의 유니코드 대소문자 접기를 쓴다. 위치는 항상 원문 바이트 기준이다.
+//! - 단어 단위 일치: 매치의 첫 글자가 단어 글자면 앞에, 끝 글자가 단어 글자면 뒤에 단어 경계가 있어야 한다
+//!   (스마트 하이라이트와 같은 판정 방식). 단어 글자는 정규식 `\w`와 같아 결합 문자도 포함한다 —
+//!   `e` + 결합 악센트 앞의 `cafe`는 단어 중간으로 본다. 경계가 맞지 않으면 다음 글자부터 다시 찾는다.
+//! - 위치는 문서 텍스트(`LF` 정규화)의 바이트 범위이며 오름차순·겹침 없음. egui 커서는 문자 인덱스를 쓰므로
+//!   UI는 [`byte_ranges_to_char_ranges`]·[`char_range_to_byte_range`]로 변환한다
+//!   (낱개 오프셋은 [`crate::core::buffer`]의 `byte_to_char_offset`·`char_to_byte_offset`).
+//! - 치환은 P4-02, 백그라운드 수행·취소는 P4-03에서 붙인다.
+
+use std::borrow::Cow;
+use std::fmt;
+use std::ops::Range;
+
+use regex::{Regex, RegexBuilder};
+
+/// 찾기 옵션 (찾기 바의 `.*`·`Aa`·`\b` 토글과 Wrap Around).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchOptions {
+    /// 정규식 사용 (`.*`)
+    pub regex: bool,
+    /// 대소문자 구분 (`Aa`)
+    pub match_case: bool,
+    /// 단어 단위 일치 (`\b`)
+    pub whole_word: bool,
+    /// 끝에서 처음으로 이어서 찾기 (기본 켬)
+    pub wrap_around: bool,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            regex: false,
+            match_case: false,
+            whole_word: false,
+            wrap_around: true,
+        }
+    }
+}
+
+/// 검색어를 검색 조건으로 만들 수 없는 이유.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchError {
+    /// 정규식 문법 오류 (`regex`가 알려 준 위치·내용)
+    Syntax(String),
+    /// 컴파일된 정규식이 크기 한도를 넘음 (큰 반복 횟수 등)
+    TooBig,
+}
+
+impl fmt::Display for SearchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Syntax(detail) => write!(f, "정규식 오류:\n{detail}"),
+            Self::TooBig => f.write_str("정규식이 너무 큽니다. 반복 횟수나 길이를 줄여 주세요."),
+        }
+    }
+}
+
+impl std::error::Error for SearchError {}
+
+impl From<regex::Error> for SearchError {
+    fn from(err: regex::Error) -> Self {
+        match err {
+            regex::Error::CompiledTooBig(_) => Self::TooBig,
+            other => Self::Syntax(other.to_string()),
+        }
+    }
+}
+
+/// 검색어와 옵션으로 만든 검색 조건. 같은 조건으로 여러 번 찾을 때 다시 컴파일하지 않도록 보관한다.
+#[derive(Debug, Clone)]
+pub struct SearchQuery {
+    /// 빈 검색어면 `None` (매치 없음, 오류도 아님)
+    regex: Option<Regex>,
+    whole_word: bool,
+    wrap_around: bool,
+}
+
+impl SearchQuery {
+    /// 검색어를 컴파일한다. 빈 검색어는 오류가 아니라 매치가 없는 조건이 된다.
+    pub fn new(pattern: &str, options: &SearchOptions) -> Result<Self, SearchError> {
+        let regex = if pattern.is_empty() {
+            None
+        } else {
+            let source = if options.regex {
+                Cow::Borrowed(pattern)
+            } else {
+                Cow::Owned(regex::escape(pattern))
+            };
+            Some(
+                RegexBuilder::new(&source)
+                    .case_insensitive(!options.match_case)
+                    .multi_line(true)
+                    .build()?,
+            )
+        };
+        Ok(Self {
+            regex,
+            whole_word: options.whole_word,
+            wrap_around: options.wrap_around,
+        })
+    }
+
+    /// 빈 검색어인지 여부.
+    pub fn is_empty(&self) -> bool {
+        self.regex.is_none()
+    }
+
+    /// Wrap Around 옵션.
+    pub fn wrap_around(&self) -> bool {
+        self.wrap_around
+    }
+
+    /// 매치 위치를 앞에서부터 차례로 돌려준다 (필요한 만큼만 `take`할 수 있다).
+    pub fn matches<'a>(&'a self, text: &'a str) -> impl Iterator<Item = Range<usize>> + 'a {
+        Matches {
+            regex: self.regex.as_ref(),
+            text,
+            whole_word: self.whole_word,
+            pos: 0,
+            last_end: None,
+        }
+    }
+
+    /// 모든 매치 위치.
+    pub fn find_all(&self, text: &str) -> Vec<Range<usize>> {
+        self.matches(text).collect()
+    }
+
+    /// 매치 수 (위치 목록을 만들지 않는다).
+    pub fn count(&self, text: &str) -> usize {
+        self.matches(text).count()
+    }
+}
+
+/// [`SearchQuery::matches`]의 반복자.
+struct Matches<'a> {
+    regex: Option<&'a Regex>,
+    text: &'a str,
+    whole_word: bool,
+    /// 다음 탐색 시작 바이트 위치 (텍스트 길이를 넘으면 끝)
+    pos: usize,
+    /// 직전 매치의 끝 위치
+    last_end: Option<usize>,
+}
+
+impl Iterator for Matches<'_> {
+    type Item = Range<usize>;
+
+    fn next(&mut self) -> Option<Range<usize>> {
+        let regex = self.regex?;
+        while self.pos <= self.text.len() {
+            // `find_at`은 시작 위치 앞 글자도 보므로 `^`·`\b`가 문서 전체 기준으로 판정된다.
+            let range = regex.find_at(self.text, self.pos)?.range();
+            // 직전 매치 끝에 붙은 빈 매치는 건너뛴다 (`a*`가 `aaa` 뒤에서 빈 매치를 한 번 더 내지 않게).
+            let touches_last = range.is_empty() && self.last_end == Some(range.start);
+            if touches_last || (self.whole_word && !has_word_bounds(self.text, &range)) {
+                self.pos = next_char_end(self.text, range.start);
+                continue;
+            }
+            self.pos = if range.is_empty() {
+                next_char_end(self.text, range.end)
+            } else {
+                range.end
+            };
+            self.last_end = Some(range.end);
+            return Some(range);
+        }
+        None
+    }
+}
+
+/// `pos`의 다음 글자 끝 위치. 텍스트 끝이면 길이 + 1 (탐색 종료 표시).
+fn next_char_end(text: &str, pos: usize) -> usize {
+    text[pos..]
+        .chars()
+        .next()
+        .map_or(text.len() + 1, |c| pos + c.len_utf8())
+}
+
+/// 단어 단위 일치 경계 판정: 매치 양 끝 중 단어 글자인 쪽만 바깥 글자가 단어 글자가 아니어야 한다.
+fn has_word_bounds(text: &str, range: &Range<usize>) -> bool {
+    let matched = &text[range.clone()];
+    let start_ok = !matched.chars().next().is_some_and(is_word_char)
+        || !text[..range.start]
+            .chars()
+            .next_back()
+            .is_some_and(is_word_char);
+    let end_ok = !matched.chars().next_back().is_some_and(is_word_char)
+        || !text[range.end..].chars().next().is_some_and(is_word_char);
+    start_ok && end_ok
+}
+
+/// 단어 글자: 정규식 `\w`와 같다 (문자·숫자·결합 문자·`_` 등, 한글 포함).
+fn is_word_char(c: char) -> bool {
+    regex_syntax::is_word_character(c)
+}
+
+/// 바이트 위치 `from`(포함) 이후 첫 매치의 번호. 없으면 `wrap_around`일 때 첫 매치.
+///
+/// `matches`는 오름차순 매치 목록이다. 현재 매치에서 다음 매치로 넘어가려면 `from`에
+/// 현재 매치 시작 + 1을 넘긴다 (빈 매치에서도 제자리에 멈추지 않는다).
+pub fn next_match_index(matches: &[Range<usize>], from: usize, wrap_around: bool) -> Option<usize> {
+    let i = matches.partition_point(|m| m.start < from);
+    if i < matches.len() {
+        Some(i)
+    } else if wrap_around && !matches.is_empty() {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+/// 바이트 위치 `before`보다 앞에서 시작하는 마지막 매치의 번호. 없으면 `wrap_around`일 때 마지막 매치.
+pub fn prev_match_index(
+    matches: &[Range<usize>],
+    before: usize,
+    wrap_around: bool,
+) -> Option<usize> {
+    let i = matches.partition_point(|m| m.start < before);
+    if i > 0 {
+        Some(i - 1)
+    } else if wrap_around {
+        matches.len().checked_sub(1)
+    } else {
+        None
+    }
+}
+
+/// 바이트 범위 목록을 문자 인덱스 범위로 한 번에 변환한다.
+///
+/// 오름차순 목록이면 텍스트를 한 번만 훑는다 (매치마다 처음부터 세지 않는다). 범위가 텍스트를 넘거나
+/// 글자 중간이면 앞쪽 글자 경계로 보정한다 (편집 직후의 오래된 결과에서도 패닉하지 않게).
+pub fn byte_ranges_to_char_ranges(text: &str, ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut byte = 0;
+    let mut chars = 0;
+    let mut to_char = |b: usize| {
+        let b = text.floor_char_boundary(b);
+        if b >= byte {
+            chars += text[byte..b].chars().count();
+        } else {
+            chars -= text[b..byte].chars().count();
+        }
+        byte = b;
+        chars
+    };
+    ranges
+        .iter()
+        .map(|r| {
+            let start = to_char(r.start);
+            start..to_char(r.end)
+        })
+        .collect()
+}
+
+/// 문자 인덱스 범위를 바이트 범위로 변환한다 (egui 선택 영역 → 검색 시작 위치·선택 텍스트).
+/// 텍스트 끝을 넘는 인덱스는 텍스트 끝으로 보정한다.
+pub fn char_range_to_byte_range(text: &str, range: Range<usize>) -> Range<usize> {
+    let byte_at = |from: usize, n: usize| {
+        text[from..]
+            .char_indices()
+            .nth(n)
+            .map_or(text.len(), |(i, _)| from + i)
+    };
+    let start = byte_at(0, range.start);
+    start..byte_at(start, range.end.saturating_sub(range.start))
+}
