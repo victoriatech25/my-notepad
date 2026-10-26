@@ -340,6 +340,7 @@ mod tests {
             highlight: HighlightOptions::default(),
             tab_width: 4,
             tab_spaces: false,
+            search: None,
         }
     }
 

@@ -36,6 +36,8 @@ pub struct MenuBarState<'a> {
     pub highlight_whole_word: bool,
     /// 선택 단어 강조: 대소문자 구분
     pub highlight_match_case: bool,
+    /// 찾기: 끝에서 처음으로 이어서 찾기
+    pub search_wrap_around: bool,
     pub theme: ThemeMode,
     pub encoding: EncodingChoice,
     pub line_ending: LineEndingChoice,
@@ -226,6 +228,15 @@ fn search_menu(
     ui.separator();
     menu_item(ui, ctx, keymap, "다음 찾기", Command::FindNext, triggered);
     menu_item(ui, ctx, keymap, "이전 찾기", Command::FindPrev, triggered);
+    selectable_menu_item(
+        ui,
+        ctx,
+        keymap,
+        state.search_wrap_around,
+        "끝에서 처음으로 이어서 찾기",
+        Command::ToggleSearchWrapAround,
+        triggered,
+    );
 
     // 선택 단어 일괄 강조 옵션 (PLAN.md §3.2-1, P2-04)
     ui.separator();
@@ -591,6 +602,7 @@ mod tests {
             scroll_sync: false,
             highlight_whole_word: true,
             highlight_match_case: true,
+            search_wrap_around: true,
             theme: ThemeMode::System,
             encoding: EncodingChoice::Utf8,
             line_ending: LineEndingChoice::Lf,

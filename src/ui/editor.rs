@@ -15,6 +15,8 @@
 //!   **화면에 보이는 매치만** 글자 뒤에 배경 사각형(`smart_highlight`)으로 그린다. 선택 자체는 강조하지 않는다.
 //!   글자 레이아웃(`LayoutJob`)에 배경색 구간을 넣으면 강조가 켜지고 꺼질 때마다 매치가 있는 줄을 모두 다시
 //!   레이아웃해 1MB·2천여 매치에서 한 프레임 50~60ms가 걸렸다. 사각형 방식은 레이아웃 캐시를 건드리지 않는다.
+//! - 찾기 매치(P4-04)도 같은 사각형 방식으로 그린다: 전체 매치는 `search_match`, 선택 범위와 똑같은 매치(현재 매치)는
+//!   `search_current`. 매치 계산은 찾기 바([`crate::ui::search_bar`])가 맡고 에디터는 [`EditorOptions::search`]를 그리기만 한다.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -31,6 +33,7 @@ use crate::core::document::Document;
 use crate::core::highlight::{HighlightOptions, find_matches, target_word};
 use crate::core::line_ending::normalize_to_lf;
 use crate::core::markdown::{EditMap, SyntaxKind, SyntaxSpans, syntax_spans};
+use crate::core::search::{byte_ranges_to_char_ranges, current_match_index};
 use crate::ui::theme::Palette;
 
 /// 에디터 표시 옵션.
@@ -46,6 +49,17 @@ pub struct EditorOptions {
     pub tab_width: usize,
     /// `Tab` 키로 탭 문자 대신 공백을 넣는다.
     pub tab_spaces: bool,
+    /// 찾기 바가 열려 있을 때 강조할 찾기 매치 (P4-04).
+    pub search: Option<SearchMarks>,
+}
+
+/// 에디터에 그릴 찾기 매치.
+#[derive(Debug, Clone)]
+pub struct SearchMarks {
+    /// 매치 문자 범위 (오름차순·겹침 없음)
+    pub ranges: Arc<Vec<Range<usize>>>,
+    /// 계산 당시 문서 텍스트 길이 — 입력 중이라 사본 길이가 다르면 그리지 않는다.
+    pub text_len: usize,
 }
 
 /// 한 프레임의 에디터 결과.
@@ -84,6 +98,8 @@ pub struct EditorState {
     pending_scroll_y: Option<f32>,
     /// 다음 프레임에 커서 줄이 화면 가운데에 오도록 스크롤한다 (줄 이동).
     center_cursor: bool,
+    /// 다음 프레임에 선택 범위가 화면 밖이면 보이도록 스크롤한다 (찾기 이동).
+    reveal_selection: bool,
     focus_requested: bool,
     highlight: Option<SmartHighlight>,
     /// 다음 프레임에 이 소스 줄(0부터, 소수 = 줄 안 위치)이 화면 맨 위에 오게 한다 (보기 모드 전환, P3-06).
@@ -146,6 +162,7 @@ impl EditorState {
             pending_cursor: None,
             pending_scroll_y: None,
             center_cursor: false,
+            reveal_selection: false,
             focus_requested: false,
             highlight: None,
             pending_top_line: None,
@@ -309,6 +326,17 @@ impl EditorState {
         self.focus_requested = true;
     }
 
+    /// 문자 범위 `range`를 선택하고, 화면 밖이면 보이도록 스크롤한다 (찾기 이동, P4-04).
+    ///
+    /// 세로로 화면 밖이면 그 줄을 화면 가운데로, 가로로만 벗어났으면 보일 만큼만 옮긴다.
+    /// 포커스는 옮기지 않는다 (찾기 바 입력란에서 `Enter`로 이동해도 계속 입력할 수 있게).
+    pub fn select_and_reveal(&mut self, doc: &mut Document, range: Range<usize>) {
+        doc.set_cursor_char_range(range.clone());
+        doc.break_undo_group();
+        self.pending_cursor = Some(range);
+        self.reveal_selection = true;
+    }
+
     /// 에디터가 처리하는 편집 커맨드를 실행한다. 처리했으면 `true`.
     ///
     /// 메뉴에서 실행되면 에디터가 포커스를 잃으므로, 문서에 저장된 선택 범위를 기준으로 동작하고 포커스를 되돌린다.
@@ -434,6 +462,14 @@ impl EditorState {
             .filter(|h| !h.ranges.is_empty() && h.text_len == self.scratch.len())
             .map(|h| Arc::clone(&h.ranges));
         let mark_color = palette.smart_highlight;
+        let search_marks = options
+            .search
+            .as_ref()
+            .filter(|s| !s.ranges.is_empty() && s.text_len == self.scratch.len())
+            .map(|s| Arc::clone(&s.ranges));
+        let (match_color, current_color) = (palette.search_match, palette.search_current);
+        let selection = doc.cursor_char_range();
+        let reveal = std::mem::take(&mut self.reveal_selection);
         let syntax = self.update_syntax(doc, &ctx);
         let window = self.syntax_window(doc);
         let scratch = &mut self.scratch;
@@ -475,14 +511,42 @@ impl EditorState {
                     } else {
                         text_edit(scratch, id, options, min_size, &mut layouter).show(ui)
                     };
-                    if let Some(ranges) = &marks {
-                        let origin = output.galley_pos - egui::vec2(output.galley.rect.left(), 0.0);
-                        let shapes =
-                            highlight_rects(&output.galley, origin, ui.clip_rect(), ranges)
+                    let origin = output.galley_pos - egui::vec2(output.galley.rect.left(), 0.0);
+                    let clip = ui.clip_rect();
+                    let mut shapes = Vec::new();
+                    let mut fill = |ranges: &[Range<usize>], color| {
+                        shapes.extend(
+                            highlight_rects(&output.galley, origin, clip, ranges)
                                 .into_iter()
-                                .map(|r| egui::Shape::rect_filled(r, 0.0, mark_color))
-                                .collect();
+                                .map(|r| egui::Shape::rect_filled(r, 0.0, color)),
+                        );
+                    };
+                    // 찾기 매치 → 현재 매치 → 선택 단어 강조 순서로 겹쳐 그린다.
+                    if let Some(ranges) = &search_marks {
+                        fill(ranges, match_color);
+                        if let Some(current) = current_match_index(ranges, &selection) {
+                            fill(&ranges[current..=current], current_color);
+                        }
+                    }
+                    if let Some(ranges) = &marks {
+                        fill(ranges, mark_color);
+                    }
+                    if !shapes.is_empty() {
                         ui.painter().set(marks_slot, egui::Shape::Vec(shapes));
+                    }
+                    if reveal {
+                        let at = |i: usize| output.galley.pos_from_cursor(CCursor::new(i));
+                        let rect = at(selection.start)
+                            .union(at(selection.end))
+                            .translate(origin.to_vec2());
+                        let off_screen = rect.top() < clip.top() || rect.bottom() > clip.bottom();
+                        // 찾기 이동은 애니메이션 없이 바로 옮긴다 (연속 `F3`에서 화면이 따라오도록).
+                        ui.scroll_to_rect_animation(
+                            rect,
+                            off_screen.then_some(egui::Align::Center),
+                            egui::style::ScrollAnimation::none(),
+                        );
+                        ui.ctx().request_repaint();
                     }
                     output
                 })
@@ -595,7 +659,7 @@ impl EditorState {
                 ranges = found.ranges;
                 // 선택 자체(앞뒤 공백을 뺀 단어 위치)는 강조하지 않는다.
                 ranges.retain(|r| !(selected.start <= r.start && r.end <= selected.end));
-                ranges = byte_ranges_to_chars(doc.text(), &ranges);
+                ranges = byte_ranges_to_char_ranges(doc.text(), &ranges);
             }
         }
         if had_marks || !ranges.is_empty() {
@@ -729,23 +793,6 @@ fn text_edit<'t>(
             f32::INFINITY
         })
         .min_size(min_size)
-}
-
-/// 오름차순 바이트 범위들을 문자 범위로 바꾼다 (텍스트를 한 번만 훑는다).
-fn byte_ranges_to_chars(text: &str, ranges: &[Range<usize>]) -> Vec<Range<usize>> {
-    let (mut byte, mut chars) = (0, 0);
-    let mut to_char = |to: usize| {
-        chars += text[byte..to].chars().count();
-        byte = to;
-        chars
-    };
-    ranges
-        .iter()
-        .map(|r| {
-            let start = to_char(r.start);
-            start..to_char(r.end)
-        })
-        .collect()
 }
 
 /// 레이아웃 `galley`(화면 위치 `origin`)에서 `clip` 안에 보이는 매치(문자 범위, 오름차순)의 배경 사각형.
@@ -951,6 +998,7 @@ mod tests {
             highlight: HighlightOptions::default(),
             tab_width: 4,
             tab_spaces: false,
+            search: None,
         }
     }
 
@@ -1426,6 +1474,7 @@ mod tests {
             highlight: HighlightOptions::default(),
             tab_width: 4,
             tab_spaces: false,
+            search: None,
         };
         let mut full = ctx.run_ui(raw, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
@@ -1689,15 +1738,6 @@ mod tests {
     }
 
     #[test]
-    fn byte_ranges_convert_to_char_ranges() {
-        let text = "한글 abc 한글";
-        assert_eq!(
-            byte_ranges_to_chars(text, &[0..6, 7..10, 11..17]),
-            [0..2, 3..6, 7..9]
-        );
-    }
-
-    #[test]
     fn highlight_rects_cover_only_visible_matches() {
         let ctx = egui::Context::default();
         let lines: Vec<String> = (0..200).map(|i| format!("줄{i} 강조 끝")).collect();
@@ -1767,6 +1807,102 @@ mod tests {
         editor.go_to_line(&mut doc, 99_999);
         frame(&ctx, &mut editor, &mut doc, vec![]);
         assert_eq!(cursor_status(&doc).0, doc.line_count());
+    }
+
+    #[test]
+    fn select_and_reveal_scrolls_only_when_off_screen() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(41);
+        let text: String = (1..=1000).map(|i| format!("{i}번째 줄\n")).collect();
+        let mut doc = Document::from_bytes(None, text.as_bytes(), false, None).unwrap();
+        frame(&ctx, &mut editor, &mut doc, vec![]);
+        let line_start =
+            |doc: &Document, line: usize| doc.line_index().char_of_line_col(doc.text(), line, 1);
+
+        // 화면 밖 매치 → 그 줄이 화면 가운데쯤으로, 선택은 매치 범위, 포커스는 옮기지 않음
+        let start = line_start(&doc, 500);
+        editor.select_and_reveal(&mut doc, start..start + 3);
+        for _ in 0..3 {
+            frame(&ctx, &mut editor, &mut doc, vec![]);
+        }
+        assert_eq!(doc.cursor_char_range(), start..start + 3);
+        assert!(!ctx.memory(|m| m.has_focus(editor.id())));
+        let row = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(14.0)));
+        let (numbers, _) = gutter_frame(&ctx, &mut editor, &mut doc, true);
+        let y = numbers
+            .iter()
+            .find(|n| n.0 == 500)
+            .expect("500번 줄이 보임")
+            .2
+            + row / 2.0;
+        assert!((y - 300.0).abs() < row * 2.0, "500번 줄 높이 {y}");
+
+        // 이미 보이는 매치 → 스크롤하지 않는다
+        let offset = doc.scroll_offset_y();
+        let start = line_start(&doc, 505);
+        editor.select_and_reveal(&mut doc, start..start + 3);
+        for _ in 0..3 {
+            frame(&ctx, &mut editor, &mut doc, vec![]);
+        }
+        assert_eq!(doc.cursor_char_range(), start..start + 3);
+        assert_eq!(doc.scroll_offset_y(), offset);
+    }
+
+    #[test]
+    fn search_marks_paint_all_matches_and_current_match() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(42);
+        let mut doc = new_doc();
+        doc.set_text("검색 하나 검색 둘 검색");
+        frame(&ctx, &mut editor, &mut doc, vec![]);
+        let palette = Palette::light();
+        let mut options = options();
+        options.search = Some(SearchMarks {
+            ranges: Arc::new(vec![0..2, 6..8, 11..13]),
+            text_len: doc.text().len(),
+        });
+        doc.set_cursor_char_range(6..8);
+        editor.restore_view(&doc);
+
+        let fills = |ctx: &egui::Context, editor: &mut EditorState, doc: &mut Document| {
+            let raw = RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let mut full = ctx.run_ui(raw, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    editor.show(ui, doc, &options, &palette);
+                });
+            });
+            full.textures_delta.clear();
+            let mut colors = Vec::new();
+            fn collect(shape: &egui::Shape, out: &mut Vec<egui::Color32>) {
+                match shape {
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, out)),
+                    egui::Shape::Rect(r) => out.push(r.fill),
+                    _ => {}
+                }
+            }
+            for clipped in &full.shapes {
+                collect(&clipped.shape, &mut colors);
+            }
+            colors
+        };
+        fills(&ctx, &mut editor, &mut doc);
+        let colors = fills(&ctx, &mut editor, &mut doc);
+        let count = |c| colors.iter().filter(|&&x| x == c).count();
+        assert_eq!(count(palette.search_match), 3, "전체 매치");
+        assert_eq!(count(palette.search_current), 1, "선택과 같은 현재 매치");
+
+        // 선택이 매치가 아니면 현재 매치 색은 없다
+        doc.set_cursor_char_range(1..1);
+        editor.restore_view(&doc);
+        fills(&ctx, &mut editor, &mut doc);
+        let colors = fills(&ctx, &mut editor, &mut doc);
+        assert!(!colors.contains(&palette.search_current));
     }
 
     #[test]

@@ -16,12 +16,15 @@
 //! - P2-07: 앱이 포커스를 얻을 때 열린 파일의 외부 변경·삭제를 확인 (다시 불러오기 확인, 삭제된 탭 표시)
 //! - P2-06: 좌측 폴더 탐색 사이드바 — `폴더 열기`·끌어다 놓은 폴더·명령줄 폴더 인자로 열고, 파일 클릭 시 탭으로 연다
 //! - P1-14: 5MB 초과 파일은 읽기 전용 뷰어(`ui::viewer`), 1~5MB는 안내 막대, 뷰어 ↔ 편집 모드 전환(큰 파일은 경고)
+//! - P4-04: 찾기 바(`ui::search_bar`) — `Ctrl+F`로 에디터 위에 열고, 매치 강조·`F3`/`Shift+F3` 이동·`Esc` 닫기.
+//!   찾기 옵션은 설정에 저장한다
 
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use eframe::egui::{self, FontId, ViewportCommand};
+use eframe::egui::{self, FontId, Key, Modifiers, ViewportCommand};
 
 use crate::commands::{Command, KeyDispatcher, Keymap, ThemeMode, ViewMode};
 use crate::config::{Settings, WindowGeometry};
@@ -30,6 +33,7 @@ use crate::core::encoding::{TextEncoding, decode_with_encoding, find_unmappable_
 use crate::core::file_io::{self, FileIoErrorKind, OpenMode, OpenOutcome, SaveError, SizePolicy};
 use crate::core::highlight::HighlightOptions;
 use crate::core::line_ending::LineEnding;
+use crate::core::search::SearchOptions;
 use crate::fonts;
 use crate::tabs::{ExternalChange, Tabs};
 use crate::ui::{
@@ -38,6 +42,7 @@ use crate::ui::{
     editor::{self, EditorOptions},
     markdown_view::LinkAction,
     menu_bar::{self, MenuBarState, MenuTabEntry},
+    search_bar::{BarEvent, SearchBar, Step},
     sidebar::{self, SidebarAction, SidebarState},
     status_bar::{self, StatusBarInfo},
     tab_bar::{self, TabAction, TabBarState, UNSAVED_PATH_HINT},
@@ -111,12 +116,16 @@ pub struct NotepadApp {
     font_defs: egui::FontDefinitions,
     /// 지난 프레임에 창이 포커스를 가졌는지 (포커스를 다시 얻으면 외부 변경 확인)
     window_focused: bool,
+    /// 기동 후 창이 화면 안에 있는지 확인했는지
+    window_checked: bool,
     zoom: f32,
     /// Markdown 분할 비율 (P3-06)
     split_ratio: f32,
     scroll_sync: bool,
     /// 선택 단어 일괄 강조 옵션
     highlight: HighlightOptions,
+    /// 찾기 바 (P4-04)
+    search: SearchBar,
     theme: ThemeMode,
     last_command: Option<String>,
 
@@ -184,6 +193,7 @@ impl NotepadApp {
             tab_spaces: settings.tab_spaces,
             font_defs,
             window_focused: false,
+            window_checked: false,
             zoom: settings.zoom,
             split_ratio: settings.split_ratio,
             scroll_sync: true,
@@ -192,6 +202,12 @@ impl NotepadApp {
                 match_case: settings.highlight_match_case,
                 ..HighlightOptions::default()
             },
+            search: SearchBar::new(SearchOptions {
+                regex: settings.search_regex,
+                match_case: settings.search_match_case,
+                whole_word: settings.search_whole_word,
+                wrap_around: settings.search_wrap_around,
+            }),
             theme: settings.theme,
             last_command: None,
             measure: None,
@@ -263,6 +279,7 @@ impl NotepadApp {
 
     /// 지금 앱 상태를 설정으로 모은다.
     fn settings_snapshot(&self) -> Settings {
+        let search = self.search.options();
         Settings {
             sidebar_open: self.sidebar_open,
             sidebar_folder: self.sidebar.folder().map(Path::to_path_buf),
@@ -273,8 +290,32 @@ impl NotepadApp {
             tab_spaces: self.tab_spaces,
             highlight_whole_word: self.highlight.whole_word,
             highlight_match_case: self.highlight.match_case,
+            search_regex: search.regex,
+            search_match_case: search.match_case,
+            search_whole_word: search.whole_word,
+            search_wrap_around: search.wrap_around,
             theme: self.theme,
             ..self.settings.clone()
+        }
+    }
+
+    /// 되살린 창 위치가 지금 모니터 배치에서 어느 화면에도 걸리지 않으면(모니터를 떼어 냈거나 배치를 바꾼 경우)
+    /// 주 모니터 안으로 옮긴다. 창 위치가 처음 알려진 프레임에 한 번만 확인한다.
+    fn ensure_window_on_screen(&mut self, ctx: &egui::Context) {
+        if self.window_checked {
+            return;
+        }
+        let (outer, ppp) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.native_pixels_per_point)
+        });
+        let (Some(outer), Some(ppp)) = (outer, ppp) else {
+            return;
+        };
+        self.window_checked = true;
+        if !title_bar_on_screen(outer, ppp) {
+            log::warn!("창이 화면 밖에 있어 주 모니터 안으로 옮김 (저장된 위치 {outer:?})");
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(80.0, 80.0)));
         }
     }
 
@@ -372,6 +413,11 @@ impl NotepadApp {
 
         self.last_command = Some(summary);
 
+        // 찾기 입력란에서 누른 `Ctrl/Cmd+Z`·`Ctrl+Y`가 문서를 되돌리지 않게 한다.
+        if matches!(command, Command::Undo | Command::Redo) && self.search.input_has_focus(ctx) {
+            return;
+        }
+
         let tab = self.tabs.active_mut();
         if let Some(viewer) = &mut tab.viewer {
             // 뷰어는 읽기 전용: 복사·모두 선택만 처리하고 편집 커맨드는 무시한다.
@@ -432,6 +478,15 @@ impl NotepadApp {
             Command::CloseAllTabs => self.run_tab_action(ctx, TabAction::CloseAll),
             Command::CopyTabPath => self.run_tab_action(ctx, TabAction::CopyPath(active)),
             Command::ShowWindowList => self.dialogs.push_back(Dialog::window_list()),
+
+            // ── 검색 (바꾸기 줄은 P4-05 — 그때까지 바꾸기도 찾기 바를 연다) ──
+            Command::Find | Command::Replace => {
+                let tab = self.tabs.active();
+                self.search.open(tab.viewer.is_none().then_some(&tab.doc));
+            }
+            Command::FindNext => self.find_step(ctx, true),
+            Command::FindPrev => self.find_step(ctx, false),
+            Command::ToggleSearchWrapAround => self.search.toggle_wrap_around(),
 
             // ── 보기 ──
             Command::ToggleSidebar => {
@@ -508,6 +563,67 @@ impl NotepadApp {
                 self.tabs.active_mut().doc.set_line_ending(le);
             }
             _ => {}
+        }
+    }
+
+    // ── 찾기 (P4-04) ──
+
+    /// 다음/이전 찾기 (`F3`·`Shift+F3`·찾기 바 `Enter`). 검색어가 없으면 찾기 바를 연다.
+    /// 찾기 바가 닫혀 있어도 마지막 검색어로 이동한다 (Notepad++·VS Code와 같음).
+    fn find_step(&mut self, ctx: &egui::Context, forward: bool) {
+        if !self.search.has_pattern() {
+            let tab = self.tabs.active();
+            self.search.open(tab.viewer.is_none().then_some(&tab.doc));
+            return;
+        }
+        let tab = self.tabs.active();
+        if tab.viewer.is_some() {
+            self.show_notice(ctx, "큰 파일 뷰어에서는 아직 찾을 수 없습니다");
+            return;
+        }
+        self.search.refresh(tab.id(), &tab.doc, true);
+        match self.search.step(&tab.doc, forward) {
+            Step::Moved(range) => self.reveal_match(range),
+            Step::Wrapped(range) => {
+                self.reveal_match(range);
+                self.show_notice(
+                    ctx,
+                    if forward {
+                        "문서 끝에 닿아 처음부터 다시 찾았습니다"
+                    } else {
+                        "문서 처음에 닿아 끝에서부터 다시 찾았습니다"
+                    },
+                );
+            }
+            Step::End => self.show_notice(
+                ctx,
+                if forward {
+                    "문서 끝까지 찾았습니다"
+                } else {
+                    "문서 처음까지 찾았습니다"
+                },
+            ),
+            // 찾기 바의 카운트(`결과 없음`·`정규식 오류`)가 알려 준다.
+            Step::NoMatch => {}
+        }
+    }
+
+    /// 찾은 매치(문자 범위)를 선택하고 보이게 한다. 미리보기만 보이는 Markdown 탭은 분할로 바꿔 소스를 보여 준다.
+    fn reveal_match(&mut self, range: Range<usize>) {
+        let tab = self.tabs.active_mut();
+        tab.editor.select_and_reveal(&mut tab.doc, range);
+        if tab.doc.is_markdown() && tab.view_mode == ViewMode::Preview {
+            self.set_view_mode(ViewMode::Split);
+        }
+    }
+
+    /// 찾기 바를 닫고 본문으로 포커스를 돌린다 (커서는 마지막으로 이동한 매치에 남는다).
+    fn close_search(&mut self) {
+        self.search.close();
+        let tab = self.tabs.active_mut();
+        match &mut tab.viewer {
+            Some(viewer) => viewer.request_focus(),
+            None => tab.editor.request_focus(),
         }
     }
 
@@ -1235,6 +1351,16 @@ impl eframe::App for NotepadApp {
         self.open_dropped_files(&ctx);
         self.check_external_changes(&ctx);
 
+        // 찾기 바가 열려 있으면 에디터에서 누른 `Esc`도 찾기 바를 닫는다 (입력란의 `Esc`는 찾기 바가 처리).
+        if self.search.is_open() && self.dialogs.is_empty() {
+            let editor_id = self.tabs.active().editor.id();
+            if ctx.memory(|m| m.has_focus(editor_id))
+                && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+            {
+                self.close_search();
+            }
+        }
+
         // 1. 위젯보다 먼저 전역 단축키를 소비·디스패치한다 (PLAN.md §3.5). 대화상자가 떠 있으면 막는다.
         if self.dialogs.is_empty()
             && let Some(cmd) = self.key_dispatcher.dispatch(&ctx, &self.keymap)
@@ -1293,6 +1419,7 @@ impl eframe::App for NotepadApp {
             scroll_sync: self.scroll_sync,
             highlight_whole_word: self.highlight.whole_word,
             highlight_match_case: self.highlight.match_case,
+            search_wrap_around: self.search.options().wrap_around,
             theme: self.theme,
             encoding: active.doc.encoding(),
             line_ending: active.doc.line_ending(),
@@ -1401,6 +1528,31 @@ impl eframe::App for NotepadApp {
             }
         }
 
+        // 5-1. 찾기 바 (에디터 위, 사이드바 오른쪽 — ui-spec §1)
+        if self.search.is_open() {
+            let tab = self.tabs.active();
+            let viewer = tab.viewer.is_some();
+            let selection = tab.doc.cursor_char_range();
+            let mut event = None;
+            egui::Panel::top("search_bar").show(ui, |ui| {
+                event = self.search.show(ui, &palette, &selection, viewer);
+            });
+            // 검색어·옵션이 바뀌었으면 커서 이후 첫 매치로 바로 이동한다 (카운트는 다음 프레임에 갱신).
+            let tab = self.tabs.active();
+            if self.search.refresh(tab.id(), &tab.doc, !viewer) {
+                ctx.request_repaint();
+                if let Some(range) = self.search.first_from_cursor(&tab.doc) {
+                    self.reveal_match(range);
+                }
+            }
+            match event {
+                Some(BarEvent::Next) => self.find_step(&ctx, true),
+                Some(BarEvent::Prev) => self.find_step(&ctx, false),
+                Some(BarEvent::Close) => self.close_search(),
+                None => {}
+            }
+        }
+
         // 6. 본문 영역: 활성 탭 에디터
         let font_size = ui.style().text_styles[&egui::TextStyle::Monospace].size * self.zoom;
         let options = EditorOptions {
@@ -1409,6 +1561,7 @@ impl eframe::App for NotepadApp {
             highlight: self.highlight,
             tab_width: usize::from(self.tab_width),
             tab_spaces: self.tab_spaces,
+            search: self.search.marks(),
         };
         let zoom = self.zoom;
         let mut switch_to_edit = false;
@@ -1561,6 +1714,7 @@ impl eframe::App for NotepadApp {
         self.update_window_title(&ctx);
 
         // 10. 설정 자동 저장 (P2-08)
+        self.ensure_window_on_screen(&ctx);
         self.track_window_geometry(&ctx);
         self.autosave_settings(&ctx);
     }
@@ -1571,6 +1725,41 @@ impl eframe::App for NotepadApp {
 }
 
 /// 두 경로가 같은 파일인지 (실제 경로로 비교, 실패하면 그대로 비교).
+/// 창 위쪽 띠(제목 표시줄, 좌우 끝 조금 제외)가 연결된 모니터 중 하나에라도 걸리는지.
+///
+/// `outer`는 egui 논리 좌표, `ppp`는 물리 픽셀 배율 — winit이 물리 좌표를 배율로 나눈 값이므로 곱해 되돌린다.
+#[cfg(windows)]
+fn title_bar_on_screen(outer: egui::Rect, ppp: f32) -> bool {
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MonitorFromRect(rect: *const Rect, flags: u32) -> *mut std::ffi::c_void;
+    }
+    const MONITOR_DEFAULTTONULL: u32 = 0;
+
+    let inset = (outer.width() / 4.0).min(100.0);
+    let rect = Rect {
+        left: ((outer.left() + inset) * ppp) as i32,
+        top: (outer.top() * ppp) as i32,
+        right: ((outer.right() - inset) * ppp) as i32,
+        bottom: ((outer.top() + 30.0) * ppp) as i32,
+    };
+    // SAFETY: 유효한 `RECT`를 가리키는 포인터만 넘기고, 돌려받은 모니터 핸들은 null 여부만 본다.
+    !unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) }.is_null()
+}
+
+/// macOS 등은 OS가 화면 밖 창을 화면 안으로 옮겨 준다.
+#[cfg(not(windows))]
+fn title_bar_on_screen(_outer: egui::Rect, _ppp: f32) -> bool {
+    true
+}
+
 fn same_path(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
