@@ -3,7 +3,7 @@
 Windows 기본 메모장보다 강력하고, Electron 기반 에디터보다 가벼운 **Notepad++ 스타일의 로컬 텍스트 에디터**입니다.
 웹뷰 없이 순수 Rust 네이티브 GUI(`eframe`/`egui`)로 Windows와 macOS에서 동작하는 것을 목표로 합니다.
 
-> **현재 상태**: Phase 0(기술 검증 스파이크, G0 통과) 완료 — Phase 1(MVP 기본 편집기 및 파일 입출력) 진행 중.
+> **현재 상태**: Phase 0~3 완료(G3 통과) — Phase 4(찾기/바꾸기) G4 게이트 검증 중. 자세한 내용은 [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## 주요 목표 기능
 
@@ -18,6 +18,7 @@ Windows 기본 메모장보다 강력하고, Electron 기반 에디터보다 가
 
 | 문서 | 내용 |
 | :--- | :--- |
+| [docs/PROGRESS.md](docs/PROGRESS.md) | 현재 진행 상황·다음 할 일 요약 |
 | [docs/PLAN.md](docs/PLAN.md) | 기획·아키텍처 설계서 (기능 명세, 인코딩 정책, 기술 스택, 로드맵) |
 | [docs/WORKPLAN.md](docs/WORKPLAN.md) | 작업계획서 (작업 단위, 검증 체크리스트, Phase 게이트, 개발 환경 규칙) |
 | [docs/macos-checklist.md](docs/macos-checklist.md) | MacBook Pro 준비·검증 절차 (macOS 🍎 항목 모음) |
