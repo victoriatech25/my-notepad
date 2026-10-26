@@ -8,3 +8,5 @@ publish = false
 [dependencies]
 # 앱 아이콘 SVG 래스터화 — 본 앱과 같은 버전 (P5-01 `cargo xtask icons`)
 resvg = { version = "0.45.1", default-features = false }
+# 포터블 zip 만들기 — 압축은 deflate만 (P5-02 `cargo xtask package`)
+zip = { version = "9.1.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }

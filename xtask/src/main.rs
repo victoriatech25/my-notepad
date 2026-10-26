@@ -8,6 +8,7 @@ use std::process::{Command, ExitCode};
 
 mod icons;
 mod measure;
+mod package;
 mod samples;
 
 /// `cargo xtask try <시나리오>`로 실행할 수 있는 시나리오.
@@ -254,6 +255,7 @@ fn main() -> ExitCode {
         Some("doctor") => doctor(),
         Some("gen-samples") => samples::generate(&workspace_root()),
         Some("icons") => icons::generate(&workspace_root()),
+        Some("package") => package::run(&workspace_root()),
         Some("measure") => {
             let runs = args
                 .iter()
@@ -295,6 +297,9 @@ fn print_help() {
     println!("  gen-samples      성능 측정용 샘플 생성 (spikes/samples, git 제외)");
     println!(
         "  icons            앱 아이콘 SVG → .ico·.icns·창 아이콘 PNG (assets/icons, 커밋 대상)"
+    );
+    println!(
+        "  package          배포 파일 만들기 → target/dist (Windows: 설치 프로그램·포터블 zip, Inno Setup 6 필요)"
     );
     println!("  measure [--runs N]  메모리·기동 시간 측정 (렌더러 × 한글 폰트 × 문서, 기본 10회)");
     println!(

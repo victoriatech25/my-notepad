@@ -19,6 +19,7 @@ Claude Code가 새 대화를 시작할 때마다 자동으로 읽는 파일입�
 | `docs/PROGRESS.md` | 현재 상태·다음 할 일·사용자 대기 항목 요약 | **대화를 마칠 때마다** |
 | `docs/WORKPLAN.md` | WU 정의, 체크리스트, §9 검증 기록·UX 백로그 (기준 문서) | WU 상태·검증 결과가 바뀔 때 |
 | `docs/PLAN.md` | 기획·아키텍처·정책 | 결정이 바뀔 때 (WORKPLAN보다 먼저) |
+| `docs/install.md` | 사용자 설치 안내 (서명 없는 배포 경고 우회 포함) | 패키지·설치 방식이 바뀔 때 |
 | `docs/macos-checklist.md` | 🍎 MacBook에서 할 검증 절차 | macOS 검증 항목이 생길 때 |
 | `docs/ux/ui-spec.md` | 확정된 UX 결정 | 🎨 결정이 확정될 때 |
 | `docs/adr/` | 방식 결정 기록 | 큰 기술 결정 시 |
