@@ -155,6 +155,8 @@ pub enum Command {
     Replace,
     FindNext,
     FindPrev,
+    /// 찾기: 끝에서 처음으로 이어서 찾기(Wrap Around) 토글 (P4-04)
+    ToggleSearchWrapAround,
     /// 선택 단어 강조: 단어 단위 일치 ↔ 부분 일치 (P2-04)
     ToggleHighlightWholeWord,
     /// 선택 단어 강조: 대소문자 구분 토글 (P2-04)
@@ -228,6 +230,7 @@ impl Command {
             Self::Replace => "바꾸기".to_owned(),
             Self::FindNext => "다음 찾기".to_owned(),
             Self::FindPrev => "이전 찾기".to_owned(),
+            Self::ToggleSearchWrapAround => "찾기: 끝에서 처음으로 이어서 찾기 토글".to_owned(),
             Self::ToggleHighlightWholeWord => "선택 단어 강조: 단어 단위 일치 토글".to_owned(),
             Self::ToggleHighlightMatchCase => "선택 단어 강조: 대소문자 구분 토글".to_owned(),
 

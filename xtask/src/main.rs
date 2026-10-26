@@ -115,6 +115,14 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        name: "search",
+        package: "my-notepad",
+        args: &["spikes/samples/text-1mb.txt"],
+        description: "P4-04 찾기 바 UX-6 (찾기 확인 문서 사본 + 1MB 로그 — 샘플: cargo xtask gen-samples)",
+        wait: false,
+        work_files: &["tests/fixtures/editor/search_ko.txt"],
+    },
+    Scenario {
         name: "markdown",
         package: "my-notepad",
         args: &[

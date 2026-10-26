@@ -231,6 +231,12 @@ pub fn prev_match_index(
     }
 }
 
+/// 선택 범위와 똑같은 매치(현재 매치)의 번호. 선택이 매치가 아니면 `None` (카운트는 `? / N`).
+pub fn current_match_index(matches: &[Range<usize>], selection: &Range<usize>) -> Option<usize> {
+    let i = matches.partition_point(|m| m.start < selection.start);
+    (matches.get(i) == Some(selection)).then_some(i)
+}
+
 /// 바이트 범위 목록을 문자 인덱스 범위로 한 번에 변환한다.
 ///
 /// 오름차순 목록이면 텍스트를 한 번만 훑는다 (매치마다 처음부터 세지 않는다). 범위가 텍스트를 넘거나
