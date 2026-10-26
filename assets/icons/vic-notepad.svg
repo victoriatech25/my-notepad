@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Vic Notepad 앱 아이콘 원본 (D1안: 하늘색 메모지 + 파란 연필). 생성: cargo xtask icons -->
+  <g transform="translate(6.4 6.4) scale(0.9)">
+    <rect x="16" y="12" width="80" height="104" rx="9" fill="#E6F1FB" stroke="#185FA5" stroke-width="3.5"/>
+    <g stroke="#378ADD" stroke-width="3.5" stroke-linecap="round">
+      <line x1="28" y1="36" x2="84" y2="36"/>
+      <line x1="28" y1="52" x2="84" y2="52"/>
+      <line x1="28" y1="68" x2="84" y2="68"/>
+      <line x1="28" y1="84" x2="62" y2="84"/>
+    </g>
+    <g transform="rotate(40 92 70)">
+      <rect x="84" y="24" width="16" height="66" rx="3" fill="#185FA5"/>
+      <rect x="84" y="24" width="16" height="11" rx="3" fill="#85B7EB"/>
+      <polygon points="84,90 100,90 92,107" fill="#FAEEDA"/>
+      <polygon points="88.8,100.2 95.2,100.2 92,107" fill="#2C2C2A"/>
+    </g>
+  </g>
+</svg>

@@ -2126,6 +2126,7 @@ dependencies = [
  "tempfile",
  "toml",
  "ttf-parser",
+ "winresource",
 ]
 
 [[package]]
@@ -4656,6 +4657,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "winresource"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2bc6d36480b829272a5bdabf08e6dca8004761c1da7e35efef800540c66221b"
+dependencies = [
+ "toml",
+ "version_check",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4757,6 +4768,9 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 [[package]]
 name = "xtask"
 version = "0.0.0"
+dependencies = [
+ "resvg",
+]
 
 [[package]]
 name = "yeslogic-fontconfig-sys"

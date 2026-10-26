@@ -266,7 +266,7 @@ impl Command {
 
             Self::ShowShortcuts => "단축키 목록".to_owned(),
             Self::ShowRegexHelp => "정규식 문법".to_owned(),
-            Self::ShowAbout => "My-Notepad 정보".to_owned(),
+            Self::ShowAbout => format!("{} 정보", crate::branding::APP_NAME),
         }
     }
 }
