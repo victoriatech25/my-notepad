@@ -122,7 +122,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | **Phase 2** | 에디터 고도화, 스마트 하이라이트, 사이드바 | 9 | 7 | G2: 일상 편집 통합 시나리오 | ✅ **완료 — G2 통과** (2026-10-24). Phase 2 기능 macOS 확인 완료 |
 | **Phase 3** | Markdown 소스 보기 / 미리보기 | 12 | 11 | G3: PLAN.md 분할 보기 시나리오 | ✅ **완료 — G3 통과** (2026-10-25). Phase 3 기능 macOS 확인 완료 · G1-1(메모장 ANSI) Windows 재확인 완료 |
 | **Phase 4** | 찾기/바꾸기 | 7 | 5 | G4: 검색·치환 통합 시나리오 | ✅ **완료 — G4 통과** (2026-10-26). Phase 4 기능 macOS 확인 완료 · G1-1(메모장 ANSI) Windows 확인 완료 |
-| **Phase 5** | 배포 및 OS 통합 | 7 | 6 | G5: 릴리스 후보 전체 회귀 | 대기 |
+| **Phase 5** | 배포 및 OS 통합 | 7 | 6 | G5: 릴리스 후보 전체 회귀 | 진행 중 — P5-01 완료 (2026-10-26), P5-02 사용자 확인 대기 |
 | **Phase 6** | 확장 기능 (2차 목표) | 백로그 | — | 착수 시 상세화 | 대기 |
 
 ### 1.1 UX 검증 일정 (사용자가 직접 써 보는 시점)
@@ -982,6 +982,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [x] Dock·`Cmd+Tab`에 앱 아이콘, 창 제목 "… - Vic Notepad", 도움말 메뉴 "Vic Notepad 정보" — 🍎 2026-10-26 통과
 
 #### P5-02 Windows 설치 프로그램 · M
+- **상태**: 🤖 구현·자동 확인 완료 (2026-10-26) · 👤🎨 Windows 확인 대기 — 확인: `cargo xtask package` → `target/dist/`. **Inno Setup 6** 채택(사용자 결정 2026-10-26 — 관리자 권한 없는 사용자 단위 설치·한국어 마법사·제거 시 질문이 쉬움, MSI/WiX는 .NET SDK 필요). 스크립트 `assets/windows/vic-notepad.iss`(UTF-8 BOM): `PrivilegesRequired=lowest` → `%LOCALAPPDATA%\Programs\Vic Notepad`, 레지스트리는 HKCU만. 추가 작업 3개 — 연결 프로그램(`Applications\my-notepad.exe` + `SupportedTypes`, 확장자별 ProgID `VicNotepad.txt/.md/.log`를 `OpenWithProgids`에만 추가, `RegisteredApplications` 기본 앱 목록 등록 — 기본 앱은 안 바꿈), 우클릭(`*\shell\VicNotepad.Edit`, `MultiSelectModel=Player`), 바탕 화면(기본 꺼짐). 명령은 `"…\my-notepad.exe" -- "%1"`. 제거 시 등록 전부 삭제 + 설정 폴더 `%APPDATA%\My-Notepad` 삭제 질문(기본 [아니요], 조용한 제거는 유지). 포터블 zip은 `Vic Notepad/my-notepad.exe`. 설치 안내 [install.md](install.md). 여러 파일 우클릭은 탐색기가 파일마다 실행하므로 P5-04 전에는 창이 파일 수만큼 뜬다
 - **목표**: 설치 프로그램(MSI 또는 Inno Setup) + 포터블 zip, 시작 메뉴, `.txt`/`.md`/`.log` 연결 프로그램 등록(기본 앱 강제 변경 없음), 탐색기 우클릭 메뉴 "Vic Notepad로 편집"(PLAN.md Phase 5 B안 — 서명 없는 배포라 Windows 11은 "추가 옵션 표시" 메뉴), 제거 프로그램
 - **선행**: P5-01
 - 👤 **사용자 화면 검증** (깨끗한 Windows 환경 권장)
@@ -1195,6 +1196,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-26 | P5-01 | 🤖 | 통과 | `cargo xtask icons`: SVG 원본 2개 → `.ico`(16~256px PNG 9개)·`.icns`(16·32px ARGB + 32~1024px PNG, `iconutil -c iconset`으로 풀어 전 크기 확인 — 처음엔 16·32px를 PNG(`icp4`·`icp5`)로 넣어 깨져 보였음)·창 아이콘 512px. `branding.rs` 창 아이콘 디코딩 테스트 1개. build·clippy·fmt·test(본 앱 220개) 통과 (macOS), CI 브랜치 `fc9fb8e` Windows(`build.rs` `winresource` 리소스 컴파일 포함)·macOS 녹색 | |
 | 2026-10-26 | P5-01 | 🍎 | 통과 | MacBook Pro(M1 Pro), `cargo xtask try basic`: Dock·`Cmd+Tab` 앱 아이콘, 창 제목 "… - Vic Notepad", 도움말 메뉴 "Vic Notepad 정보" 사용자 확인. Windows 👤(작업 표시줄·Alt+Tab 아이콘, 실행 파일 속성 제품명·버전)은 대기 | 2026-10-26 |
 | 2026-10-26 | P5-01 | 👤 | 통과 | Windows, 브랜치 `4440bc7`, `cargo xtask try basic --wait`(release 빌드): 작업 표시줄·창 제목·Alt+Tab 앱 아이콘(D1안) 사용자 확인. `target/release/my-notepad.exe` 버전 정보 — 제품명·파일 설명 "Vic Notepad", 제품·파일 버전 0.1.0 (`VersionInfo`로 확인). **P5-01 완료** | 2026-10-26 |
+| 2026-10-26 | P5-02 | 🤖 | 통과 | Windows, Inno Setup 6.7.3, `cargo xtask package`: `vic-notepad-0.1.0-windows-x64-setup.exe` 5.9MB·`…-portable.zip` 5.7MB(`Vic Notepad/my-notepad.exe` 1개). 조용한 설치(`/VERYSILENT /TASKS="assoc,contextmenu"`) → 설치 폴더·시작 메뉴·제거 항목(Vic Notepad 0.1.0)·우클릭 동사 "Vic Notepad로 편집"(한글 정상)·`Applications`·ProgID 3개·`OpenWithProgids`(기존 `VSCode.md` 유지)·`RegisteredApplications` 확인 → 조용한 제거 → 설치 폴더·시작 메뉴·키 7개·`OpenWithProgids` 값·`RegisteredApplications` 값 모두 사라짐, 다른 앱 값 유지, 설정 폴더 유지. build(경고 0)·clippy·fmt·test 통과 | |
 
 ### 9.3 측정 결과 기록표
 
