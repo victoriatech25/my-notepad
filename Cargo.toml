@@ -45,6 +45,10 @@ tempfile = "3.27.0"
 toml = "1.1.8"
 ttf-parser = "0.25.1"
 
+# 단일 인스턴스: 기존 창을 앞으로 가져올 Win32 창 핸들 (eframe이 이미 쓰는 버전, P5-04)
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6.2"
+
 # Windows 실행 파일 아이콘·버전 정보 리소스 (build.rs, P5-01)
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.34"

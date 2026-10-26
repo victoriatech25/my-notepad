@@ -5,12 +5,14 @@
 //! - `--font-report`: 창을 띄우지 않고 OS 폰트 Fallback 체인 로드 보고서를 출력 (자동 검증용)
 //! - `--log-file <경로>`: 로그 파일 경로 수동 지정 (자동 테스트용)
 //! - 그 밖의 인자는 열 파일 경로 — 탭으로 연다 (`cli.rs`, P1-13: 상대 경로·`--`·탐색기 연결 프로그램)
+//! - 이미 실행 중인 창이 있으면 파일을 넘기고 끝낸다 (`single_instance.rs`, P5-04). `--new-window`·측정 실행은 건너뛴다
 //! - 저장된 설정(`config.rs`, P2-08)을 읽어 창 위치·크기를 되살린다. 성능 측정(`--measure-out`) 실행은 설정을 쓰지 않는다
 //! - `eframe` `glow` 렌더러로 네이티브 창 기동
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
+use my_notepad::single_instance::{self, Listener, Startup};
 use my_notepad::{app, branding, cli::CliArgs, config::Settings, fonts, logging};
 
 fn main() -> eframe::Result {
@@ -40,6 +42,16 @@ fn main() -> eframe::Result {
         print!("{}", report.to_text());
         std::process::exit(if report.has_failures() { 1 } else { 0 });
     }
+
+    // 측정 실행은 다른 창과 섞이면 안 되므로 늘 새 창으로 뜬다.
+    let instance = if cli.new_window || cli.measure_out.is_some() {
+        Listener::none()
+    } else {
+        match single_instance::acquire(&cli.files) {
+            Startup::Primary(listener) => listener,
+            Startup::Forwarded => return Ok(()),
+        }
+    };
 
     // 성능 측정은 저장된 창 크기·사이드바 폴더 등에 영향을 받지 않게 설정 없이 실행한다.
     let settings_path = if cli.measure_out.is_some() {
@@ -82,6 +94,8 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let mut app =
                 app::NotepadApp::new(cc, &cli.files, settings, settings_path, settings_problem);
+            instance.attach(cc);
+            app.set_instance_listener(instance);
             if let Some(out) = cli.measure_out.clone() {
                 app.enable_measure(out, started);
             }

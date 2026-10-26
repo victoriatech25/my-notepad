@@ -36,6 +36,7 @@ use crate::core::highlight::HighlightOptions;
 use crate::core::line_ending::LineEnding;
 use crate::core::search::{SearchOptions, char_range_to_byte_range};
 use crate::fonts;
+use crate::single_instance::Listener;
 use crate::tabs::{ExternalChange, Tabs};
 use crate::ui::{
     dialogs::{self, Dialog, DialogOutcome},
@@ -143,6 +144,9 @@ pub struct NotepadApp {
     settings_dirty_since: Option<f64>,
 
     measure: Option<MeasureRun>,
+
+    /// 다른 실행이 넘긴 파일 (단일 인스턴스, P5-04)
+    instance: Listener,
 }
 
 impl NotepadApp {
@@ -215,6 +219,7 @@ impl NotepadApp {
             theme: settings.theme,
             last_command: None,
             measure: None,
+            instance: Listener::none(),
             settings_path,
             saved_settings: settings.clone(),
             settings: settings.clone(),
@@ -1301,6 +1306,11 @@ impl NotepadApp {
 
     /// 측정 모드를 켠다: 첫 화면 시간을 기록하고, 활성 탭을 처음부터 끝까지 훑으며 프레임 시간을 잰 뒤
     /// `out` 파일에 `key=value` 줄로 쓴다 (마지막 줄 `done=1`).
+    /// 다른 실행이 넘긴 파일을 받을 리스너를 붙인다 (`main.rs`, P5-04).
+    pub fn set_instance_listener(&mut self, listener: Listener) {
+        self.instance = listener;
+    }
+
     pub fn enable_measure(&mut self, out: PathBuf, started: Instant) {
         self.measure = Some(MeasureRun {
             out,
@@ -1350,6 +1360,14 @@ done=1
                 log::warn!("측정 결과 쓰기 실패: {err}");
             }
             self.measure = None;
+        }
+    }
+
+    /// 다른 실행(탐색기 우클릭·연결 프로그램)이 넘긴 파일을 명령줄 인자처럼 연다 (P5-04).
+    /// 창을 앞으로 가져오는 일은 받는 스레드가 이미 했다.
+    fn open_forwarded_files(&mut self, ctx: &egui::Context) {
+        for path in self.instance.drain() {
+            self.open_any(ctx, &path);
         }
     }
 
@@ -1449,6 +1467,7 @@ impl eframe::App for NotepadApp {
         // 0. 창 닫기 요청 가로채기 (수정된 탭이 있으면 저장 확인), 끌어다 놓은 파일 열기
         self.intercept_close_request(&ctx);
         self.open_dropped_files(&ctx);
+        self.open_forwarded_files(&ctx);
         self.check_external_changes(&ctx);
 
         // 찾기 바가 열려 있으면 에디터에서 누른 `Esc`도 찾기 바를 닫는다 (입력란의 `Esc`는 찾기 바가 처리).
