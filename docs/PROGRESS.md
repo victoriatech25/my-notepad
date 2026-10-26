@@ -21,7 +21,7 @@
 
 - **결정 (2026-10-26)**: 서명 없는 배포 · 제품명 **Vic Notepad**(저장소·크레이트·실행 파일·설정 폴더 이름은 유지) · 앱 아이콘 D1안(하늘색 메모지 + 파란 연필) — PLAN.md v0.5
 
-1. **P5-01 Windows 확인** (브랜치 `wu/P5-01-icon-version`, macOS ✅·CI 녹색): Windows PC에서 `git pull` → `cargo xtask try basic --wait` → 작업 표시줄·Alt+Tab 아이콘, `my-notepad.exe` 속성 → 자세히(제품명·버전) (`target/release/my-notepad.exe`)
+1. **P5-01 Windows 확인** (브랜치 `wu/P5-01-icon-version`, macOS ✅·CI 녹색): Windows PC에서 `git fetch` → `git switch wu/P5-01-icon-version` → `cargo xtask try basic --wait` → 작업 표시줄·Alt+Tab 아이콘, `my-notepad.exe` 속성 → 자세히(제품명·버전) (`target/release/my-notepad.exe`)
 2. 통과하면 `main`에 병합 → P5-02 Windows 설치 프로그램
 
 ## 사용자 대기 항목
