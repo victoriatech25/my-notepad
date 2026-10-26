@@ -126,6 +126,18 @@ const SCENARIOS: &[Scenario] = &[
         work_files: &["tests/fixtures/editor/search_ko.txt"],
     },
     Scenario {
+        name: "g4",
+        package: "my-notepad",
+        args: &[],
+        description: "G4 검색·치환 통합 시나리오 (target/try-g4/의 1MB 로그·코드(search.rs)·한글 확인 문서 사본 — 저장해도 원본은 그대로, 샘플: cargo xtask gen-samples)",
+        wait: false,
+        work_files: &[
+            "spikes/samples/text-1mb.txt",
+            "src/core/search.rs",
+            "tests/fixtures/editor/search_ko.txt",
+        ],
+    },
+    Scenario {
         name: "markdown",
         package: "my-notepad",
         args: &[
