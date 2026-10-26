@@ -182,6 +182,22 @@ impl SearchQuery {
         ReplaceAll { text: out, count }
     }
 
+    /// 모든 매치와 각각을 바꿀 문자열 — [`crate::core::document::Document::apply_batch_replacements`]에 넘겨
+    /// 모두 바꾸기를 Undo 한 단계로 적용한다. 매치는 [`Self::replace_all`]과 같다.
+    pub fn replacements(&self, text: &str, replacement: &str) -> Vec<(Range<usize>, String)> {
+        let Some(regex) = &self.regex else {
+            return Vec::new();
+        };
+        let template = self.template(replacement);
+        self.matches(text)
+            .map(|range| {
+                let mut out = String::new();
+                expand_into(regex, text, &range, &template, &mut out);
+                (range, out)
+            })
+            .collect()
+    }
+
     /// 바이트 범위 `range`의 매치를 바꿀 문자열 (`바꾸기` 한 번).
     ///
     /// 지금 텍스트에서 그 범위가 이 조건의 매치가 아니면 `None` — 편집 뒤 오래된 매치를 바꾸지 않게 한다.

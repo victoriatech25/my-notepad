@@ -1,7 +1,10 @@
-//! 찾기 바 UI (PLAN.md §3.2-2, ui-spec §1 — P4-04, P4-03). 바꾸기 줄은 P4-05에서 붙인다.
+//! 찾기/바꾸기 바 UI (PLAN.md §3.2-2, ui-spec §1 — P4-04, P4-03, P4-05).
 //!
-//! - 탭 바 아래·사이드바 오른쪽, 에디터 바로 위에 한 줄로 펼쳐진다:
-//!   `[검색어 입력란] [.*] [Aa] [\b]  3 / 28  [↑] [↓] … [×]`
+//! - 탭 바 아래·사이드바 오른쪽, 에디터 바로 위에 펼쳐진다 (VS Code 찾기 위젯 배치):
+//!   `[▸] [검색어 입력란] [.*] [Aa] [\b]  3 / 28  [↑] [↓] … [×]`
+//!   바꾸기 줄(`Ctrl+H` 또는 `▸`): `    [바꿀 내용 입력란] [바꾸기] [모두 바꾸기]  N개 바꿈`
+//! - 바꾸기 입력란 키: `Enter` 바꾸기 · `Ctrl+Alt+Enter`(macOS `Cmd+Option+Enter`) 모두 바꾸기 · `Esc` 닫기.
+//!   바꾸기는 편집할 수 있는 탭에서만 (읽기 전용 문서·뷰어 탭은 버튼이 꺼진다).
 //! - 탭·문서 `revision`·탭 종류(편집/뷰어)·검색어·옵션이 바뀔 때만 다시 찾고, 매치는 캐시해 강조([`SearchMarks`])와
 //!   이동에 같이 쓴다. 단위는 편집 탭이면 문자 인덱스, 읽기 전용 뷰어 탭이면 바이트다.
 //! - [`SYNC_MAX_BYTES`] 이하 문서는 UI 스레드에서 바로 찾는다 (입력하는 즉시 강조 — UX-6 확인).
@@ -44,6 +47,8 @@ mod glyph {
     pub const ARROW_UP: &str = "\u{E08E}";
     pub const ARROW_DOWN: &str = "\u{E03E}";
     pub const X: &str = "\u{E4F6}";
+    pub const CARET_RIGHT: &str = "\u{E13A}";
+    pub const CARET_DOWN: &str = "\u{E136}";
 }
 
 /// 찾기 바에서 사용자가 고른 동작.
@@ -52,6 +57,10 @@ pub enum BarEvent {
     Next,
     Prev,
     Close,
+    /// 현재 매치를 바꾸고 다음 매치로 (선택이 매치가 아니면 다음 매치로만)
+    Replace,
+    /// 모든 매치를 바꾼다 (Undo 한 단계)
+    ReplaceAll,
 }
 
 /// 다음/이전 찾기 결과.
@@ -110,6 +119,14 @@ pub struct SearchBar {
     options: SearchOptions,
     /// 다음 프레임에 입력란으로 포커스를 옮기고 내용을 모두 선택한다.
     focus_input: bool,
+    /// 바꾸기 줄이 열려 있는지
+    replace_open: bool,
+    /// 바꿀 내용
+    replacement: String,
+    /// 다음 프레임에 바꾸기 입력란으로 포커스를 옮기고 내용을 모두 선택한다.
+    focus_replace: bool,
+    /// 마지막 모두 바꾸기 결과 문구 (`N개 바꿈`) — 검색어·바꿀 내용이 바뀌면 지운다
+    replace_note: Option<String>,
     /// 지난 [`Self::refresh`]에서 원한 조건
     wanted: Option<QueryKey>,
     cache: Option<MatchCache>,
@@ -128,6 +145,10 @@ impl SearchBar {
             pattern: String::new(),
             options,
             focus_input: false,
+            replace_open: false,
+            replacement: String::new(),
+            focus_replace: false,
+            replace_note: None,
             wanted: None,
             cache: None,
             job: None,
@@ -154,16 +175,22 @@ impl SearchBar {
         Id::unique("search_bar_input")
     }
 
-    /// 입력란이 키보드 포커스를 가졌는지.
-    pub fn input_has_focus(&self, ctx: &egui::Context) -> bool {
-        self.open && ctx.memory(|m| m.has_focus(Self::input_id()))
+    /// 바꾸기 입력란 위젯 ID.
+    fn replace_id() -> Id {
+        Id::unique("search_bar_replace")
     }
 
-    /// 찾기 바를 열고 입력란에 포커스를 준다 (`Ctrl+F`).
+    /// 찾기·바꾸기 입력란 중 하나가 키보드 포커스를 가졌는지.
+    pub fn input_has_focus(&self, ctx: &egui::Context) -> bool {
+        self.open
+            && ctx.memory(|m| m.has_focus(Self::input_id()) || m.has_focus(Self::replace_id()))
+    }
+
+    /// 찾기 바를 열고 입력란에 포커스를 준다 (`Ctrl+F` — 바꾸기 줄은 접는다, `Ctrl+H` — 바꾸기 줄도 연다).
     ///
     /// `selected`(활성 탭의 선택 텍스트)가 한 줄 안이고 비어 있지 않으면 검색어로 채운다. 입력란 내용은 모두
-    /// 선택해 바로 새 검색어를 칠 수 있게 한다.
-    pub fn open(&mut self, selected: Option<&str>) {
+    /// 선택해 바로 새로 칠 수 있게 한다. 바꾸기로 열 때 검색어가 있으면 바꾸기 입력란에 포커스를 준다.
+    pub fn open(&mut self, selected: Option<&str>, replace: bool) {
         if let Some(selected) = selected
             && !selected.is_empty()
             && !selected.contains('\n')
@@ -171,7 +198,33 @@ impl SearchBar {
             self.pattern = selected.to_owned();
         }
         self.open = true;
-        self.focus_input = true;
+        self.replace_open = replace;
+        if replace && self.has_pattern() {
+            self.focus_replace = true;
+        } else {
+            self.focus_input = true;
+        }
+    }
+
+    pub fn is_replace_open(&self) -> bool {
+        self.open && self.replace_open
+    }
+
+    /// 바꿀 내용 (입력한 그대로 — 해석은 [`SearchQuery`]가 한다).
+    pub fn replacement(&self) -> &str {
+        &self.replacement
+    }
+
+    /// 지금 검색어·옵션의 검색 조건 (빈 검색어·오류면 `None`).
+    pub fn query(&self) -> Option<SearchQuery> {
+        SearchQuery::new(&self.pattern, &self.options)
+            .ok()
+            .filter(|q| !q.is_empty())
+    }
+
+    /// 모두 바꾸기 결과를 바꾸기 줄에 보여 준다.
+    pub fn set_replace_note(&mut self, note: impl Into<String>) {
+        self.replace_note = Some(note.into());
     }
 
     /// 찾기 바를 닫는다 (강조도 사라진다).
@@ -204,6 +257,7 @@ impl SearchBar {
         };
         if self.wanted.as_ref().is_none_or(|w| !w.same_query(&key)) {
             self.reveal_pending = !key.pattern.is_empty();
+            self.replace_note = None;
         }
         self.wanted = Some(key.clone());
         if self.cache.as_ref().is_some_and(|c| c.key == key) {
@@ -356,19 +410,20 @@ impl SearchBar {
         }
     }
 
-    /// 찾기 바를 그린다. `selection`은 활성 탭의 선택 범위(탭 단위).
+    /// 찾기 바를 그린다. `selection`은 활성 탭의 선택 범위(탭 단위), `can_replace`는 활성 탭을 편집할 수 있는지.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         palette: &Palette,
         selection: &Range<usize>,
+        can_replace: bool,
     ) -> Option<BarEvent> {
         let ctx = ui.ctx().clone();
-        let id = Self::input_id();
+        let (id, replace_id) = (Self::input_id(), Self::replace_id());
         let mut event = None;
 
         // 입력란의 `Enter`·`Esc`는 위젯보다 먼저 소비한다 (한 줄 입력란은 `Enter`에 포커스를 놓는다).
-        // `consume_key`는 `Shift`를 따로 보지 않으므로 `Shift+Enter`를 먼저 확인한다.
+        // `consume_key`는 `Shift`·`Alt`를 따로 보지 않으므로 수식키가 붙은 조합을 먼저 확인한다.
         if ctx.memory(|m| m.has_focus(id)) {
             ctx.input_mut(|i| {
                 if i.consume_key(Modifiers::SHIFT, Key::Enter) {
@@ -379,15 +434,22 @@ impl SearchBar {
                     event = Some(BarEvent::Close);
                 }
             });
+        } else if self.replace_open && ctx.memory(|m| m.has_focus(replace_id)) {
+            ctx.input_mut(|i| {
+                if i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Enter) {
+                    event = can_replace.then_some(BarEvent::ReplaceAll);
+                } else if i.consume_key(Modifiers::NONE, Key::Enter) {
+                    event = can_replace.then_some(BarEvent::Replace);
+                } else if i.consume_key(Modifiers::NONE, Key::Escape) {
+                    event = Some(BarEvent::Close);
+                }
+            });
         }
         if std::mem::take(&mut self.focus_input) {
-            let mut state = TextEditState::load(&ctx, id).unwrap_or_default();
-            let len = self.pattern.chars().count();
-            state
-                .cursor
-                .set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(len))));
-            state.store(&ctx, id);
-            ctx.memory_mut(|m| m.request_focus(id));
+            focus_select_all(&ctx, id, &self.pattern);
+        }
+        if std::mem::take(&mut self.focus_replace) {
+            focus_select_all(&ctx, replace_id, &self.replacement);
         }
 
         let error = self
@@ -401,7 +463,32 @@ impl SearchBar {
         let count = self.count_label(selection);
         let no_result = self.has_pattern() && self.matches().is_some_and(|m| m.is_empty());
         let can_move = self.has_pattern() && self.error().is_none();
+        let icon = |g: &str| RichText::new(g).family(FontFamily::Name(ICON_FAMILY.into()));
+        let mut toggle_width = 0.0;
         ui.horizontal(|ui| {
+            // 바꾸기 줄 펼치기/접기 (VS Code 찾기 위젯의 `▸`)
+            let toggle = ui
+                .add(
+                    egui::Button::new(icon(if self.replace_open {
+                        glyph::CARET_DOWN
+                    } else {
+                        glyph::CARET_RIGHT
+                    }))
+                    .frame(false),
+                )
+                .on_hover_text(if self.replace_open {
+                    "바꾸기 닫기"
+                } else {
+                    "바꾸기 열기 (Ctrl+H)"
+                });
+            toggle_width = toggle.rect.width() + ui.spacing().item_spacing.x;
+            if toggle.clicked() {
+                self.replace_open = !self.replace_open;
+                if self.replace_open {
+                    self.focus_replace = true;
+                }
+            }
+
             let mut edit = egui::TextEdit::singleline(&mut self.pattern)
                 .id(id)
                 .hint_text("찾기")
@@ -450,7 +537,6 @@ impl SearchBar {
                 RichText::new(count)
             });
 
-            let icon = |g: &str| RichText::new(g).family(FontFamily::Name(ICON_FAMILY.into()));
             if ui
                 .add_enabled(
                     can_move,
@@ -482,6 +568,59 @@ impl SearchBar {
                 }
             });
         });
+
+        if self.replace_open {
+            ui.horizontal(|ui| {
+                ui.add_space(toggle_width);
+                let tip = if self.options.regex {
+                    "정규식: $1·${name} 캡처 그룹, $$는 $ 글자, \\n 줄바꿈, \\t 탭\n\
+                     그룹 뒤에 글자를 붙일 때는 ${1}a처럼 씁니다\n\
+                     Enter 바꾸기 · Ctrl+Alt+Enter 모두 바꾸기 · Esc 닫기"
+                } else {
+                    "글자 그대로 바꿉니다 ($1·\\n은 정규식 모드에서만 해석)\n\
+                     Enter 바꾸기 · Ctrl+Alt+Enter 모두 바꾸기 · Esc 닫기"
+                };
+                let response = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.replacement)
+                            .id(replace_id)
+                            .hint_text("바꿀 내용")
+                            .desired_width(INPUT_WIDTH),
+                    )
+                    .on_hover_text(tip);
+                if response.changed() {
+                    self.replace_note = None;
+                }
+                let enabled = can_replace && can_move;
+                let disabled_tip = if can_replace {
+                    "찾을 내용을 입력하세요"
+                } else {
+                    "읽기 전용 문서는 바꿀 수 없습니다"
+                };
+                if ui
+                    .add_enabled(enabled, egui::Button::new("바꾸기"))
+                    .on_hover_text("현재 매치를 바꾸고 다음 매치로 (Enter)")
+                    .on_disabled_hover_text(disabled_tip)
+                    .clicked()
+                {
+                    event = Some(BarEvent::Replace);
+                }
+                if ui
+                    .add_enabled(enabled, egui::Button::new("모두 바꾸기"))
+                    .on_hover_text(
+                        "모든 매치를 바꿉니다 — Ctrl+Z 한 번으로 되돌림 (Ctrl+Alt+Enter)",
+                    )
+                    .on_disabled_hover_text(disabled_tip)
+                    .clicked()
+                {
+                    event = Some(BarEvent::ReplaceAll);
+                }
+                if let Some(note) = &self.replace_note {
+                    ui.add_space(8.0);
+                    ui.label(note);
+                }
+            });
+        }
         event
     }
 
@@ -502,6 +641,17 @@ impl SearchBar {
             },
         }
     }
+}
+
+/// 입력란에 포커스를 주고 내용을 모두 선택한다 (바로 새로 칠 수 있게).
+fn focus_select_all(ctx: &egui::Context, id: Id, text: &str) {
+    let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+    let len = text.chars().count();
+    state
+        .cursor
+        .set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(len))));
+    state.store(ctx, id);
+    ctx.memory_mut(|m| m.request_focus(id));
 }
 
 #[cfg(test)]
@@ -546,18 +696,59 @@ mod tests {
     #[test]
     fn open_prefills_single_line_selection() {
         let mut b = SearchBar::new(SearchOptions::default());
-        b.open(Some("검색"));
+        b.open(Some("검색"), false);
         assert!(b.is_open());
         assert_eq!(b.pattern, "검색");
 
         // 여러 줄 선택·빈 선택·선택 없음은 이전 검색어를 그대로 둔다
-        b.open(Some("검색\n둘째"));
-        b.open(Some(""));
-        b.open(None);
+        b.open(Some("검색\n둘째"), false);
+        b.open(Some(""), false);
+        b.open(None, false);
         assert_eq!(b.pattern, "검색");
         b.close();
         assert!(!b.is_open());
         assert!(b.marks().is_none());
+    }
+
+    #[test]
+    fn replace_opens_row_and_focuses_replace_input_when_pattern_exists() {
+        let mut b = SearchBar::new(SearchOptions::default());
+        // 검색어가 없으면 찾기 입력란부터
+        b.open(None, true);
+        assert!(b.is_replace_open());
+        assert!(b.focus_input && !b.focus_replace);
+
+        b.focus_input = false;
+        b.open(Some("검색"), true);
+        assert!(b.is_replace_open());
+        assert!(
+            b.focus_replace && !b.focus_input,
+            "검색어가 있으면 바꾸기 입력란"
+        );
+
+        // `Ctrl+F`는 바꾸기 줄을 접는다
+        b.open(None, false);
+        assert!(!b.is_replace_open());
+        assert!(b.focus_input);
+        assert_eq!(b.query().map(|q| q.count("검색 검색")), Some(2));
+        b.pattern.clear();
+        assert!(b.query().is_none(), "빈 검색어는 바꿀 조건이 없다");
+    }
+
+    #[test]
+    fn replace_note_clears_when_query_changes() {
+        let ctx = egui::Context::default();
+        let mut d = doc("ab ab");
+        let mut b = bar("ab");
+        b.refresh(&ctx, 1, &d, false);
+        b.set_replace_note("2개 바꿈");
+        // 바꾼 뒤 문서가 바뀌어 다시 찾아도 문구는 남는다
+        d.set_text("x x");
+        b.refresh(&ctx, 1, &d, false);
+        assert_eq!(b.replace_note.as_deref(), Some("2개 바꿈"));
+        b.pattern = "x".to_owned();
+        b.refresh(&ctx, 1, &d, false);
+        assert_eq!(b.replace_note, None);
     }
 
     #[test]
