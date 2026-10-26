@@ -948,7 +948,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [x] 반영된 항목을 사용자가 재확인하고 백로그에서 닫는다 — 해당 없음 (반영 항목 0건)
 
 ### 🚦 게이트 G4 — 검색·치환 통합 시나리오
-- **현황 (2026-10-26)**: 🤖 통과(아래) · 🎨 `필수` 0건 · 👤 대기 — **공통 항목은 macOS에서** [macos-checklist.md §5](macos-checklist.md) (Phase 4 기능 macOS 확인 겸함), **Windows 전용 G1-1(메모장 ANSI 한글 라운드트립)만 Windows에서**. 준비: `cargo xtask try g4` (작업 사본 `target/try-g4/`: `text-1mb.txt` 1,048,577 B 로그 · `search.rs` 코드 · `search_ko.txt` 한글 확인 문서. 저장해도 원본은 그대로)
+- **현황 (2026-10-26)**: 🤖 통과(아래) · 🎨 `필수` 0건 · 👤 대기 — **공통 항목은 macOS에서** [macos-checklist.md §5](macos-checklist.md) (Phase 4 기능 macOS 확인 겸함), **Windows 전용 G1-1(메모장 ANSI 한글 라운드트립)만 Windows에서** — ✅ G1-1 Windows 통과 (2026-10-26). 준비: `cargo xtask try g4` (작업 사본 `target/try-g4/`: `text-1mb.txt` 1,048,577 B 로그 · `search.rs` 코드 · `search_ko.txt` 한글 확인 문서. 저장해도 원본은 그대로)
 - 🤖 전체 테스트·CI 녹색, 검색 성능 기준 충족 — ✅ 2026-10-26 (CI `main` P4-05 병합부터 Windows·macOS 녹색 — P4-03 병합 실행은 xtask fmt 차이로 실패, P4-05에서 수정 · 10MB 매치 카운트 최대 41.5ms ≤ 200ms · 10MB 검색 중 프레임 최대 8.82ms ≤ 16ms, §9.3)
 - 🎨 UX 백로그 `필수` 0건 — ✅ 2026-10-26 (P4-UX)
 - 👤 **통합 시나리오**
@@ -958,6 +958,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [ ] 한글 문서에서 단어 단위 검색과 부분 검색 결과가 예상과 일치
     - 절차: `search_ko.txt`에서 `검색` — `\b` 끄면 **15개**(검색어·검색창·재검색 포함), 켜면 **7개**(조사가 붙은 `검색어`·`검색을` 등 제외). 자동 테스트 `korean_fixture_whole_word_vs_partial_counts`와 같은 기대값
   - [ ] G1~G3 통합 시나리오 재수행 → 회귀 없음
+    - 진행: G1-1 ✅ Windows 통과 (2026-10-26) · 나머지 공통 항목은 macOS [macos-checklist.md 5-6c](macos-checklist.md)
     - 절차: G1-1 메모장 ANSI 한글 라운드트립 · G1-2 UTF-8 편집 후 다른 편집기에서 인코딩·줄바꿈 동일 · G1-3 탭 5개 편집 후 종료 시 저장 확인 · G1-4 자유 사용(찾기·바꾸기 포함) 중 크래시·한글 입력 오류 없음 · G2-1 사이드바로 이 저장소를 열어 여러 파일 편집 · G2-2 재실행 시 설정·최근 파일 유지(**찾기 옵션 `.*`·`Aa`·`\b`·Wrap Around 포함**) · G3-1 `docs/PLAN.md` 분할 모드 편집·동기화·모드 전환 · G3-2 새 `.md` 작성 중 미리보기 깨짐 없음
 
 ---
