@@ -10,5 +10,6 @@ pub mod config;
 pub mod core;
 pub mod fonts;
 pub mod logging;
+pub mod single_instance;
 pub mod tabs;
 pub mod ui;

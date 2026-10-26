@@ -5,6 +5,7 @@
 //! - `--` 뒤의 인자는 모두 파일 경로로 본다 (`--`로 시작하는 파일 이름도 열 수 있게).
 //! - 개발·검증용 플래그: `--test-panic`, `--font-report`, `--log-file <경로>` / `--log-file=<경로>`,
 //!   `--measure-out <경로>` (첫 화면·스크롤 프레임 시간을 파일로 남김 — `cargo xtask measure --viewer`, P1-14).
+//! - `--new-window`: 이미 실행 중인 창에 넘기지 않고 새 창으로 연다 (`single_instance.rs`, P5-04).
 //!   알 수 없는 `--` 플래그는 무시하고 [`CliArgs::unknown`]에 남긴다.
 
 use std::ffi::OsString;
@@ -18,6 +19,8 @@ pub struct CliArgs {
     pub font_report: bool,
     /// 측정 결과를 쓸 파일
     pub measure_out: Option<PathBuf>,
+    /// 단일 인스턴스를 건너뛰고 새 창으로 연다
+    pub new_window: bool,
     /// 열 파일 (절대 경로, 받은 순서)
     pub files: Vec<PathBuf>,
     /// 알 수 없는 플래그 (로그에 경고만 남긴다)
@@ -51,6 +54,7 @@ impl CliArgs {
                 "--" => only_files = true,
                 "--test-panic" => cli.test_panic = true,
                 "--font-report" => cli.font_report = true,
+                "--new-window" => cli.new_window = true,
                 "--log-file" => cli.log_file = args.next().map(PathBuf::from),
                 "--measure-out" => cli.measure_out = args.next().map(PathBuf::from),
                 _ if text.starts_with("--log-file=") => {
@@ -115,5 +119,13 @@ mod tests {
         assert!(!cli.test_panic);
         assert_eq!(cli.files.len(), 2);
         assert!(cli.files[0].ends_with("--weird.txt"));
+    }
+
+    #[test]
+    fn new_window_flag() {
+        assert!(!parse(&["a.txt"]).new_window);
+        let cli = parse(&["--new-window", "a.txt"]);
+        assert!(cli.new_window);
+        assert_eq!(cli.files.len(), 1);
     }
 }
