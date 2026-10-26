@@ -1005,7 +1005,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [ ] Finder에서 `.md` → 다음으로 열기 → Vic Notepad
 
 #### P5-04 단일 인스턴스 (PLAN.md §7 결정에 따름) · M
-- **상태**: 🤖 구현·자동 확인 완료 (2026-10-26) · 👤 Windows 확인 대기 — 확인: `cargo xtask package` 후 설치본으로. 결정(PLAN.md Phase 5·§7): 기존 창의 새 탭, 인자 없는 실행도 기존 창을 앞으로, 같은 사용자·세션·실행 파일 경로 기준, `--new-window` 예외, 측정 실행(`--measure-out`)은 늘 새 창. `src/single_instance.rs`: 이름 있는 뮤텍스 `Local\VicNotepad-<세션>-<해시>`로 첫 인스턴스 판정 → 파이프 `\.\pipe\…`로 경로(UTF-16) 전달, 받으면 1바이트 응답. 보내는 쪽이 `AllowSetForegroundWindow(서버 PID)` → 받는 스레드가 `ShowWindow(SW_RESTORE)`·`SetForegroundWindow` 후 `request_repaint`, 앱은 매 프레임 `open_any`로 연다. 파이프가 없거나 바쁘면 20ms 간격으로 최대 5초 다시 붙고, 실패하면 새 창으로 뜬다. macOS 등은 동작 없음(`.app` 파일 열기 이벤트는 P5-03). **수정**: 응답 직후 `DisconnectNamedPipe`하면 부하가 클 때 보낸 쪽이 응답을 읽기 전에 버려져 15개 동시 전송 테스트가 가끔 실패 → 보낸 쪽이 닫을 때까지 기다린 뒤 끊음
+- **상태**: 🤖 구현·자동 확인 완료 (2026-10-26) · 👤 Windows 확인 대기 — 확인: `cargo xtask package` 후 설치본으로. 결정(PLAN.md Phase 5·§7): 기존 창의 새 탭, 인자 없는 실행도 기존 창을 앞으로, 같은 사용자·세션·실행 파일 경로 기준, `--new-window` 예외, 측정 실행(`--measure-out`)은 늘 새 창. `src/single_instance.rs`: 이름 있는 뮤텍스 `Local\VicNotepad-<세션>-<해시>`로 첫 인스턴스 판정 → 파이프 `\\.\pipe\…`로 경로(UTF-16) 전달, 받으면 1바이트 응답. 보내는 쪽이 `AllowSetForegroundWindow(서버 PID)` → 받는 스레드가 `ShowWindow(SW_RESTORE)`·`SetForegroundWindow` 후 `request_repaint`, 앱은 매 프레임 `open_any`로 연다. 파이프가 없거나 바쁘면 20ms 간격으로 최대 5초 다시 붙고, 실패하면 새 창으로 뜬다. macOS 등은 동작 없음(`.app` 파일 열기 이벤트는 P5-03). **수정**: 응답 직후 `DisconnectNamedPipe`하면 부하가 클 때 보낸 쪽이 응답을 읽기 전에 버려져 15개 동시 전송 테스트가 가끔 실패 → 보낸 쪽이 닫을 때까지 기다린 뒤 끊음
 - **선행**: P5-02
 - 👤 **사용자 화면 검증**
   - [ ] 앱 실행 중 탐색기에서 다른 파일을 열면 새 창이 아니라 기존 창의 새 탭으로 열린다
