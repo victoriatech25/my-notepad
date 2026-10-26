@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Vic Notepad.app 번들 정보 (P5-01). @VERSION@은 번들을 만들 때 Cargo.toml 버전으로 바꾼다 (P5-03). -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Vic Notepad</string>
+	<key>CFBundleDisplayName</key>
+	<string>Vic Notepad</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.victoriatech25.my-notepad</string>
+	<key>CFBundleExecutable</key>
+	<string>my-notepad</string>
+	<key>CFBundleIconFile</key>
+	<string>vic-notepad</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>ko</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

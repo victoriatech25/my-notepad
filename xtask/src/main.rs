@@ -6,6 +6,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+mod icons;
 mod measure;
 mod samples;
 
@@ -252,6 +253,7 @@ fn main() -> ExitCode {
         }
         Some("doctor") => doctor(),
         Some("gen-samples") => samples::generate(&workspace_root()),
+        Some("icons") => icons::generate(&workspace_root()),
         Some("measure") => {
             let runs = args
                 .iter()
@@ -291,6 +293,9 @@ fn print_help() {
     );
     println!("  doctor           개발 환경 점검 (두 장비 준비 상태 확인)");
     println!("  gen-samples      성능 측정용 샘플 생성 (spikes/samples, git 제외)");
+    println!(
+        "  icons            앱 아이콘 SVG → .ico·.icns·창 아이콘 PNG (assets/icons, 커밋 대상)"
+    );
     println!("  measure [--runs N]  메모리·기동 시간 측정 (렌더러 × 한글 폰트 × 문서, 기본 10회)");
     println!(
         "  measure --viewer [--runs N]  본 앱 대용량 뷰어 10MB·50MB: 첫 화면·스크롤 프레임·메모리 (P1-14, 기본 3회)"

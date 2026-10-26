@@ -11,14 +11,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
-use my_notepad::{app, cli::CliArgs, config::Settings, fonts, logging};
+use my_notepad::{app, branding, cli::CliArgs, config::Settings, fonts, logging};
 
 fn main() -> eframe::Result {
     let started = std::time::Instant::now();
     let cli = CliArgs::from_env();
     let log_path = logging::init(cli.log_file.clone());
     log::info!(
-        "My-Notepad v{} 기동 ({}/{})",
+        "{} v{} 기동 ({}/{})",
+        branding::APP_NAME,
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH
@@ -55,11 +56,14 @@ fn main() -> eframe::Result {
     };
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("My-Notepad")
+        .with_title(branding::APP_NAME)
         .with_inner_size([1200.0, 780.0])
         .with_min_inner_size([480.0, 320.0])
         // 탐색기에서 파일을 끌어다 놓아 열기 (P1-13)
         .with_drag_and_drop(true);
+    if let Some(icon) = branding::window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     if let Some(window) = settings.window {
         viewport = viewport
             .with_inner_size([window.width, window.height])

@@ -564,12 +564,12 @@ fn window_menu(
 }
 
 fn help_menu(ui: &mut egui::Ui, triggered: &mut Option<Command>) {
-    for (label, cmd) in [
-        ("단축키 목록", Command::ShowShortcuts),
-        ("정규식 문법", Command::ShowRegexHelp),
-        ("My-Notepad 정보", Command::ShowAbout),
+    for cmd in [
+        Command::ShowShortcuts,
+        Command::ShowRegexHelp,
+        Command::ShowAbout,
     ] {
-        if ui.button(label).clicked() {
+        if ui.button(cmd.label()).clicked() {
             *triggered = Some(cmd);
             ui.close();
         }

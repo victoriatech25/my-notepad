@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Vic Notepad 앱 아이콘 작은 크기용 (16·24·32px). 줄을 줄이고 굵게 해 뭉개지지 않게 한다. 생성: cargo xtask icons -->
+  <rect x="3.5" y="2.5" width="20" height="27" rx="2.5" fill="#E6F1FB" stroke="#185FA5" stroke-width="1.5"/>
+  <g stroke="#378ADD" stroke-width="2" stroke-linecap="round">
+    <line x1="7.5" y1="9" x2="19.5" y2="9"/>
+    <line x1="7.5" y1="14.5" x2="19.5" y2="14.5"/>
+    <line x1="7.5" y1="20" x2="14" y2="20"/>
+  </g>
+  <g transform="rotate(40 23 17)">
+    <rect x="20.5" y="5" width="5" height="17" rx="1" fill="#185FA5"/>
+    <polygon points="20.5,22 25.5,22 23,27.5" fill="#FAEEDA"/>
+    <polygon points="22,24.7 24,24.7 23,27.5" fill="#2C2C2A"/>
+  </g>
+</svg>

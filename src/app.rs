@@ -1428,9 +1428,10 @@ done=1
     fn update_window_title(&mut self, ctx: &egui::Context) {
         let doc = &self.tabs.active().doc;
         let title = format!(
-            "{}{} - My-Notepad",
+            "{}{} - {}",
             if doc.is_modified() { "● " } else { "" },
-            doc.title()
+            doc.title(),
+            crate::branding::APP_NAME
         );
         if title != self.window_title {
             ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));

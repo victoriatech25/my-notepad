@@ -4,3 +4,7 @@ version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
+
+[dependencies]
+# 앱 아이콘 SVG 래스터화 — 본 앱과 같은 버전 (P5-01 `cargo xtask icons`)
+resvg = { version = "0.45.1", default-features = false }
