@@ -122,7 +122,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | **Phase 2** | 에디터 고도화, 스마트 하이라이트, 사이드바 | 9 | 7 | G2: 일상 편집 통합 시나리오 | ✅ **완료 — G2 통과** (2026-10-24). Phase 2 기능 macOS 확인 완료 |
 | **Phase 3** | Markdown 소스 보기 / 미리보기 | 12 | 11 | G3: PLAN.md 분할 보기 시나리오 | ✅ **완료 — G3 통과** (2026-10-25). Phase 3 기능 macOS 확인 완료 · G1-1(메모장 ANSI) Windows 재확인 완료 |
 | **Phase 4** | 찾기/바꾸기 | 7 | 5 | G4: 검색·치환 통합 시나리오 | ✅ **완료 — G4 통과** (2026-10-26). Phase 4 기능 macOS 확인 완료 · G1-1(메모장 ANSI) Windows 확인 완료 |
-| **Phase 5** | 배포 및 OS 통합 | 7 | 6 | G5: 릴리스 후보 전체 회귀 | 진행 중 — P5-01·P5-02 완료 (2026-10-26), P5-04 사용자 확인 대기 |
+| **Phase 5** | 배포 및 OS 통합 | 7 | 6 | G5: 릴리스 후보 전체 회귀 | 진행 중 — P5-01·P5-02·P5-04 완료 (2026-10-26) |
 | **Phase 6** | 확장 기능 (2차 목표) | 백로그 | — | 착수 시 상세화 | 대기 |
 
 ### 1.1 UX 검증 일정 (사용자가 직접 써 보는 시점)
@@ -1005,11 +1005,11 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [ ] Finder에서 `.md` → 다음으로 열기 → Vic Notepad
 
 #### P5-04 단일 인스턴스 (PLAN.md §7 결정에 따름) · M
-- **상태**: 🤖 구현·자동 확인 완료 (2026-10-26) · 👤 Windows 확인 대기 — 확인: `cargo xtask package` 후 설치본으로. 결정(PLAN.md Phase 5·§7): 기존 창의 새 탭, 인자 없는 실행도 기존 창을 앞으로, 같은 사용자·세션·실행 파일 경로 기준, `--new-window` 예외, 측정 실행(`--measure-out`)은 늘 새 창. `src/single_instance.rs`: 이름 있는 뮤텍스 `Local\VicNotepad-<세션>-<해시>`로 첫 인스턴스 판정 → 파이프 `\\.\pipe\…`로 경로(UTF-16) 전달, 받으면 1바이트 응답. 보내는 쪽이 `AllowSetForegroundWindow(서버 PID)` → 받는 스레드가 `ShowWindow(SW_RESTORE)`·`SetForegroundWindow` 후 `request_repaint`, 앱은 매 프레임 `open_any`로 연다. 파이프가 없거나 바쁘면 20ms 간격으로 최대 5초 다시 붙고, 실패하면 새 창으로 뜬다. macOS 등은 동작 없음(`.app` 파일 열기 이벤트는 P5-03). **수정**: 응답 직후 `DisconnectNamedPipe`하면 부하가 클 때 보낸 쪽이 응답을 읽기 전에 버려져 15개 동시 전송 테스트가 가끔 실패 → 보낸 쪽이 닫을 때까지 기다린 뒤 끊음
+- **상태**: 🤖 구현·자동 확인 완료 (2026-10-26) · 👤 Windows 확인 통과 (2026-10-26) · **완료** — 확인: `cargo xtask package` 후 설치본으로. 결정(PLAN.md Phase 5·§7): 기존 창의 새 탭, 인자 없는 실행도 기존 창을 앞으로, 같은 사용자·세션·실행 파일 경로 기준, `--new-window` 예외, 측정 실행(`--measure-out`)은 늘 새 창. `src/single_instance.rs`: 이름 있는 뮤텍스 `Local\VicNotepad-<세션>-<해시>`로 첫 인스턴스 판정 → 파이프 `\\.\pipe\…`로 경로(UTF-16) 전달, 받으면 1바이트 응답. 보내는 쪽이 `AllowSetForegroundWindow(서버 PID)` → 받는 스레드가 `ShowWindow(SW_RESTORE)`·`SetForegroundWindow` 후 `request_repaint`, 앱은 매 프레임 `open_any`로 연다. 파이프가 없거나 바쁘면 20ms 간격으로 최대 5초 다시 붙고, 실패하면 새 창으로 뜬다. macOS 등은 동작 없음(`.app` 파일 열기 이벤트는 P5-03). **수정**: 응답 직후 `DisconnectNamedPipe`하면 부하가 클 때 보낸 쪽이 응답을 읽기 전에 버려져 15개 동시 전송 테스트가 가끔 실패 → 보낸 쪽이 닫을 때까지 기다린 뒤 끊음
 - **선행**: P5-02
 - 👤 **사용자 화면 검증**
-  - [ ] 앱 실행 중 탐색기에서 다른 파일을 열면 새 창이 아니라 기존 창의 새 탭으로 열린다
-  - [ ] 기존 창이 최소화 상태여도 앞으로 나온다
+  - [x] 앱 실행 중 탐색기에서 다른 파일을 열면 새 창이 아니라 기존 창의 새 탭으로 열린다
+  - [x] 기존 창이 최소화 상태여도 앞으로 나온다
 
 #### P5-UX 첫 실행 경험과 최종 UX 다듬기 · M 🎨 UX-7
 - **목표**: 처음 실행한 사용자가 안내 없이 쓸 수 있도록 첫 화면(빈 문서, 최근 파일 비어 있음), 도움말 메뉴(단축키 목록, 정규식 문법, 버전 정보), 남은 UX 백로그 `권장` 항목 정리
@@ -1200,6 +1200,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-26 | P5-02 | 🤖 | 통과 | Windows, Inno Setup 6.7.3, `cargo xtask package`: `vic-notepad-0.1.0-windows-x64-setup.exe` 5.9MB·`…-portable.zip` 5.7MB(`Vic Notepad/my-notepad.exe` 1개). 조용한 설치(`/VERYSILENT /TASKS="assoc,contextmenu"`) → 설치 폴더·시작 메뉴·제거 항목(Vic Notepad 0.1.0)·우클릭 동사 "Vic Notepad로 편집"(한글 정상)·`Applications`·ProgID 3개·`OpenWithProgids`(기존 `VSCode.md` 유지)·`RegisteredApplications` 확인 → 조용한 제거 → 설치 폴더·시작 메뉴·키 7개·`OpenWithProgids` 값·`RegisteredApplications` 값 모두 사라짐, 다른 앱 값 유지, 설정 폴더 유지. build(경고 0)·clippy·fmt·test 통과 | |
 | 2026-10-26 | P5-02 | 👤🎨 | 통과 | Windows, 브랜치 `abf82b5`, `cargo xtask package` 결과물: 설치 → 시작 메뉴 실행, `.md` 연결 프로그램 목록·열기, 우클릭 "Vic Notepad로 편집"(Windows 11 "추가 옵션 표시"), 여러 파일 선택 열기(P5-04 전이라 파일마다 창), 제거 후 잔여물 없음·설정 폴더 질문, 포터블 zip 바로 실행, SmartScreen "추가 정보 → 실행" 우회(절차는 `docs/install.md`) 7개 항목과 🎨 설치 단계·문구·연결 선택지 — 사용자 "모두 확인" 회신. **P5-02 완료** | 2026-10-26 |
 | 2026-10-26 | P5-04 | 🤖 | 통과 | Windows: 테스트 8개(메시지 왕복·잘린/엉뚱한 메시지 거부, 두 번째 실행이 첫 실행에 전달, 15개 동시 전송 모두 도착, 파일 없는 전달, 이름 고정) + `--new-window` CLI 테스트. 릴리스 빌드 실측(설정 폴더는 임시 `APPDATA`): 첫 실행 뒤 파일 1개씩 10개 동시 실행 → 268ms에 모두 종료(코드 0), 남은 프로세스 1개, 받은 요청 10개·최근 파일 10개, 인자 없는 실행은 바로 끝나고 빈 요청 전달, `--new-window`는 새 창. build(경고 0)·clippy·fmt·test(전체 3회) 통과 | |
+| 2026-10-26 | P5-04 | 👤 | 통과 | Windows, 브랜치 `1cb76fc`의 `cargo xtask package` 설치본: 실행 중 탐색기에서 다른 파일 열기·여러 파일 우클릭 "Vic Notepad로 편집" → 기존 창의 새 탭, 최소화 상태에서도 창이 복원돼 앞으로 — 사용자 "확인 완료" 회신. **P5-04 완료** | 2026-10-26 |
 
 ### 9.3 측정 결과 기록표
 
