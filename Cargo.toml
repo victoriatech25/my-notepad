@@ -29,6 +29,10 @@ log = "0.4.34"
 memmap2 = "0.9.11"
 # Markdown 파서 — 렌더링은 자체 구현이므로 HTML 출력 기능은 끈다 (ADR 0002, P3-01)
 pulldown-cmark = { version = "0.13.4", default-features = false }
+# 찾기/바꾸기 검색 엔진 — 전후방 탐색·역참조 미지원 (PLAN.md §2.2, §3.2-2, P4-01)
+regex = "1.13.1"
+# 단어 단위 일치의 단어 글자 판정을 정규식 `\w`·`\b`와 같게 맞춘다 (`regex`가 이미 쓰는 크레이트, P4-01)
+regex-syntax = "0.8.11"
 # 미리보기 SVG 이미지 래스터화 — 글자·시스템 폰트·내장 래스터 이미지 기능은 끈다 (P3-04)
 resvg = { version = "0.45.1", default-features = false }
 # 네이티브 파일 열기/저장 대화상자 (PLAN.md §2.2)
