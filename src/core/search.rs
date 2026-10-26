@@ -10,13 +10,20 @@
 //! - 위치는 문서 텍스트(`LF` 정규화)의 바이트 범위이며 오름차순·겹침 없음. egui 커서는 문자 인덱스를 쓰므로
 //!   UI는 [`byte_ranges_to_char_ranges`]·[`char_range_to_byte_range`]로 변환한다
 //!   (낱개 오프셋은 [`crate::core::buffer`]의 `byte_to_char_offset`·`char_to_byte_offset`).
-//! - 치환은 P4-02, 백그라운드 수행·취소는 P4-03에서 붙인다.
+//! - 치환(P4-02): **정규식 모드**에서만 바꿀 문자열의 `$1`·`${name}`(캡처 그룹, `$$`는 `$` 글자)과
+//!   `\n`·`\t`·`\\` 이스케이프를 해석한다. 그 밖의 `\x`는 그대로 둔다. `$1a`는 `regex` 규칙대로 그룹 이름 `1a`로
+//!   읽히므로 뒤에 글자를 붙이려면 `${1}a`로 쓴다. **일반 모드**의 바꿀 문자열은 글자 그대로 넣는다 (VS Code·Notepad++
+//!   기본 모드와 같음). 어느 모드든 바꿀 문자열의 `CRLF`·`CR`은 `LF`로 바꾼다 (문서 내부 표현, 저장할 때 문서 줄바꿈으로).
+//!   모두 바꾸기는 [`SearchQuery::matches`]와 같은 매치(단어 단위·빈 매치 규칙 포함)를 바꾼다.
+//! - 백그라운드 수행·취소는 P4-03에서 붙인다.
 
 use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
 
 use regex::{Regex, RegexBuilder};
+
+use crate::core::line_ending::normalize_to_lf;
 
 /// 찾기 옵션 (찾기 바의 `.*`·`Aa`·`\b` 토글과 Wrap Around).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,8 +83,19 @@ impl From<regex::Error> for SearchError {
 pub struct SearchQuery {
     /// 빈 검색어면 `None` (매치 없음, 오류도 아님)
     regex: Option<Regex>,
+    /// 정규식 모드 (바꿀 문자열의 그룹·이스케이프 해석 여부)
+    regex_mode: bool,
     whole_word: bool,
     wrap_around: bool,
+}
+
+/// 모두 바꾸기 결과.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceAll {
+    /// 바꾼 뒤 전체 텍스트 (`LF` 정규화)
+    pub text: String,
+    /// 바꾼 매치 수
+    pub count: usize,
 }
 
 impl SearchQuery {
@@ -100,6 +118,7 @@ impl SearchQuery {
         };
         Ok(Self {
             regex,
+            regex_mode: options.regex,
             whole_word: options.whole_word,
             wrap_around: options.wrap_around,
         })
@@ -135,6 +154,114 @@ impl SearchQuery {
     pub fn count(&self, text: &str) -> usize {
         self.matches(text).count()
     }
+
+    /// 모든 매치를 `replacement`로 바꾼 텍스트와 바꾼 개수. 매치가 없으면 원문 그대로, 개수 0.
+    pub fn replace_all(&self, text: &str, replacement: &str) -> ReplaceAll {
+        let Some(regex) = &self.regex else {
+            return ReplaceAll {
+                text: text.to_owned(),
+                count: 0,
+            };
+        };
+        let template = self.template(replacement);
+        let mut out = String::with_capacity(text.len());
+        let mut last = 0;
+        let mut count = 0;
+        for range in self.matches(text) {
+            out.push_str(&text[last..range.start]);
+            expand_into(regex, text, &range, &template, &mut out);
+            last = range.end;
+            count += 1;
+        }
+        out.push_str(&text[last..]);
+        ReplaceAll { text: out, count }
+    }
+
+    /// 바이트 범위 `range`의 매치를 바꿀 문자열 (`바꾸기` 한 번).
+    ///
+    /// 지금 텍스트에서 그 범위가 이 조건의 매치가 아니면 `None` — 편집 뒤 오래된 매치를 바꾸지 않게 한다.
+    pub fn replacement_for(
+        &self,
+        text: &str,
+        range: &Range<usize>,
+        replacement: &str,
+    ) -> Option<String> {
+        let regex = self.regex.as_ref()?;
+        if range.end > text.len() || !text.is_char_boundary(range.start) {
+            return None;
+        }
+        let found = regex.find_at(text, range.start)?.range();
+        if found != *range || (self.whole_word && !has_word_bounds(text, range)) {
+            return None;
+        }
+        let mut out = String::new();
+        expand_into(regex, text, range, &self.template(replacement), &mut out);
+        Some(out)
+    }
+
+    /// 바꿀 문자열을 이 조건에 맞게 준비한다 (줄바꿈 `LF` 정규화, 정규식 모드면 이스케이프 해석).
+    fn template(&self, raw: &str) -> Template {
+        let raw = normalize_to_lf(raw);
+        if self.regex_mode {
+            Template::Expand(unescape(&raw))
+        } else {
+            Template::Literal(raw)
+        }
+    }
+}
+
+/// 준비된 바꿀 문자열.
+enum Template {
+    /// 글자 그대로 넣는다 (일반 모드)
+    Literal(String),
+    /// `$1`·`${name}`을 캡처 그룹으로 펼친다 (정규식 모드, 이스케이프는 이미 해석됨)
+    Expand(String),
+}
+
+/// `range` 매치의 바꿀 문자열을 `out`에 붙인다.
+fn expand_into(
+    regex: &Regex,
+    text: &str,
+    range: &Range<usize>,
+    template: &Template,
+    out: &mut String,
+) {
+    match template {
+        Template::Literal(s) => out.push_str(s),
+        Template::Expand(t) => {
+            // 같은 위치에서 다시 찾으면 같은 매치가 나온다 (`find_at`처럼 앞 글자 문맥도 본다).
+            match regex.captures_at(text, range.start) {
+                Some(caps) if caps.get(0).is_some_and(|m| m.range() == *range) => {
+                    caps.expand(t, out);
+                }
+                // 일어나지 않아야 하지만, 그룹 없이 글자 그대로 넣는다.
+                _ => out.push_str(t),
+            }
+        }
+    }
+}
+
+/// 정규식 모드 바꿀 문자열의 이스케이프 `\n`·`\t`·`\\`를 해석한다. 그 밖의 `\x`는 그대로 둔다.
+fn unescape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// [`SearchQuery::matches`]의 반복자.
