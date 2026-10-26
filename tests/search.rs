@@ -727,3 +727,21 @@ fn replace_one_then_next_and_undo() {
     assert!(doc.undo());
     assert_eq!(doc.text(), "cat cat cat");
 }
+
+/// G4-2 확인 문서(`cargo xtask try g4`·`try search`의 `search_ko.txt`)의 한글 단어 단위·부분 검색 기대값.
+#[test]
+fn korean_fixture_whole_word_vs_partial_counts() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/editor/search_ko.txt");
+    let text = std::fs::read_to_string(path).unwrap();
+    assert_eq!(
+        query("검색", opts(false, true, false)).count(&text),
+        15,
+        "부분 일치"
+    );
+    assert_eq!(
+        query("검색", opts(false, true, true)).count(&text),
+        7,
+        "단어 단위"
+    );
+}
