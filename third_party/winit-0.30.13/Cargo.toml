@@ -508,6 +508,7 @@ features = [
     "NSProcessInfo",
     "NSRunLoop",
     "NSString",
+    "NSURL",
     "NSThread",
     "NSValue",
 ]

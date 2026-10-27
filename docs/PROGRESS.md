@@ -1,7 +1,7 @@
 # My-Notepad 진행 상황
 
 > 새 대화를 시작할 때 가장 먼저 읽는 요약입니다. 판정·근거·체크리스트 원문은 [WORKPLAN.md](WORKPLAN.md)가 기준입니다.
-> **마지막 갱신**: 2026-10-27 · `main`에 `wu/P5-05-release-pipeline` 병합 (릴리스 파이프라인·P5-06 측정·manual-test.md·CI 수정) · 릴리스 후보 **`v0.1.0-rc.3`** 초안 릴리스 · 진행 중 브랜치 없음
+> **마지막 갱신**: 2026-10-27 · 진행 중 브랜치 **`wu/P5-03-macos-package`** (P5-03 🤖 완료, 🍎👤 확인 대기) · 릴리스 후보 `v0.1.0-rc.3` 초안 릴리스
 
 ## 현재 상태
 
@@ -12,7 +12,7 @@
 | Phase 2 | 에디터 고도화·스마트 하이라이트·사이드바 | ✅ G2 통과 (2026-10-24) |
 | Phase 3 | Markdown 소스/미리보기/분할 | ✅ G3 통과 (2026-10-25) |
 | Phase 4 | 찾기/바꾸기 | ✅ G4 통과 (2026-10-26) |
-| **Phase 5** | **배포·OS 통합** | **진행 중** — P5-01·P5-02·P5-04·**P5-UX 완료**, P5-05 Windows 부분 완료(macOS dmg는 P5-03 뒤), P5-06 Windows 👤 통과(🍎는 P5-03 뒤) — **Windows 쪽 Phase 5 작업 끝**, 남은 것은 MacBook의 P5-03부터 |
+| **Phase 5** | **배포·OS 통합** | **진행 중** — P5-01·P5-02·P5-04·**P5-UX 완료**, P5-05 Windows 부분 완료(macOS dmg는 P5-03 뒤), P5-06 Windows 👤 통과(🍎는 P5-03 뒤), **P5-03 🤖 완료·🍎 확인 대기** |
 | Phase 6 | 확장 기능 | **P6-A 문법 강조 ✅ 완료** (2026-10-27, 사용자 요청으로 G5 전에 진행) — 나머지 P6-B~I는 G5 뒤 |
 
 - G4: 🤖 macOS·CI 녹색(10MB 매치 카운트 최대 41.5ms, 검색 중 프레임 최대 8.82ms) · 🍎👤 macos-checklist §5 전 항목 통과 · G1-1 Windows 통과
@@ -25,7 +25,7 @@
 - **결정 (2026-10-27)**: Phase 6 문법 강조는 `syntect` 대신 자체 경량 토크나이저 (WORKPLAN P6-A) — PLAN.md v0.7 §5 Phase 6
 - **알려진 이슈**: KI-1 비트맵 글꼴(굴림체·Lucida Console 등)에서 영문·숫자에 문법 강조 색이 안 나옴 — 그대로 두기로 (WORKPLAN G5 알려진 이슈 표)
 
-1. **P5-03 macOS 패키지** (MacBook): `Vic Notepad.app`·Universal 바이너리·`.dmg`·파일 연결 — 이때 도움말 창·글꼴 대화상자·탐색기 글꼴·문법 강조도 🍎 확인
+1. **P5-03 🍎👤 확인** (MacBook): `cargo xtask package` → `target/dist/vic-notepad-0.1.0-macos-universal.dmg` 설치·첫 실행 Gatekeeper(`docs/install.md`)·Finder 다음으로 열기 — 함께 `cargo xtask try help`·`cargo xtask try syntax` (macos-checklist §6) → 통과하면 `main` 병합
 2. P5-03 뒤: 파이프라인에 macOS `.dmg` 추가(P5-05 마무리) → P5-06 macOS 회귀 → G5
 
 ## 사용자 대기 항목
@@ -42,11 +42,14 @@
 | P5-UX 🎨 도움말 창 3개 (단축키 목록·정규식 문법·정보) + 🎨👤 편집기 글꼴(보기 → 글꼴…) — `cargo xtask try help` | Windows | ✅ 2026-10-27 |
 | 👤 탐색기 트리 이름이 편집기 글꼴·크기를 따름 + 🎨👤 P6-A 문법 강조 (WORKPLAN P6-A 🎨 2개·👤 3개) — `cargo xtask try syntax` | Windows | ✅ 2026-10-27 |
 | 👤 P5-06 설치본 회귀 `v0.1.0-rc.3` — manual-test.md 50개 + 첫 화면 | Windows | ✅ 2026-10-27 |
+| 🍎👤 P5-03 `.dmg` 설치·첫 실행 경고 넘기기·Finder 다음으로 열기(`.md`, 실행 중이면 같은 창 탭) — `cargo xtask package` (WORKPLAN P5-03 🍎 3개) | MacBook | 대기 |
+| 🍎 P5-UX·P6-A macOS 확인 — `cargo xtask try help`·`cargo xtask try syntax` (macos-checklist §6) | MacBook | 대기 |
 
 ## 최근 작업 기록
 
 > 최신이 위. 대화를 마칠 때 한 줄씩 추가하고, 10줄이 넘으면 오래된 줄은 지운다 (상세는 git log·WORKPLAN §9).
 
+- 2026-10-27 — P5-03 macOS 패키지 구현: Universal `.app`·ad-hoc 서명·`.dmg`(12.7MB), 문서 종류 연결, Finder 파일 열기(winit 수정 5) — 같은 창 탭 2개·Rosetta 기동 확인, 🍎👤 확인 요청
 - 2026-10-27 — UX 백로그 `보류` 0건 확인 → **P5-UX 완료**, Windows에서 할 Phase 5 작업 끝
 - 2026-10-27 — P5-06 Windows 설치본 회귀 통과(`v0.1.0-rc.3`, 50개), 비트맵 글꼴 문법 강조 색 문제는 알려진 이슈 KI-1로 두기로
 - 2026-10-27 — P5-05 릴리스 파이프라인(태그 → Windows 설치 파일·체크섬·초안 릴리스), rc.1·rc.2 CI 실패 5건(macOS 미사용 함수·글꼴 Menlo·테스트 순서, 픽스처 누락) 고쳐 **rc.3 녹색**
@@ -56,4 +59,3 @@
 - 2026-10-27 — P6-A 문법 강조 구현(언어 24개 데이터 표·스캐너, 보기 → 문법 강조·상태 표시줄), 1MB 훑기 ≤ 6.1ms·입력 +0.6ms·실행 파일 +0.17MB, 🎨👤 확인 요청
 - 2026-10-27 — 탐색기 트리 이름이 편집기 글꼴 설정을 따름 (기본 설정에서는 모양 그대로)
 - 2026-10-27 — Phase 6 문법 강조 방식을 자체 경량 토크나이저로 변경(PLAN v0.7): 대상 언어 5묶음·범위·제외·측정 기준
-- 2026-10-27 — PLAN.md 제목 정렬 테스트 입력을 고정 사본(`tests/fixtures/markdown/plan_snapshot.md`)으로, 회귀 기준 23%·초과 7회 (사본 측정 22.2%)

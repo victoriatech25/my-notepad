@@ -18,6 +18,7 @@ mod window_delegate;
 
 use std::fmt;
 
+pub(crate) use self::app_state::set_open_files_handler;
 pub(crate) use self::event::{physicalkey_to_scancode, scancode_to_physicalkey, KeyEventExtra};
 pub(crate) use self::event_loop::{
     ActiveEventLoop, EventLoop, EventLoopProxy, OwnedDisplayHandle,

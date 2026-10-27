@@ -122,7 +122,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | **Phase 2** | 에디터 고도화, 스마트 하이라이트, 사이드바 | 9 | 7 | G2: 일상 편집 통합 시나리오 | ✅ **완료 — G2 통과** (2026-10-24). Phase 2 기능 macOS 확인 완료 |
 | **Phase 3** | Markdown 소스 보기 / 미리보기 | 12 | 11 | G3: PLAN.md 분할 보기 시나리오 | ✅ **완료 — G3 통과** (2026-10-25). Phase 3 기능 macOS 확인 완료 · G1-1(메모장 ANSI) Windows 재확인 완료 |
 | **Phase 4** | 찾기/바꾸기 | 7 | 5 | G4: 검색·치환 통합 시나리오 | ✅ **완료 — G4 통과** (2026-10-26). Phase 4 기능 macOS 확인 완료 · G1-1(메모장 ANSI) Windows 확인 완료 |
-| **Phase 5** | 배포 및 OS 통합 | 7 | 6 | G5: 릴리스 후보 전체 회귀 | 진행 중 — P5-01·P5-02·P5-04·P5-UX 완료, P5-05 Windows 부분·P5-06 Windows 통과 (2026-10-27) · 남은 것: P5-03 macOS 패키지 → `.dmg` 파이프라인 → macOS 회귀 → G5 |
+| **Phase 5** | 배포 및 OS 통합 | 7 | 6 | G5: 릴리스 후보 전체 회귀 | 진행 중 — P5-01·P5-02·P5-04·P5-UX 완료, P5-05 Windows 부분·P5-06 Windows 통과 (2026-10-27), P5-03 🤖 완료·🍎 대기 · 남은 것: P5-03 🍎 확인 → `.dmg` 파이프라인 → macOS 회귀 → G5 |
 | **Phase 6** | 확장 기능 (2차 목표) | 백로그 | — | 착수 시 상세화 | 대기 |
 
 ### 1.1 UX 검증 일정 (사용자가 직접 써 보는 시점)
@@ -998,11 +998,12 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 
 #### P5-03 macOS 패키지 · M
 - **목표**: `.app` 번들(`Vic Notepad.app`), Universal 바이너리, `.dmg`(서명·공증 없음), 파일 연결(`CFBundleDocumentTypes`)
+- **상태**: 🤖 구현·자동 확인 완료 (2026-10-27, 브랜치 `wu/P5-03-macos-package`) · 🍎👤 확인 대기 — 확인: `cargo xtask package` → `target/dist/vic-notepad-0.1.0-macos-universal.dmg`. `xtask/src/package.rs` macOS: `aarch64`·`x86_64-apple-darwin` 릴리스 빌드(없는 대상은 `rustup target add`) → `lipo` Universal → `Vic Notepad.app`(`assets/macos/Info.plist`의 `@VERSION@` 치환·`.icns`) → **ad-hoc 서명**(`codesign -s -` — Apple Silicon은 서명 없는 실행 파일을 돌리지 않고, 번들 서명이 없으면 내려받은 앱이 "손상됨"으로 막혀 "그래도 열기"로도 못 넘김. 개발자 인증서·공증은 없음) → `.dmg`(앱 + `Applications` 바로 가기, UDZO 12.7MB, 실행 파일 25.2MB). 파일 연결: `CFBundleDocumentTypes` 텍스트(`public.plain-text`)·Markdown(`net.daringfireball.markdown`, `UTImportedTypeDeclarations`로 `.md`·`.markdown` 선언)·로그(`public.log`), 모두 `Alternate`(Windows와 같이 "다음으로 열기"에만, 기본 앱은 바꾸지 않음). **Finder 파일 열기**: winit 델리게이트에 `application:openURLs:`가 없어 파일이 열리지 않았다 → winit 사본 **수정 5**(`third_party/README.md`)로 `platform::macos::set_open_files_handler` 훅 추가, `single_instance.rs`가 이벤트 루프 전에 등록해 P5-04의 Windows 파이프와 같은 `Listener` 경로로 넘긴다(실행시킨 첫 파일은 창보다 먼저 와서 쌓였다가 첫 프레임에 열림). 자동 확인: `lipo -info` x86_64 arm64 · `codesign --verify --strict` · `.dmg` 내용 · `open -a … README.md` 후 `app.log` → 프로세스 하나, 같은 창의 탭 2개 · `arch -x86_64`로 Intel 조각 기동(Rosetta). 설치 안내 `docs/install.md` macOS 절 (macOS 15+는 시스템 설정 → 개인정보 보호 및 보안 → 그래도 열기, 14 이하는 우클릭 → 열기)
 - **선행**: P5-01
 - 🍎 **macOS 검증**
-  - [ ] `.dmg` 열어 Applications로 복사 후 처음 실행 시 Gatekeeper 경고를 우클릭 → 열기(또는 시스템 설정 → 개인정보 보호 및 보안 → "확인 없이 열기")로 넘기면 이후 정상 실행 — 절차를 설치 안내에 기록
+  - [ ] `.dmg` 열어 Applications로 복사 후 처음 실행 시 Gatekeeper 경고를 `docs/install.md` 절차(macOS 15+: 시스템 설정 → 개인정보 보호 및 보안 → 그래도 열기 / 14 이하: 우클릭 → 열기)로 넘기면 이후 정상 실행
   - [ ] Apple Silicon / Intel 각각 실행 (가능한 장비에서)
-  - [ ] Finder에서 `.md` → 다음으로 열기 → Vic Notepad
+  - [ ] Finder에서 `.md` → 다음으로 열기 → Vic Notepad (실행 중이면 같은 창의 새 탭)
 
 #### P5-04 단일 인스턴스 (PLAN.md §7 결정에 따름) · M
 - **상태**: 🤖 구현·자동 확인 완료 (2026-10-26) · 👤 Windows 확인 통과 (2026-10-26) · **완료** — 확인: `cargo xtask package` 후 설치본으로. 결정(PLAN.md Phase 5·§7): 기존 창의 새 탭, 인자 없는 실행도 기존 창을 앞으로, 같은 사용자·세션·실행 파일 경로 기준, `--new-window` 예외, 측정 실행(`--measure-out`)은 늘 새 창. `src/single_instance.rs`: 이름 있는 뮤텍스 `Local\VicNotepad-<세션>-<해시>`로 첫 인스턴스 판정 → 파이프 `\\.\pipe\…`로 경로(UTF-16) 전달, 받으면 1바이트 응답. 보내는 쪽이 `AllowSetForegroundWindow(서버 PID)` → 받는 스레드가 `ShowWindow(SW_RESTORE)`·`SetForegroundWindow` 후 `request_repaint`, 앱은 매 프레임 `open_any`로 연다. 파이프가 없거나 바쁘면 20ms 간격으로 최대 5초 다시 붙고, 실패하면 새 창으로 뜬다. macOS 등은 동작 없음(`.app` 파일 열기 이벤트는 P5-03). **수정**: 응답 직후 `DisconnectNamedPipe`하면 부하가 클 때 보낸 쪽이 응답을 읽기 전에 버려져 15개 동시 전송 테스트가 가끔 실패 → 보낸 쪽이 닫을 때까지 기다린 뒤 끊음

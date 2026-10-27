@@ -33,4 +33,30 @@ cargo xtask package                   # → target/dist/ 에 setup.exe·portable
 
 ## macOS
 
-P5-03에서 추가합니다 (`.dmg`, 첫 실행은 우클릭 → 열기).
+배포 파일은 `vic-notepad-<버전>-macos-universal.dmg` 하나입니다. Apple Silicon·Intel Mac 모두에서 실행되며 macOS 11 이상이 필요합니다.
+
+### 설치
+
+1. `.dmg`를 열고 **Vic Notepad**를 옆의 **Applications** 폴더로 끌어다 놓습니다.
+2. 응용 프로그램 폴더에서 Vic Notepad를 처음 열면 **"Apple은 'Vic Notepad'에 악성 코드가 없음을 확인할 수 없습니다"**(또는 "확인되지 않은 개발자") 경고가 나옵니다. 개발자 인증서로 서명·공증하지 않은 앱이라 처음 한 번 나옵니다. 아래 중 하나로 넘깁니다.
+   - **macOS 15 이상**: 경고에서 **완료**를 누른 뒤 **시스템 설정 → 개인정보 보호 및 보안**을 열고, 아래쪽 보안 항목의 "'Vic Notepad'이(가) 차단되었습니다" 옆 **그래도 열기**를 누릅니다. 다시 뜨는 확인 창에서 **그래도 열기**를 누르고 암호(또는 Touch ID)를 입력합니다.
+   - **macOS 14 이하**: Finder에서 Vic Notepad를 **우클릭(Control+클릭) → 열기**를 누르고, 확인 창에서 **열기**를 누릅니다.
+3. 한 번 열고 나면 이후에는 경고 없이 실행됩니다.
+
+### 파일 연결
+
+설치하면 텍스트(.txt 등)·Markdown(.md)·로그(.log) 파일의 **다음으로 열기** 목록에 Vic Notepad가 들어갑니다. 기본 앱은 바뀌지 않습니다. 기본 앱으로 쓰려면 파일을 선택하고 **정보 가져오기(⌘I) → 다음으로 열기 → Vic Notepad → 모두 변경…**을 누릅니다.
+
+이미 떠 있는 Vic Notepad가 있으면 Finder에서 연 파일은 그 창의 새 탭으로 열립니다. Dock 아이콘에 파일을 끌어다 놓아도 됩니다.
+
+### 제거
+
+응용 프로그램 폴더의 Vic Notepad를 휴지통으로 옮깁니다. 설정은 `~/Library/Application Support/My-Notepad`, 로그는 `~/Library/Logs/My-Notepad`에 남으므로 필요 없으면 함께 지웁니다.
+
+### 만들기 (개발자)
+
+```bash
+cargo xtask package   # → target/dist/ 에 Vic Notepad.app·vic-notepad-<버전>-macos-universal.dmg
+```
+
+`x86_64-apple-darwin` Rust 대상이 없으면 처음 실행할 때 `rustup target add`로 받습니다. 서명은 ad-hoc(`codesign -s -`)입니다. Apple Silicon은 서명이 전혀 없는 실행 파일을 돌리지 않고, 번들 서명이 없으면 내려받은 앱이 "손상되었습니다"로 막혀 **그래도 열기**로도 넘길 수 없기 때문입니다.

@@ -342,7 +342,7 @@ fn print_help() {
         "  icons            앱 아이콘 SVG → .ico·.icns·창 아이콘 PNG (assets/icons, 커밋 대상)"
     );
     println!(
-        "  package          배포 파일 만들기 → target/dist (Windows: 설치 프로그램·포터블 zip, Inno Setup 6 필요)"
+        "  package          배포 파일 만들기 → target/dist (Windows: 설치 프로그램·포터블 zip, Inno Setup 6 필요 / macOS: Universal .app·.dmg)"
     );
     println!("  measure [--runs N]  메모리·기동 시간 측정 (렌더러 × 한글 폰트 × 문서, 기본 10회)");
     println!(
