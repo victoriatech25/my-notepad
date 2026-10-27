@@ -6,10 +6,11 @@
 //! - P1-10: 열기·저장 결과 등 잠깐 보여 주는 안내 문구
 //! - P1-12: 인코딩·줄바꿈을 눌러 여는 팝업(다시 읽기·변환·줄바꿈 변경), `추정됨`·`손상`·`Mixed` 표시
 //!   (ui-spec: 좌 = 커서·선택·줄 수 / 우 = 확대율·줄바꿈·인코딩, "바꿀 수 있는 값" 묶음)
+//! - P6-A: 문법 강조 언어 이름 (눌러서 자동·끄기·언어 선택)
 
 use eframe::egui::{self, RichText};
 
-use crate::commands::{Command, EncodingChoice, LineEndingChoice};
+use crate::commands::{Command, EncodingChoice, LineEndingChoice, SyntaxChoice};
 use crate::ui::menu_bar;
 use crate::ui::theme::Palette;
 
@@ -33,6 +34,10 @@ pub struct StatusBarInfo<'a> {
     pub damaged: bool,
     pub line_ending: LineEndingChoice,
     pub mixed_line_endings: bool,
+    /// 문법 강조 선택·지금 칠하는 이름·자동 판정 이름 (P6-A)
+    pub syntax: SyntaxChoice,
+    pub syntax_name: &'a str,
+    pub syntax_auto_name: &'a str,
     pub font_warning: Option<&'a str>,
     pub chord_hint: Option<&'a str>,
     /// 잠깐 보여 주는 안내 (마지막 실행 커맨드보다 우선)
@@ -97,6 +102,14 @@ pub fn show(ui: &mut egui::Ui, palette: &Palette, info: &StatusBarInfo<'_>) -> O
             })
             .response
             .on_hover_text(le_tip);
+            ui.separator();
+
+            // 문법 강조 언어 — 눌러서 바꾼다 (P6-A)
+            ui.menu_button(info.syntax_name, |ui| {
+                menu_bar::syntax_items(ui, info.syntax, info.syntax_auto_name, &mut triggered);
+            })
+            .response
+            .on_hover_text("문법 강조 — 클릭해서 변경");
             ui.separator();
 
             ui.label(format!("{}%", (info.zoom * 100.0).round() as i32));

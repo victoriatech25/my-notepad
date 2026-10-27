@@ -15,3 +15,4 @@ pub mod line_ending;
 pub mod link;
 pub mod markdown;
 pub mod search;
+pub mod syntax;

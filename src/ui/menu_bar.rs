@@ -7,7 +7,10 @@ use eframe::egui::{self, Align, Color32, FontSelection, RichText, text::LayoutJo
 
 use crate::ui::theme::Palette;
 
-use crate::commands::{Command, EncodingChoice, Keymap, LineEndingChoice, ThemeMode, ViewMode};
+use crate::commands::{
+    Command, EncodingChoice, Keymap, LineEndingChoice, SyntaxChoice, ThemeMode, ViewMode,
+};
+use crate::core::syntax::Language;
 
 /// `창` 메뉴에서 스크롤 없이 보여 줄 열린 탭 바로가기 수.
 const WINDOW_MENU_VISIBLE_TABS: usize = 10;
@@ -31,6 +34,9 @@ pub struct MenuBarState<'a> {
     pub tab_spaces: bool,
     pub is_markdown: bool,
     pub view_mode: ViewMode,
+    /// 활성 탭 문법 강조 선택과 자동 판정 이름 (P6-A)
+    pub syntax: SyntaxChoice,
+    pub syntax_auto_name: &'a str,
     pub scroll_sync: bool,
     /// 선택 단어 강조: 단어 단위 일치 (끄면 부분 일치)
     pub highlight_whole_word: bool,
@@ -314,6 +320,9 @@ fn view_menu(
 
     ui.separator();
     menu_item(ui, ctx, keymap, "글꼴…", Command::ShowFontDialog, triggered);
+    ui.menu_button("문법 강조", |ui| {
+        syntax_items(ui, state.syntax, state.syntax_auto_name, triggered);
+    });
     menu_item(ui, ctx, keymap, "확대", Command::ZoomIn, triggered);
     menu_item(ui, ctx, keymap, "축소", Command::ZoomOut, triggered);
     menu_item(ui, ctx, keymap, "원래 크기", Command::ZoomReset, triggered);
@@ -379,6 +388,38 @@ fn encoding_menu(ui: &mut egui::Ui, state: &MenuBarState<'_>, triggered: &mut Op
     encoding_items(ui, state.encoding, triggered);
     ui.separator();
     line_ending_items(ui, state.line_ending, state.mixed_line_endings, triggered);
+}
+
+/// 문법 강조 항목 (`보기 → 문법 강조`와 상태 표시줄 언어 팝업이 같이 쓴다 — P6-A).
+/// `auto_name`은 자동 판정 결과 이름 ("자동 (Rust)"처럼 보인다).
+pub fn syntax_items(
+    ui: &mut egui::Ui,
+    current: SyntaxChoice,
+    auto_name: &str,
+    triggered: &mut Option<Command>,
+) {
+    let mut item = |ui: &mut egui::Ui, selected: bool, label: &str, choice: SyntaxChoice| {
+        if ui.add(marked_button(ui, selected, label)).clicked() {
+            *triggered = Some(Command::SetSyntax(choice));
+            ui.close();
+        }
+    };
+    item(
+        ui,
+        current == SyntaxChoice::Auto,
+        &format!("자동 ({auto_name})"),
+        SyntaxChoice::Auto,
+    );
+    item(ui, current == SyntaxChoice::Off, "끄기", SyntaxChoice::Off);
+    ui.separator();
+    egui::ScrollArea::vertical()
+        .max_height(360.0)
+        .show(ui, |ui| {
+            for lang in Language::ALL {
+                let choice = SyntaxChoice::Lang(lang);
+                item(ui, current == choice, lang.name(), choice);
+            }
+        });
 }
 
 /// 인코딩 항목 (`인코딩` 메뉴와 상태 표시줄 인코딩 팝업이 같이 쓴다 — P1-12).
@@ -599,6 +640,8 @@ mod tests {
             tab_width: 4,
             tab_spaces: false,
             is_markdown: false,
+            syntax: SyntaxChoice::Auto,
+            syntax_auto_name: "Rust",
             view_mode: ViewMode::Source,
             scroll_sync: false,
             highlight_whole_word: true,

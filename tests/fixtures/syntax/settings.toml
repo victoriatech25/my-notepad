@@ -1,0 +1,16 @@
+# 설정 파일 예시
+[package]
+name = "my-notepad"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+regex = "1.13.1"
+eframe = { version = "=0.37.0", default-features = false }
+
+[profile.release]
+lto = true
+opt-level = 3
+note = """
+여러 줄
+문자열"""

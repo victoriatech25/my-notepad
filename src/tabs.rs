@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use crate::commands::ViewMode;
 use crate::core::document::{DiskMetadata, Document};
 use crate::core::file_io::{DiskChange, OpenMode, check_disk_change};
+use crate::core::syntax::{self, SyntaxChoice};
 use crate::ui::doc_view::DocViewState;
-use crate::ui::editor::EditorState;
+use crate::ui::editor::{EditorState, SyntaxMode};
 use crate::ui::markdown_view::PreviewState;
 use crate::ui::viewer::ViewerState;
 
@@ -49,6 +50,8 @@ pub struct Tab {
     pub external_pending: bool,
     /// 사용자가 "내 버전 유지"를 고른 디스크 버전 — 같은 버전이면 다시 묻지 않는다
     pub dismissed_disk: Option<DiskMetadata>,
+    /// 문법 강조 선택 (`보기 → 문법 강조`, 파일마다 기억하지 않음 — P6-A)
+    pub syntax: SyntaxChoice,
 }
 
 /// 외부 변경 감지 결과 (앱이 대화상자·안내로 알린다).
@@ -92,7 +95,28 @@ impl Tab {
             disk_deleted: false,
             external_pending: false,
             dismissed_disk: None,
+            syntax: SyntaxChoice::Auto,
         }
+    }
+
+    /// 소스에 칠할 구문 색상 (탭의 문법 강조 선택에 따라).
+    pub fn syntax_mode(&self) -> SyntaxMode {
+        match self.syntax {
+            SyntaxChoice::Off => SyntaxMode::Off,
+            SyntaxChoice::Lang(lang) => SyntaxMode::Code(lang),
+            SyntaxChoice::Auto => self.auto_syntax_mode(),
+        }
+    }
+
+    /// 자동 판정: `.md`는 Markdown, 그 밖에는 파일 이름·확장자로 고른 언어 (모르면 끔).
+    pub fn auto_syntax_mode(&self) -> SyntaxMode {
+        if self.doc.is_markdown() {
+            return SyntaxMode::Markdown;
+        }
+        self.doc
+            .path()
+            .and_then(syntax::detect)
+            .map_or(SyntaxMode::Off, SyntaxMode::Code)
     }
 
     /// 닫기 전에 저장 확인이 필요한지 (수정됐거나, 디스크에서 지워져 닫으면 내용이 사라지는 탭).

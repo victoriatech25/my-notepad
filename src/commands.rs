@@ -75,6 +75,8 @@ fn consume_exact(
     }
 }
 
+pub use crate::core::syntax::SyntaxChoice;
+
 /// 문서 인코딩 선택지 (PLAN.md §3.3 — `core::encoding::TextEncoding` 재노출).
 pub use crate::core::encoding::TextEncoding as EncodingChoice;
 
@@ -174,6 +176,8 @@ pub enum Command {
     ZoomReset,
     /// 편집기 글꼴·크기 대화상자 (P5-UX)
     ShowFontDialog,
+    /// 활성 탭의 문법 강조 (자동·끄기·언어, P6-A)
+    SetSyntax(SyntaxChoice),
     SetViewMode(ViewMode),
     ToggleMdPreview,
     ToggleMdSplit,
@@ -244,6 +248,14 @@ impl Command {
             Self::ZoomOut => "축소".to_owned(),
             Self::ZoomReset => "원래 크기".to_owned(),
             Self::ShowFontDialog => "글꼴…".to_owned(),
+            Self::SetSyntax(choice) => format!(
+                "문법 강조: {}",
+                match choice {
+                    SyntaxChoice::Auto => "자동",
+                    SyntaxChoice::Off => "끄기",
+                    SyntaxChoice::Lang(lang) => lang.name(),
+                }
+            ),
             Self::SetViewMode(mode) => format!("Markdown 보기: {}", mode.label()),
             Self::ToggleMdPreview => "Markdown 소스 ↔ 미리보기 전환".to_owned(),
             Self::ToggleMdSplit => "Markdown 분할 보기 토글".to_owned(),

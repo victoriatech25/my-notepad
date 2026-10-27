@@ -1,0 +1,9 @@
+diff --git a/src/app.rs b/src/app.rs
+index 3f2a1b0..9c4d2e1 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1704,7 +1704,7 @@ impl NotepadApp {
+         // 6. 본문 영역: 활성 탭 에디터
+-        let font_size = ui.style().text_styles[&egui::TextStyle::Monospace].size * self.zoom;
++        let font_size = self.editor_font_size * self.zoom;
+         let options = EditorOptions {
