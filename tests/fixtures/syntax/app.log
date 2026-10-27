@@ -1,0 +1,6 @@
+2026-10-27 09:59:12.031 [INFO] Vic Notepad v0.1.0 기동 (windows/x86_64)
+2026-10-27 09:59:12.040 [DEBUG] 폰트 체인 로드 완료 (7.78 ms, 성공 5개)
+2026-10-27 10:00:01 WARN 설정 파일이 없어 기본값으로 시작 "settings.toml"
+2026-10-27 10:00:02 ERROR 파일을 열 수 없습니다: 권한 없음
+2026-10-27 10:00:03 fatal: panicked at src/main.rs:37:9
+warning: unused variable `x`

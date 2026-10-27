@@ -16,5 +16,6 @@ desktop.ini
 *.swp
 *~
 
-# 로그
+# 로그 (테스트 픽스처의 .log 예제는 저장소에 둔다)
 *.log
+!tests/fixtures/**/*.log
