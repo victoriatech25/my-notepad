@@ -49,6 +49,16 @@ pub struct Palette {
     pub md_list: Color32,
     pub md_quote: Color32,
     pub md_meta: Color32,
+    /// 코드 문법 강조 (P6-A): 주석, 문자열, 숫자, 키워드, 키(이름·변수), 태그 기호, diff 추가·삭제
+    /// (로그 오류·경고 수준은 `status_error`·`status_warning`을 쓴다)
+    pub syn_comment: Color32,
+    pub syn_string: Color32,
+    pub syn_number: Color32,
+    pub syn_keyword: Color32,
+    pub syn_key: Color32,
+    pub syn_punct: Color32,
+    pub syn_added: Color32,
+    pub syn_removed: Color32,
 }
 
 impl Palette {
@@ -90,6 +100,14 @@ impl Palette {
             md_list: Color32::from_rgb(0xD7, 0xBA, 0x7D),
             md_quote: Color32::from_rgb(0x8B, 0x94, 0x9E),
             md_meta: Color32::from_gray(0x80),
+            syn_comment: Color32::from_rgb(0x6A, 0x99, 0x55),
+            syn_string: Color32::from_rgb(0xCE, 0x91, 0x78),
+            syn_number: Color32::from_rgb(0xB5, 0xCE, 0xA8),
+            syn_keyword: Color32::from_rgb(0x56, 0x9C, 0xD6),
+            syn_key: Color32::from_rgb(0x9C, 0xDC, 0xFE),
+            syn_punct: Color32::from_gray(0x80),
+            syn_added: Color32::from_rgb(0x81, 0xB8, 0x8B),
+            syn_removed: Color32::from_rgb(0xE0, 0x6C, 0x75),
         }
     }
 
@@ -122,6 +140,14 @@ impl Palette {
             md_list: Color32::from_rgb(0xB0, 0x60, 0x00),
             md_quote: Color32::from_rgb(0x6A, 0x73, 0x7D),
             md_meta: Color32::from_gray(0x80),
+            syn_comment: Color32::from_rgb(0x00, 0x80, 0x00),
+            syn_string: Color32::from_rgb(0xA3, 0x15, 0x15),
+            syn_number: Color32::from_rgb(0x09, 0x86, 0x58),
+            syn_keyword: Color32::from_rgb(0x00, 0x33, 0xB3),
+            syn_key: Color32::from_rgb(0x04, 0x51, 0xA5),
+            syn_punct: Color32::from_rgb(0x80, 0x00, 0x00),
+            syn_added: Color32::from_rgb(0x11, 0x63, 0x29),
+            syn_removed: Color32::from_rgb(0xB3, 0x1D, 0x28),
         }
     }
 }

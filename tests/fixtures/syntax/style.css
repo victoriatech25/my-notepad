@@ -1,0 +1,15 @@
+/* 기본 스타일 */
+:root {
+  --accent: #1e6fd9;
+}
+
+body {
+  margin: 0;
+  font-family: "Malgun Gothic", sans-serif;
+  line-height: 1.6;
+}
+
+.page h1:hover {
+  color: var(--accent) !important;
+  padding: 4px 8px;
+}

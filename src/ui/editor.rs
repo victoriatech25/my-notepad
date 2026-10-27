@@ -32,8 +32,9 @@ use crate::core::buffer::{byte_to_char_offset, char_to_byte_offset};
 use crate::core::document::Document;
 use crate::core::highlight::{HighlightOptions, find_matches, target_word};
 use crate::core::line_ending::normalize_to_lf;
-use crate::core::markdown::{EditMap, SyntaxKind, SyntaxSpans, syntax_spans};
+use crate::core::markdown::{EditMap, SyntaxKind, syntax_spans};
 use crate::core::search::{byte_ranges_to_char_ranges, current_match_index};
+use crate::core::syntax::{Language, Token, tokenize};
 use crate::ui::theme::Palette;
 
 /// 에디터 표시 옵션.
@@ -108,11 +109,40 @@ pub struct EditorState {
     pending_top_line: Option<f32>,
     /// 마지막으로 그린 레이아웃과 화면 맨 위의 galley y — 화면 맨 위 줄 계산용.
     last_view: Option<LastView>,
-    /// Markdown 구문 색상을 칠할지 (`.md` 문서, P3-10)
-    markdown_syntax: bool,
+    /// 구문 색상 종류 (`.md` Markdown — P3-10, 코드 언어 — P6-A)
+    syntax_mode: SyntaxMode,
     /// 마지막으로 계산한 구문 색상과 아직 반영하지 않은 편집이 처음 보인 시각
     syntax: Option<Arc<SyntaxState>>,
     syntax_dirty_since: Option<f64>,
+}
+
+/// 소스에 칠할 구문 색상 종류.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SyntaxMode {
+    #[default]
+    Off,
+    /// Markdown 구문 색상 (P3-10)
+    Markdown,
+    /// 코드 문법 강조 (P6-A)
+    Code(Language),
+}
+
+impl SyntaxMode {
+    /// 상태 표시줄·메뉴에 보이는 이름 ("일반 텍스트"·"Markdown"·언어 이름).
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "일반 텍스트",
+            Self::Markdown => "Markdown",
+            Self::Code(lang) => lang.name(),
+        }
+    }
+}
+
+/// 구문 색상 한 구간의 종류.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Paint {
+    Markdown(SyntaxKind),
+    Code(Token),
 }
 
 /// 구문 색상 구간과 그 기준 텍스트 (편집 중에는 기준 텍스트와의 차이만큼 구간을 옮겨 쓴다).
@@ -120,7 +150,7 @@ pub struct EditorState {
 struct SyntaxState {
     revision: u64,
     text: String,
-    spans: SyntaxSpans,
+    spans: Vec<(Range<usize>, Paint)>,
 }
 
 /// 구문 색상을 다시 계산하기까지 기다리는 시간 (초) — 미리보기 갱신과 같다.
@@ -142,6 +172,16 @@ struct SyntaxColors {
     list: egui::Color32,
     quote: egui::Color32,
     meta: egui::Color32,
+    comment: egui::Color32,
+    string: egui::Color32,
+    number: egui::Color32,
+    keyword: egui::Color32,
+    key: egui::Color32,
+    punct: egui::Color32,
+    error: egui::Color32,
+    warning: egui::Color32,
+    added: egui::Color32,
+    removed: egui::Color32,
 }
 
 #[derive(Debug)]
@@ -170,19 +210,29 @@ impl EditorState {
             highlight: None,
             pending_top_line: None,
             last_view: None,
-            markdown_syntax: false,
+            syntax_mode: SyntaxMode::Off,
             syntax: None,
             syntax_dirty_since: None,
         }
     }
 
-    /// Markdown 구문 색상을 켜고 끈다 (`.md` 문서의 소스 보기에서 켠다).
-    pub fn set_markdown_syntax(&mut self, on: bool) {
-        self.markdown_syntax = on;
-        if !on {
+    /// 구문 색상 종류를 정한다 (`.md`면 Markdown, 코드 파일이면 그 언어 — 탭의 문법 강조 선택에 따라).
+    /// 바뀌면 지난 색상을 버리고 다음 프레임에 바로 다시 계산한다.
+    pub fn set_syntax_mode(&mut self, mode: SyntaxMode) {
+        if self.syntax_mode != mode {
+            self.syntax_mode = mode;
             self.syntax = None;
             self.syntax_dirty_since = None;
         }
+    }
+
+    /// Markdown 구문 색상을 켜고 끈다 (테스트·`.md` 문서용 줄임).
+    pub fn set_markdown_syntax(&mut self, on: bool) {
+        self.set_syntax_mode(if on {
+            SyntaxMode::Markdown
+        } else {
+            SyntaxMode::Off
+        });
     }
 
     /// 구문 색상을 칠할 바이트 범위: 지난 프레임에 보인 부분 앞뒤로 [`SYNTAX_WINDOW_MARGIN`]씩.
@@ -204,7 +254,7 @@ impl EditorState {
 
     /// 구문 색상을 문서에 맞춘다. 편집이 멈추고 [`SYNTAX_DEBOUNCE`]가 지나면 다시 계산한다.
     fn update_syntax(&mut self, doc: &Document, ctx: &egui::Context) -> Option<Arc<SyntaxState>> {
-        if !self.markdown_syntax || doc.text().len() > SYNTAX_MAX_BYTES {
+        if self.syntax_mode == SyntaxMode::Off || doc.text().len() > SYNTAX_MAX_BYTES {
             self.syntax = None;
             return None;
         }
@@ -220,7 +270,17 @@ impl EditorState {
                 self.syntax = Some(Arc::new(SyntaxState {
                     revision: doc.revision(),
                     text: doc.text().to_owned(),
-                    spans: syntax_spans(doc.text()),
+                    spans: match self.syntax_mode {
+                        SyntaxMode::Off => Vec::new(),
+                        SyntaxMode::Markdown => syntax_spans(doc.text())
+                            .into_iter()
+                            .map(|(r, k)| (r, Paint::Markdown(k)))
+                            .collect(),
+                        SyntaxMode::Code(lang) => tokenize(lang, doc.text())
+                            .into_iter()
+                            .map(|(r, t)| (r, Paint::Code(t)))
+                            .collect(),
+                    },
                 }));
                 self.syntax_dirty_since = None;
             } else {
@@ -500,6 +560,16 @@ impl EditorState {
             list: palette.md_list,
             quote: palette.md_quote,
             meta: palette.md_meta,
+            comment: palette.syn_comment,
+            string: palette.syn_string,
+            number: palette.syn_number,
+            keyword: palette.syn_keyword,
+            key: palette.syn_key,
+            punct: palette.syn_punct,
+            error: palette.status_error,
+            warning: palette.status_warning,
+            added: palette.syn_added,
+            removed: palette.syn_removed,
         };
         let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
             let text = buf.as_str();
@@ -730,21 +800,39 @@ fn syntax_job(
         }
         let mut format = base.clone();
         match kind {
-            SyntaxKind::Heading => format.color = colors.heading,
-            SyntaxKind::Emphasis => {
-                format.color = colors.emphasis;
-                format.italics = true;
+            Paint::Markdown(kind) => match kind {
+                SyntaxKind::Heading => format.color = colors.heading,
+                SyntaxKind::Emphasis => {
+                    format.color = colors.emphasis;
+                    format.italics = true;
+                }
+                SyntaxKind::Strong => format.color = colors.strong,
+                SyntaxKind::Strike => {
+                    format.color = colors.meta;
+                    format.strikethrough = egui::Stroke::new(1.0, colors.meta);
+                }
+                SyntaxKind::Code => format.color = colors.code,
+                SyntaxKind::Link => format.color = colors.link,
+                SyntaxKind::ListMarker => format.color = colors.list,
+                SyntaxKind::QuoteMarker => format.color = colors.quote,
+                SyntaxKind::Meta => format.color = colors.meta,
+            },
+            Paint::Code(token) => {
+                format.color = match token {
+                    Token::Comment => colors.comment,
+                    Token::String => colors.string,
+                    Token::Number => colors.number,
+                    Token::Keyword => colors.keyword,
+                    Token::Key => colors.key,
+                    Token::Punct => colors.punct,
+                    Token::Error => colors.error,
+                    Token::Warning => colors.warning,
+                    Token::Added => colors.added,
+                    Token::Removed => colors.removed,
+                };
+                // 주석은 기울임 (Notepad++·VS Code와 같은 관례)
+                format.italics = *token == Token::Comment;
             }
-            SyntaxKind::Strong => format.color = colors.strong,
-            SyntaxKind::Strike => {
-                format.color = colors.meta;
-                format.strikethrough = egui::Stroke::new(1.0, colors.meta);
-            }
-            SyntaxKind::Code => format.color = colors.code,
-            SyntaxKind::Link => format.color = colors.link,
-            SyntaxKind::ListMarker => format.color = colors.list,
-            SyntaxKind::QuoteMarker => format.color = colors.quote,
-            SyntaxKind::Meta => format.color = colors.meta,
         }
         job.append(&text[start..end], 0.0, format);
         pos = end;
@@ -1168,11 +1256,11 @@ mod tests {
         );
     }
 
-    /// 1MB `.md` 구문 색상 켠 상태의 입력 프레임 시간 —
-    /// `cargo test --release --lib -- --ignored --nocapture markdown_syntax_frame_time`
+    /// 1MB 문서 구문 색상 켠 상태의 입력 프레임 시간 (`.md` Markdown — P3-10, 코드 Rust — P6-A) —
+    /// `cargo test --release --lib -- --ignored --nocapture syntax_frame_time`
     #[test]
     #[ignore = "성능 측정 (릴리스 빌드로 수동 실행)"]
-    fn markdown_syntax_frame_time_1mb() {
+    fn syntax_frame_time_1mb() {
         use std::time::Instant;
 
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/markdown");
@@ -1185,11 +1273,16 @@ mod tests {
         while text.len() + unit.len() <= SYNTAX_MAX_BYTES {
             text.push_str(&unit);
         }
+        let code_unit = include_str!("../core/syntax.rs");
+        let mut code = String::new();
+        while code.len() + code_unit.len() <= SYNTAX_MAX_BYTES {
+            code.push_str(code_unit);
+        }
         let ctx = egui::Context::default();
-        let measure = |syntax: bool| {
-            let mut doc = markdown_doc(&text);
+        let measure = |text: &str, mode: SyntaxMode| {
+            let mut doc = markdown_doc(text);
             let mut editor = EditorState::new(31);
-            editor.set_markdown_syntax(syntax);
+            editor.set_syntax_mode(mode);
             editor.request_focus();
             let options = options();
             let clock = Instant::now();
@@ -1229,12 +1322,40 @@ mod tests {
             let max = typing.iter().copied().fold(0.0, f64::max);
             (avg, max, recompute)
         };
-        let (plain_avg, plain_max, _) = measure(false);
-        let (avg, max, recompute) = measure(true);
-        println!(
-            "1MB .md({} B) 입력 프레임: 색상 끔 평균 {plain_avg:.1}ms·최대 {plain_max:.1}ms / 색상 켬 평균 {avg:.1}ms·최대 {max:.1}ms, 멈춘 뒤 다시 계산 프레임 {recompute:.1}ms",
-            text.len()
-        );
+        for (name, text, mode) in [
+            (".md", &text, SyntaxMode::Markdown),
+            ("Rust", &code, SyntaxMode::Code(Language::Rust)),
+        ] {
+            let (plain_avg, plain_max, _) = measure(text, SyntaxMode::Off);
+            let (avg, max, recompute) = measure(text, mode);
+            println!(
+                "1MB {name}({} B) 입력 프레임: 색상 끔 평균 {plain_avg:.1}ms·최대 {plain_max:.1}ms / 색상 켬 평균 {avg:.1}ms·최대 {max:.1}ms, 멈춘 뒤 다시 계산 프레임 {recompute:.1}ms",
+                text.len()
+            );
+        }
+    }
+
+    #[test]
+    fn code_files_get_syntax_colors() {
+        let ctx = egui::Context::default();
+        let mut editor = EditorState::new(1);
+        editor.set_syntax_mode(SyntaxMode::Code(Language::Rust));
+        let mut doc = markdown_doc("// 주석\nfn main() { let s = \"문자열\"; let n = 42; }\n");
+        let p = Palette::light();
+        let mut at = |needle: &str| color_at(&ctx, &mut editor, &mut doc, vec![], 1.0, needle);
+        assert_eq!(at("// 주석"), Some(p.syn_comment));
+        assert_eq!(at("fn"), Some(p.syn_keyword));
+        assert_eq!(at("\"문자열\""), Some(p.syn_string));
+        assert_eq!(at("42"), Some(p.syn_number));
+        assert_ne!(at("main"), Some(p.syn_keyword));
+
+        // 언어를 바꾸면 다음 프레임에 바로 새 언어로 (YAML에서 `fn`은 키워드가 아님)
+        editor.set_syntax_mode(SyntaxMode::Code(Language::Yaml));
+        let fn_color = color_at(&ctx, &mut editor, &mut doc, vec![], 1.01, "fn");
+        assert_ne!(fn_color, Some(p.syn_keyword));
+        editor.set_syntax_mode(SyntaxMode::Off);
+        let off = color_at(&ctx, &mut editor, &mut doc, vec![], 1.02, "// 주석");
+        assert_ne!(off, Some(p.syn_comment));
     }
 
     /// 포커스를 준 에디터와 문서를 만든다.
