@@ -213,16 +213,28 @@ fn run_macos(root: &Path, version: &str) -> Result<(), String> {
     std::os::unix::fs::symlink("/Applications", staging.join("Applications"))
         .map_err(|e| format!("Applications 바로 가기 만들기 실패: {e}"))?;
 
+    // GitHub Actions macOS 러너에서 hdiutil이 가끔 "Resource busy"로 실패하므로 몇 번 다시 해 본다
     let dmg = dist.join(format!("vic-notepad-{version}-macos-universal.dmg"));
-    run_tool(
-        Command::new("hdiutil")
-            .args(["create", "-quiet", "-ov", "-fs", "HFS+", "-format", "UDZO"])
-            .args(["-volname", APP_NAME])
-            .arg("-srcfolder")
-            .arg(&staging)
-            .arg(&dmg),
-        "hdiutil",
-    )?;
+    let mut attempt = 1;
+    loop {
+        let result = run_tool(
+            Command::new("hdiutil")
+                .args(["create", "-quiet", "-ov", "-fs", "HFS+", "-format", "UDZO"])
+                .args(["-volname", APP_NAME])
+                .arg("-srcfolder")
+                .arg(&staging)
+                .arg(&dmg),
+            "hdiutil",
+        );
+        match result {
+            Err(err) if attempt < 3 => {
+                println!("  {err} — 3초 뒤 다시 시도 ({attempt}/3)");
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                attempt += 1;
+            }
+            other => break other?,
+        }
+    }
     let _ = fs::remove_dir_all(&staging);
     report(&dmg);
     Ok(())

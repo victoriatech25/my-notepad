@@ -122,7 +122,7 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | **Phase 2** | 에디터 고도화, 스마트 하이라이트, 사이드바 | 9 | 7 | G2: 일상 편집 통합 시나리오 | ✅ **완료 — G2 통과** (2026-10-24). Phase 2 기능 macOS 확인 완료 |
 | **Phase 3** | Markdown 소스 보기 / 미리보기 | 12 | 11 | G3: PLAN.md 분할 보기 시나리오 | ✅ **완료 — G3 통과** (2026-10-25). Phase 3 기능 macOS 확인 완료 · G1-1(메모장 ANSI) Windows 재확인 완료 |
 | **Phase 4** | 찾기/바꾸기 | 7 | 5 | G4: 검색·치환 통합 시나리오 | ✅ **완료 — G4 통과** (2026-10-26). Phase 4 기능 macOS 확인 완료 · G1-1(메모장 ANSI) Windows 확인 완료 |
-| **Phase 5** | 배포 및 OS 통합 | 7 | 6 | G5: 릴리스 후보 전체 회귀 | 진행 중 — P5-01·P5-02·P5-04·P5-UX 완료, P5-05 Windows 부분·P5-06 Windows 통과 (2026-10-27), **P5-03 완료** (2026-10-27) · 남은 것: `.dmg` 파이프라인(P5-05 마무리) → macOS 회귀(P5-06 🍎) → G5 |
+| **Phase 5** | 배포 및 OS 통합 | 7 | 6 | G5: 릴리스 후보 전체 회귀 | 진행 중 — P5-01·P5-02·P5-04·P5-UX 완료, P5-05 Windows 부분·P5-06 Windows 통과 (2026-10-27), **P5-03 완료** (2026-10-27) · P5-05 완료 · 남은 것: macOS 회귀(P5-06 🍎, `v0.1.0-rc.4` 설치본) → G5 |
 | **Phase 6** | 확장 기능 (2차 목표) | 백로그 | — | 착수 시 상세화 | 대기 |
 
 ### 1.1 UX 검증 일정 (사용자가 직접 써 보는 시점)
@@ -1029,11 +1029,12 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [x] 남은 UX 백로그를 함께 검토해 `보류` 항목은 Phase 6으로 이관 확정 — 🎨 2026-10-27 사용자와 검토: §9.4의 UX-001~008 모두 반영·재확인 완료, `보류` 0건 → 이관 없음 (UX가 아닌 미룬 기능은 이미 P6-B~I)
 
 #### P5-05 릴리스 파이프라인 · M
-- **상태**: 🤖 Windows 부분 완료 (2026-10-27, 브랜치 `wu/P5-05-release-pipeline`) · macOS `.dmg`는 P5-03 뒤 — `.github/workflows/release.yml`: `v*` 태그 → 태그·`Cargo.toml` 버전 일치 확인(`v<버전>[-꼬리]`, 꼬리 있으면 prerelease) → Windows·macOS 검사·테스트 → Windows `cargo xtask package`(Inno Setup 없으면 choco) → `SHA256SUMS-windows.txt` → **초안(draft) GitHub Release**에 첨부 (공개는 사람이 직접). 시험 태그 3번: `v0.1.0-rc.1`(macOS clippy `deliver` 미사용 — P5-04부터 `main` CI도 실패하던 원인, `.gitignore *.log`로 `app.log` 픽스처 누락) → `rc.2`(macOS 테스트 3건: 글꼴 목록에 Menlo 누락(Mac Roman 이름 기록) · 첫 프레임 전 `⌘` 표기 테스트) → **`rc.3` 전부 녹색**, 초안 릴리스에 setup.exe 6.0MB·portable.zip 5.9MB·체크섬, 내려받아 SHA256 일치 확인. 이 PC에서 macOS 대상 clippy: `cargo clippy --target aarch64-apple-darwin`. 남은 경고: Node.js 20 기반 actions(`checkout@v4`·`upload-artifact@v4`) 지원 종료 예정
+- **상태**: 🤖 Windows 부분 완료 (2026-10-27, 브랜치 `wu/P5-05-release-pipeline`) · **macOS `.dmg` 추가·`v0.1.0-rc.4` 녹색** (2026-10-27, 브랜치 `wu/P5-05-macos-dmg`) · **완료**: macOS 작업도 태그·버전 확인 → 검사·테스트 → `cargo xtask package`(Universal `.dmg`) → `SHA256SUMS-macos.txt` → 초안 릴리스에 함께 첨부, 릴리스 설명에 macOS 첫 실행 안내. GitHub macOS 러너의 `hdiutil create` "Resource busy" 간헐 실패에 대비해 xtask가 3초 간격 최대 3번 시도 — `.github/workflows/release.yml`: `v*` 태그 → 태그·`Cargo.toml` 버전 일치 확인(`v<버전>[-꼬리]`, 꼬리 있으면 prerelease) → Windows·macOS 검사·테스트 → Windows `cargo xtask package`(Inno Setup 없으면 choco) → `SHA256SUMS-windows.txt` → **초안(draft) GitHub Release**에 첨부 (공개는 사람이 직접). 시험 태그 3번: `v0.1.0-rc.1`(macOS clippy `deliver` 미사용 — P5-04부터 `main` CI도 실패하던 원인, `.gitignore *.log`로 `app.log` 픽스처 누락) → `rc.2`(macOS 테스트 3건: 글꼴 목록에 Menlo 누락(Mac Roman 이름 기록) · 첫 프레임 전 `⌘` 표기 테스트) → **`rc.3` 전부 녹색**, 초안 릴리스에 setup.exe 6.0MB·portable.zip 5.9MB·체크섬, 내려받아 SHA256 일치 확인. 이 PC에서 macOS 대상 clippy: `cargo clippy --target aarch64-apple-darwin`. 남은 경고: Node.js 20 기반 actions(`checkout@v4`·`upload-artifact@v4`) 지원 종료 예정
 - **산출물**: `.github/workflows/release.yml` (태그 푸시 → 빌드·테스트·패키징·아티팩트 업로드)
 - **선행**: P5-02, P5-03
 - 🤖 **자동 검증**
   - [x] 테스트 태그로 파이프라인 실행 → Windows 설치 파일·zip — 🤖 2026-10-27 `v0.1.0-rc.3` (macOS dmg는 P5-03 뒤에 다시)
+  - [x] 테스트 태그로 파이프라인 실행 → macOS Universal `.dmg`·`SHA256SUMS-macos.txt` — 🤖 2026-10-27 `v0.1.0-rc.4` 전부 녹색(약 9분 30초), 초안 릴리스에 dmg 13.3MB·체크섬, 내려받아 SHA256 일치·`x86_64 arm64`·서명 확인
   - [x] 생성물 체크섬 출력 — 🤖 2026-10-27 `SHA256SUMS-windows.txt`·작업 요약·릴리스 설명, 내려받은 파일과 일치
 
 #### P5-06 릴리스 후보 전체 회귀 · M
