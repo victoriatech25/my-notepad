@@ -43,6 +43,7 @@
 
 > 최신이 위. 대화를 마칠 때 한 줄씩 추가하고, 10줄이 넘으면 오래된 줄은 지운다 (상세는 git log·WORKPLAN §9).
 
+- 2026-10-27 — PLAN.md 제목 정렬 테스트 입력을 고정 사본(`tests/fixtures/markdown/plan_snapshot.md`)으로, 회귀 기준 23%·초과 7회 (사본 측정 22.2%)
 - 2026-10-27 — 도움말 창 3개·편집기 글꼴 Windows 🎨👤 통과, `main`에 병합
 - 2026-10-27 — 편집기 글꼴 설정 `보기 → 글꼴…`(글꼴·크기만, PLAN v0.6 §2.4) 구현, 🎨👤 확인 요청
 - 2026-10-27 — 분할 스크롤: 미리보기 줄 ↔ y 위치표에서 표를 행마다 나눔(`line_map`) — PLAN.md 제목 정렬 테스트 실패(23.0%, `main`에서도) 해결 → 19.9%
@@ -52,8 +53,3 @@
 - 2026-10-26 — P5-02 Windows 👤🎨 통과(7개 항목·설치 UX), `main`에 병합 — **P5-02 완료**
 - 2026-10-26 — P5-02 구현: Inno Setup 설치 프로그램(사용자 단위·HKCU)·포터블 zip `cargo xtask package`, 조용한 설치·제거로 레지스트리 등록·정리 확인, `docs/install.md`
 - 2026-10-26 — P5-01 Windows 👤 통과(작업 표시줄·Alt+Tab 아이콘, exe 제품명 Vic Notepad·버전 0.1.0), `main`에 병합 — **P5-01 완료**
-- 2026-10-26 — Phase 5 결정(서명 없음·Vic Notepad·아이콘 D1), P5-01 구현(`cargo xtask icons`, 창 아이콘·제품명·Windows 리소스·Info.plist)
-- 2026-10-26 — **G4 통과** (macOS §5 전 항목·통합 시나리오 1~3, 1703개 치환 결과는 grep·wc·cmp로 확인), Phase 4 완료
-- 2026-10-26 — CLAUDE.md·PROGRESS.md 추가 (새 대화에서 바로 이어 가도록)
-- 2026-10-26 — G4 준비(`cargo xtask try g4`, macos-checklist §5), G1-1 Windows 통과
-- 2026-10-26 — P4-03·P4-05·P4-06 Windows 👤 통과, P4-UX 완료(반영 0건)
