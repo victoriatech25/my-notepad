@@ -5,6 +5,7 @@
 pub mod dialogs;
 pub mod doc_view;
 pub mod editor;
+pub mod help;
 pub mod markdown_view;
 pub mod menu_bar;
 pub mod preview_images;

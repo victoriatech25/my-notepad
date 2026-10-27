@@ -10,16 +10,21 @@
 //! - P2-07: 외부 변경 확인 (`다시 불러오기` · `내 버전 유지`, 앱에서도 수정했으면 충돌 안내 + 기본 `내 버전 유지`),
 //!   디스크에서 지워진 파일을 닫을 때 저장 확인에 삭제 안내
 //! - UX-3 피드백: 모든 대화상자를 Notepad++ 형태 공통 모양(제목 띠 + `×` / 본문 / 버튼 띠)으로 통일
+//! - P5-UX: 도움말 창 3개 — 단축키 목록(검색란 + 메뉴별 표), 정규식 문법, 정보(아이콘·버전·설정 파일 위치)
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use eframe::egui::{self, RichText};
 
+use crate::branding;
+use crate::commands::Keymap;
+use crate::config::Settings;
 use crate::core::document::DiskMetadata;
 use crate::core::encoding::{TextEncoding, UnmappableChar};
 use crate::core::file_io::LoadedFile;
 use crate::tabs::Tabs;
+use crate::ui::help::{self, ShortcutSection};
 use crate::ui::tab_bar::{self, UNSAVED_PATH_HINT};
 use crate::ui::theme::Palette;
 use crate::ui::viewer;
@@ -84,6 +89,18 @@ pub enum Dialog {
         current_line: usize,
         input: String,
         error: Option<String>,
+    },
+    /// 도움말 → 단축키 목록 (P5-UX). 목록은 띄울 때 현재 키맵으로 만든다.
+    Shortcuts {
+        sections: Vec<ShortcutSection>,
+        filter: String,
+    },
+    /// 도움말 → 정규식 문법 (P5-UX)
+    RegexHelp,
+    /// 도움말 → Vic Notepad 정보 (P5-UX)
+    About {
+        /// `버전 정보 복사`를 눌렀음 (버튼 문구로 알린다)
+        copied: bool,
     },
 }
 
@@ -156,6 +173,9 @@ impl Dialog {
             Self::ConfirmEditLarge { .. } => "confirm-edit-large",
             Self::GoToLine { .. } => "go-to-line",
             Self::ExternalChange { .. } => "external-change",
+            Self::Shortcuts { .. } => "shortcuts",
+            Self::RegexHelp => "regex-help",
+            Self::About { .. } => "about",
         };
         egui::Id::unique(("app-dialog", kind))
     }
@@ -181,6 +201,14 @@ impl Dialog {
     pub fn window_list() -> Self {
         Self::WindowList {
             checked: HashSet::new(),
+        }
+    }
+
+    /// 단축키 목록 (현재 OS 키맵·표기로 만든다).
+    pub fn shortcuts(keymap: &Keymap, ctx: &egui::Context) -> Self {
+        Self::Shortcuts {
+            sections: help::shortcut_sections(keymap, ctx),
+            filter: String::new(),
         }
     }
 }
@@ -525,6 +553,55 @@ pub fn show(
                         }
                     }
                 }
+                Dialog::Shortcuts { sections, filter } => {
+                    ui.set_width(560.0);
+                    close_button = title_bar(ui, &palette, "단축키 목록");
+                    body_area(ui, |ui| shortcuts_body(ui, sections, filter));
+                    footer(ui, &palette, |ui| {
+                        if strong_button(ui, "닫기").clicked() {
+                            outcome = Some(DialogOutcome::Dismissed);
+                        }
+                    });
+                }
+                Dialog::RegexHelp => {
+                    ui.set_width(560.0);
+                    close_button = title_bar(ui, &palette, "정규식 문법");
+                    body_area(ui, regex_help_body);
+                    footer(ui, &palette, |ui| {
+                        if default_button(ui, "닫기").clicked() {
+                            outcome = Some(DialogOutcome::Dismissed);
+                        }
+                    });
+                }
+                Dialog::About { copied } => {
+                    ui.set_width(440.0);
+                    close_button =
+                        title_bar(ui, &palette, &format!("{} 정보", branding::APP_NAME));
+                    body_area(ui, about_body);
+                    let mut dismiss = false;
+                    footer_with(
+                        ui,
+                        &palette,
+                        |ui| {
+                            let label = if *copied {
+                                "복사했습니다"
+                            } else {
+                                "버전 정보 복사"
+                            };
+                            if button(ui, label)
+                                .on_hover_text("버그를 알릴 때 붙여 넣을 한 줄 (제품명·버전·OS)")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(help::version_line());
+                                *copied = true;
+                            }
+                        },
+                        |ui| dismiss = default_button(ui, "닫기").clicked(),
+                    );
+                    if dismiss {
+                        outcome = Some(DialogOutcome::Dismissed);
+                    }
+                }
             }
         });
 
@@ -680,6 +757,144 @@ fn focus_if_outside(ui: &egui::Ui, response: &egui::Response) {
     if !focus_in_dialog {
         response.request_focus();
     }
+}
+
+/// 도움말 창 본문 스크롤 영역 높이 (작은 노트북 화면에서도 버튼 띠가 보이게).
+const HELP_SCROLL_HEIGHT: f32 = 420.0;
+/// 도움말 표 왼쪽 열 폭 (묶음이 달라도 열이 맞게).
+const HELP_FIRST_COL: f32 = 230.0;
+
+/// 단축키 목록: 검색란 + 메뉴별 표 (기능 · 단축키).
+fn shortcuts_body(ui: &mut egui::Ui, sections: &[ShortcutSection], filter: &mut String) {
+    let edit = ui.add(
+        egui::TextEdit::singleline(filter)
+            .hint_text("기능 이름이나 키로 찾기 (예: 탭, F3)")
+            .desired_width(f32::INFINITY),
+    );
+    // 열자마자 입력하면 바로 걸러지게 검색란에 포커스 (닫기는 Esc)
+    focus_if_outside(ui, &edit);
+    ui.add_space(4.0);
+
+    egui::ScrollArea::vertical()
+        .max_height(HELP_SCROLL_HEIGHT)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            let mut shown = 0;
+            for section in sections {
+                let rows: Vec<_> = section.rows.iter().filter(|r| r.matches(filter)).collect();
+                if rows.is_empty() {
+                    continue;
+                }
+                shown += rows.len();
+                help_heading(ui, section.title);
+                egui::Grid::new(("shortcuts", section.title))
+                    .striped(true)
+                    .num_columns(2)
+                    .min_col_width(HELP_FIRST_COL)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        for row in rows {
+                            ui.label(row.action.as_str());
+                            ui.label(RichText::new(row.keys.as_str()).monospace());
+                            ui.end_row();
+                        }
+                    });
+            }
+            if shown == 0 {
+                ui.add_space(8.0);
+                ui.label(RichText::new("일치하는 단축키가 없습니다").weak());
+            }
+        });
+}
+
+/// 정규식 문법: 안내 + 묶음별 표 (문법 · 설명).
+fn regex_help_body(ui: &mut egui::Ui) {
+    ui.label("찾기 바에서 `.*`를 켜면 정규식으로 찾습니다. `Aa`를 끄면 대소문자를 무시합니다.");
+    ui.label(
+        RichText::new("^와 $는 줄 단위로 동작합니다. 문법은 Rust regex를 따릅니다.")
+            .small()
+            .weak(),
+    );
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical()
+        .max_height(HELP_SCROLL_HEIGHT)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (title, rows) in help::REGEX_SECTIONS {
+                help_heading(ui, title);
+                egui::Grid::new(("regex-help", *title))
+                    .striped(true)
+                    .num_columns(2)
+                    .min_col_width(HELP_FIRST_COL - 60.0)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        for (syntax, meaning) in *rows {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                for part in syntax.split("  ") {
+                                    ui.label(RichText::new(part).code());
+                                }
+                            });
+                            ui.label(*meaning);
+                            ui.end_row();
+                        }
+                    });
+            }
+        });
+}
+
+/// 정보: 아이콘 · 제품명 · 버전 · 설명 / 플랫폼 · 설정 파일 위치.
+fn about_body(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        if let Some(texture) = about_icon(ui.ctx()) {
+            ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::vec2(72.0, 72.0)));
+            ui.add_space(8.0);
+        }
+        ui.vertical(|ui| {
+            ui.add_space(6.0);
+            ui.label(RichText::new(branding::APP_NAME).size(20.0).strong());
+            ui.label(format!("버전 {}", help::VERSION));
+            ui.label(RichText::new(env!("CARGO_PKG_DESCRIPTION")).weak());
+        });
+    });
+    ui.add_space(8.0);
+    ui.separator();
+    egui::Grid::new("about")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            ui.label(RichText::new("플랫폼").weak());
+            ui.label(help::platform());
+            ui.end_row();
+            ui.label(RichText::new("설정 파일").weak());
+            let path = Settings::default_path()
+                .map_or_else(|| "(알 수 없음)".to_owned(), |p| p.display().to_string());
+            ui.add(egui::Label::new(RichText::new(path).small()).wrap());
+            ui.end_row();
+        });
+}
+
+/// 정보 창 아이콘 텍스처 (처음 열 때 한 번 만들어 둔다).
+fn about_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let id = egui::Id::unique("about-icon");
+    if let Some(texture) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(texture);
+    }
+    let icon = branding::window_icon()?;
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [icon.width as usize, icon.height as usize],
+        &icon.rgba,
+    );
+    let texture = ctx.load_texture("about-icon", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
+    Some(texture)
+}
+
+/// 도움말 표의 묶음 제목.
+fn help_heading(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.label(RichText::new(title).strong());
+    ui.add_space(2.0);
 }
 
 /// 줄 이동 입력을 1-기반 줄 번호로 읽는다. 범위 밖·숫자가 아니면 안내 문구.
@@ -1079,6 +1294,34 @@ mod tests {
             "{out:?}"
         );
         assert!(dialog.is_none());
+    }
+
+    #[test]
+    fn help_dialogs_close_with_enter_or_escape_and_filter_shortcuts() {
+        let tabs = Tabs::new();
+
+        // 정보: Enter = 닫기
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::About { copied: false });
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Enter)]);
+        assert!(matches!(out, Some(DialogOutcome::Dismissed)), "{out:?}");
+
+        // 정규식 문법: Esc = 닫기
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::RegexHelp);
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Escape)]);
+        assert!(matches!(out, Some(DialogOutcome::Dismissed)), "{out:?}");
+
+        // 단축키 목록: 열자마자 입력하면 검색란에 들어가고, Esc로 닫힌다
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::shortcuts(&Keymap::current(), &ctx));
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        frame(&ctx, &mut dialog, &tabs, vec![Event::Text("탭".into())]);
+        assert!(matches!(&dialog, Some(Dialog::Shortcuts { filter, .. }) if filter == "탭"));
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Escape)]);
+        assert!(matches!(out, Some(DialogOutcome::Dismissed)), "{out:?}");
     }
 
     #[test]

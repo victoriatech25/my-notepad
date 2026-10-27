@@ -435,6 +435,16 @@ impl Keymap {
             .map(|b| b.shortcut)
     }
 
+    /// 특정 [`Command`]에 대응하는 모든 [`KeyboardShortcut`] (도움말 → 단축키 목록, P5-UX).
+    pub fn shortcuts_for(&self, command: Command) -> Vec<KeyboardShortcut> {
+        self.bindings
+            .iter()
+            .chain(self.editor_menu_shortcuts.iter())
+            .filter(|b| b.command == command)
+            .map(|b| b.shortcut)
+            .collect()
+    }
+
     /// 메뉴 항목 우측에 표시할 단축키 문자열을 포맷한다.
     ///
     /// - 일반 단축키: `ctx.format_shortcut(...)` (Windows `Ctrl+S`, macOS `⌘S` 등)

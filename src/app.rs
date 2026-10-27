@@ -569,6 +569,11 @@ impl NotepadApp {
             Command::SetLineEnding(le) => {
                 self.tabs.active_mut().doc.set_line_ending(le);
             }
+
+            // ── 도움말 (P5-UX) ──
+            Command::ShowShortcuts => self.dialogs.push_back(Dialog::shortcuts(&self.keymap, ctx)),
+            Command::ShowRegexHelp => self.dialogs.push_back(Dialog::RegexHelp),
+            Command::ShowAbout => self.dialogs.push_back(Dialog::About { copied: false }),
             _ => {}
         }
     }

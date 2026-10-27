@@ -44,6 +44,14 @@ const SCENARIOS: &[Scenario] = &[
         work_files: &[],
     },
     Scenario {
+        name: "help",
+        package: "my-notepad",
+        args: &["--new-window"],
+        description: "P5-UX 도움말 창 3개 (도움말 메뉴 → 단축키 목록 · 정규식 문법 · Vic Notepad 정보)",
+        wait: false,
+        work_files: &[],
+    },
+    Scenario {
         name: "encoding",
         package: "my-notepad",
         args: &[],
