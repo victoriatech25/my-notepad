@@ -44,6 +44,14 @@ const SCENARIOS: &[Scenario] = &[
         work_files: &[],
     },
     Scenario {
+        name: "help",
+        package: "my-notepad",
+        args: &["--new-window"],
+        description: "P5-UX 도움말 창 3개(도움말 메뉴) + 편집기 글꼴(보기 → 글꼴…), 한글 UTF-8 픽스처 사본을 탭으로",
+        wait: false,
+        work_files: &["tests/fixtures/encoding/utf8.txt"],
+    },
+    Scenario {
         name: "encoding",
         package: "my-notepad",
         args: &[],

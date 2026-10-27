@@ -10,16 +10,24 @@
 //! - P2-07: 외부 변경 확인 (`다시 불러오기` · `내 버전 유지`, 앱에서도 수정했으면 충돌 안내 + 기본 `내 버전 유지`),
 //!   디스크에서 지워진 파일을 닫을 때 저장 확인에 삭제 안내
 //! - UX-3 피드백: 모든 대화상자를 Notepad++ 형태 공통 모양(제목 띠 + `×` / 본문 / 버튼 띠)으로 통일
+//! - P5-UX: 도움말 창 3개 — 단축키 목록(검색란 + 메뉴별 표), 정규식 문법, 정보(아이콘·버전·설정 파일 위치)
+//! - P5-UX: 글꼴 — 편집기 글꼴(목록 + 찾기 + 고정폭만)·크기만 고른다 (Notepad++ 스타일 설정처럼 세부 항목은 두지 않음)
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 
 use eframe::egui::{self, RichText};
 
+use crate::branding;
+use crate::commands::Keymap;
+use crate::config::{DEFAULT_EDITOR_FONT_SIZE, EDITOR_FONT_SIZE_RANGE, EditorFont, Settings};
 use crate::core::document::DiskMetadata;
 use crate::core::encoding::{TextEncoding, UnmappableChar};
 use crate::core::file_io::LoadedFile;
+use crate::fonts::{self, FontEntry};
 use crate::tabs::Tabs;
+use crate::ui::help::{self, ShortcutSection};
 use crate::ui::tab_bar::{self, UNSAVED_PATH_HINT};
 use crate::ui::theme::Palette;
 use crate::ui::viewer;
@@ -85,6 +93,64 @@ pub enum Dialog {
         input: String,
         error: Option<String>,
     },
+    /// 도움말 → 단축키 목록 (P5-UX). 목록은 띄울 때 현재 키맵으로 만든다.
+    Shortcuts {
+        sections: Vec<ShortcutSection>,
+        filter: String,
+    },
+    /// 도움말 → 정규식 문법 (P5-UX)
+    RegexHelp,
+    /// 도움말 → Vic Notepad 정보 (P5-UX)
+    About {
+        /// `버전 정보 복사`를 눌렀음 (버튼 문구로 알린다)
+        copied: bool,
+    },
+    /// 보기 → 글꼴… (편집기 글꼴·크기, P5-UX)
+    EditorFont(Box<FontChoice>),
+}
+
+/// 글꼴 대화상자 상태.
+#[derive(Debug)]
+pub struct FontChoice {
+    /// 설치된 글꼴 (작업 스레드에서 읽는 중이면 `None`)
+    fonts: Option<Vec<FontEntry>>,
+    loading: Option<Receiver<Vec<FontEntry>>>,
+    /// 고른 글꼴 (`None` = 기본)
+    pub selected: Option<EditorFont>,
+    pub size: f32,
+    monospace_only: bool,
+    filter: String,
+    /// 미리보기 글꼴을 바꿔 달라는 요청 (앱이 `set_fonts`로 적용하고 비운다, `Some(None)` = 기본)
+    pub preview_request: Option<Option<EditorFont>>,
+    /// 목록을 다 읽으면 지금 글꼴이 보이게 한 번 스크롤한다
+    reveal_selected: bool,
+}
+
+impl FontChoice {
+    /// 지금 설정으로 연다. 글꼴 목록은 작업 스레드에서 읽는다.
+    pub fn new(current: Option<EditorFont>, size: f32) -> Self {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(fonts::scan_fonts(&fonts::font_dirs()));
+        });
+        Self {
+            fonts: None,
+            loading: Some(rx),
+            preview_request: Some(current.clone()),
+            selected: current,
+            size,
+            monospace_only: true,
+            filter: String::new(),
+            reveal_selected: true,
+        }
+    }
+
+    fn select(&mut self, font: Option<EditorFont>) {
+        if self.selected != font {
+            self.preview_request = Some(font.clone());
+            self.selected = font;
+        }
+    }
 }
 
 /// 대화상자를 닫으며 사용자가 고른 결과.
@@ -124,6 +190,11 @@ pub enum DialogOutcome {
         tab_id: u64,
         encoding: TextEncoding,
     },
+    /// 글꼴: 편집기 글꼴·크기 적용
+    SetEditorFont {
+        font: Option<EditorFont>,
+        size: f32,
+    },
     /// 줄 이동: 1-기반 줄 번호
     GoToLine {
         tab_id: u64,
@@ -156,6 +227,10 @@ impl Dialog {
             Self::ConfirmEditLarge { .. } => "confirm-edit-large",
             Self::GoToLine { .. } => "go-to-line",
             Self::ExternalChange { .. } => "external-change",
+            Self::Shortcuts { .. } => "shortcuts",
+            Self::RegexHelp => "regex-help",
+            Self::About { .. } => "about",
+            Self::EditorFont(_) => "editor-font",
         };
         egui::Id::unique(("app-dialog", kind))
     }
@@ -181,6 +256,14 @@ impl Dialog {
     pub fn window_list() -> Self {
         Self::WindowList {
             checked: HashSet::new(),
+        }
+    }
+
+    /// 단축키 목록 (현재 OS 키맵·표기로 만든다).
+    pub fn shortcuts(keymap: &Keymap, ctx: &egui::Context) -> Self {
+        Self::Shortcuts {
+            sections: help::shortcut_sections(keymap, ctx),
+            filter: String::new(),
         }
     }
 }
@@ -525,6 +608,90 @@ pub fn show(
                         }
                     }
                 }
+                Dialog::Shortcuts { sections, filter } => {
+                    ui.set_width(560.0);
+                    close_button = title_bar(ui, &palette, "단축키 목록");
+                    body_area(ui, |ui| shortcuts_body(ui, sections, filter));
+                    footer(ui, &palette, |ui| {
+                        if strong_button(ui, "닫기").clicked() {
+                            outcome = Some(DialogOutcome::Dismissed);
+                        }
+                    });
+                }
+                Dialog::RegexHelp => {
+                    ui.set_width(560.0);
+                    close_button = title_bar(ui, &palette, "정규식 문법");
+                    body_area(ui, regex_help_body);
+                    footer(ui, &palette, |ui| {
+                        if default_button(ui, "닫기").clicked() {
+                            outcome = Some(DialogOutcome::Dismissed);
+                        }
+                    });
+                }
+                Dialog::About { copied } => {
+                    ui.set_width(440.0);
+                    close_button =
+                        title_bar(ui, &palette, &format!("{} 정보", branding::APP_NAME));
+                    body_area(ui, about_body);
+                    let mut dismiss = false;
+                    footer_with(
+                        ui,
+                        &palette,
+                        |ui| {
+                            let label = if *copied {
+                                "복사했습니다"
+                            } else {
+                                "버전 정보 복사"
+                            };
+                            if button(ui, label)
+                                .on_hover_text("버그를 알릴 때 붙여 넣을 한 줄 (제품명·버전·OS)")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(help::version_line());
+                                *copied = true;
+                            }
+                        },
+                        |ui| dismiss = default_button(ui, "닫기").clicked(),
+                    );
+                    if dismiss {
+                        outcome = Some(DialogOutcome::Dismissed);
+                    }
+                }
+                Dialog::EditorFont(choice) => {
+                    ui.set_width(520.0);
+                    close_button = title_bar(ui, &palette, "글꼴");
+                    body_area(ui, |ui| font_body(ui, &palette, choice));
+                    let mut ok = false;
+                    footer_with(
+                        ui,
+                        &palette,
+                        |ui| {
+                            if button(ui, "기본값으로")
+                                .on_hover_text(format!(
+                                    "{} · {}",
+                                    fonts::DEFAULT_MONO_NAME,
+                                    DEFAULT_EDITOR_FONT_SIZE
+                                ))
+                                .clicked()
+                            {
+                                choice.select(None);
+                                choice.size = DEFAULT_EDITOR_FONT_SIZE;
+                            }
+                        },
+                        |ui| {
+                            if button(ui, "취소").clicked() {
+                                outcome = Some(DialogOutcome::Dismissed);
+                            }
+                            ok = default_button(ui, "확인").clicked();
+                        },
+                    );
+                    if ok {
+                        outcome = Some(DialogOutcome::SetEditorFont {
+                            font: choice.selected.clone(),
+                            size: choice.size,
+                        });
+                    }
+                }
             }
         });
 
@@ -680,6 +847,312 @@ fn focus_if_outside(ui: &egui::Ui, response: &egui::Response) {
     if !focus_in_dialog {
         response.request_focus();
     }
+}
+
+/// 도움말 창 본문 스크롤 영역 높이 (작은 노트북 화면에서도 버튼 띠가 보이게).
+const HELP_SCROLL_HEIGHT: f32 = 420.0;
+/// 도움말 표 왼쪽 열 폭 (묶음이 달라도 열이 맞게).
+const HELP_FIRST_COL: f32 = 230.0;
+
+/// 단축키 목록: 검색란 + 메뉴별 표 (기능 · 단축키).
+fn shortcuts_body(ui: &mut egui::Ui, sections: &[ShortcutSection], filter: &mut String) {
+    let edit = ui.add(
+        egui::TextEdit::singleline(filter)
+            .hint_text("기능 이름이나 키로 찾기 (예: 탭, F3)")
+            .desired_width(f32::INFINITY),
+    );
+    // 열자마자 입력하면 바로 걸러지게 검색란에 포커스 (닫기는 Esc)
+    focus_if_outside(ui, &edit);
+    ui.add_space(4.0);
+
+    egui::ScrollArea::vertical()
+        .max_height(HELP_SCROLL_HEIGHT)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            let mut shown = 0;
+            for section in sections {
+                let rows: Vec<_> = section.rows.iter().filter(|r| r.matches(filter)).collect();
+                if rows.is_empty() {
+                    continue;
+                }
+                shown += rows.len();
+                help_heading(ui, section.title);
+                egui::Grid::new(("shortcuts", section.title))
+                    .striped(true)
+                    .num_columns(2)
+                    .min_col_width(HELP_FIRST_COL)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        for row in rows {
+                            ui.label(row.action.as_str());
+                            ui.label(RichText::new(row.keys.as_str()).monospace());
+                            ui.end_row();
+                        }
+                    });
+            }
+            if shown == 0 {
+                ui.add_space(8.0);
+                ui.label(RichText::new("일치하는 단축키가 없습니다").weak());
+            }
+        });
+}
+
+/// 정규식 문법: 안내 + 묶음별 표 (문법 · 설명).
+fn regex_help_body(ui: &mut egui::Ui) {
+    ui.label("찾기 바에서 `.*`를 켜면 정규식으로 찾습니다. `Aa`를 끄면 대소문자를 무시합니다.");
+    ui.label(
+        RichText::new("^와 $는 줄 단위로 동작합니다. 문법은 Rust regex를 따릅니다.")
+            .small()
+            .weak(),
+    );
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical()
+        .max_height(HELP_SCROLL_HEIGHT)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (title, rows) in help::REGEX_SECTIONS {
+                help_heading(ui, title);
+                egui::Grid::new(("regex-help", *title))
+                    .striped(true)
+                    .num_columns(2)
+                    .min_col_width(HELP_FIRST_COL - 60.0)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        for (syntax, meaning) in *rows {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                for part in syntax.split("  ") {
+                                    ui.label(RichText::new(part).code());
+                                }
+                            });
+                            ui.label(*meaning);
+                            ui.end_row();
+                        }
+                    });
+            }
+        });
+}
+
+/// 정보: 아이콘 · 제품명 · 버전 · 설명 / 플랫폼 · 설정 파일 위치.
+fn about_body(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        if let Some(texture) = about_icon(ui.ctx()) {
+            ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::vec2(72.0, 72.0)));
+            ui.add_space(8.0);
+        }
+        ui.vertical(|ui| {
+            ui.add_space(6.0);
+            ui.label(RichText::new(branding::APP_NAME).size(20.0).strong());
+            ui.label(format!("버전 {}", help::VERSION));
+            ui.label(RichText::new(env!("CARGO_PKG_DESCRIPTION")).weak());
+        });
+    });
+    ui.add_space(8.0);
+    ui.separator();
+    egui::Grid::new("about")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            ui.label(RichText::new("플랫폼").weak());
+            ui.label(help::platform());
+            ui.end_row();
+            ui.label(RichText::new("설정 파일").weak());
+            let path = Settings::default_path()
+                .map_or_else(|| "(알 수 없음)".to_owned(), |p| p.display().to_string());
+            ui.add(egui::Label::new(RichText::new(path).small()).wrap());
+            ui.end_row();
+        });
+}
+
+/// 정보 창 아이콘 텍스처 (처음 열 때 한 번 만들어 둔다).
+fn about_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let id = egui::Id::unique("about-icon");
+    if let Some(texture) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(texture);
+    }
+    let icon = branding::window_icon()?;
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [icon.width as usize, icon.height as usize],
+        &icon.rgba,
+    );
+    let texture = ctx.load_texture("about-icon", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
+    Some(texture)
+}
+
+/// 글꼴 대화상자에서 고를 수 있는 크기 (목록 밖 크기는 위 입력란으로).
+const FONT_SIZES: [f32; 15] = [
+    8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0, 28.0, 32.0,
+];
+/// 글꼴·크기 목록 높이.
+const FONT_LIST_HEIGHT: f32 = 220.0;
+/// 미리보기 글.
+const FONT_SAMPLE: &str = "The quick brown fox jumps over the lazy dog.\n0O 1lI {}[]() => != ;\n다람쥐 헌 쳇바퀴에 타고파. 한글 가나다 ABC";
+
+/// 글꼴: [글꼴 목록 | 크기 목록] / 미리보기 / 안내.
+fn font_body(ui: &mut egui::Ui, palette: &Palette, choice: &mut FontChoice) {
+    if let Some(rx) = &choice.loading {
+        match rx.try_recv() {
+            Ok(list) => {
+                // 지금 글꼴이 고정폭이 아니면 목록에 보이게 거르기를 끈다
+                if let Some(current) = &choice.selected
+                    && list.iter().any(|f| f.name == current.name && !f.monospace)
+                {
+                    choice.monospace_only = false;
+                }
+                choice.fonts = Some(list);
+                choice.loading = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => ui.ctx().request_repaint(),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                choice.fonts = Some(Vec::new());
+                choice.loading = None;
+            }
+        }
+    }
+
+    let mut picked: Option<Option<EditorFont>> = None;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 16.0;
+        // 글꼴
+        ui.vertical(|ui| {
+            ui.set_width(320.0);
+            ui.label("글꼴");
+            ui.add(
+                egui::TextEdit::singleline(&mut choice.filter)
+                    .hint_text("글꼴 이름으로 찾기")
+                    .desired_width(f32::INFINITY),
+            );
+            egui::Frame::new()
+                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                .inner_margin(2)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("font-list")
+                        .max_height(FONT_LIST_HEIGHT)
+                        .min_scrolled_height(FONT_LIST_HEIGHT)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let default_label = format!("기본 ({})", fonts::DEFAULT_MONO_NAME);
+                            if ui
+                                .selectable_label(choice.selected.is_none(), default_label)
+                                .clicked()
+                            {
+                                picked = Some(None);
+                            }
+                            let Some(list) = &choice.fonts else {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(RichText::new("글꼴 목록을 읽는 중…").weak());
+                                });
+                                return;
+                            };
+                            let filter = choice.filter.trim().to_lowercase();
+                            let reveal = std::mem::take(&mut choice.reveal_selected);
+                            for font in list.iter().filter(|f| {
+                                (!choice.monospace_only || f.monospace)
+                                    && (filter.is_empty()
+                                        || f.name.to_lowercase().contains(&filter))
+                            }) {
+                                let selected = choice
+                                    .selected
+                                    .as_ref()
+                                    .is_some_and(|s| s.name == font.name);
+                                let row = ui.selectable_label(selected, font.name.as_str());
+                                if selected && reveal {
+                                    row.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                if row.clicked() {
+                                    picked = Some(Some(EditorFont {
+                                        name: font.name.clone(),
+                                        path: font.path.clone(),
+                                        face: font.face,
+                                    }));
+                                }
+                            }
+                        });
+                });
+            ui.checkbox(&mut choice.monospace_only, "고정폭 글꼴만")
+                .on_hover_text("글자 폭이 모두 같은 글꼴 (코드·표 맞춤에 좋음)");
+        });
+        // 크기
+        ui.vertical(|ui| {
+            ui.label("크기");
+            ui.add(
+                egui::DragValue::new(&mut choice.size)
+                    .range(EDITOR_FONT_SIZE_RANGE)
+                    .speed(0.2)
+                    .fixed_decimals(0),
+            );
+            egui::Frame::new()
+                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                .inner_margin(2)
+                .show(ui, |ui| {
+                    ui.set_width(80.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("font-size-list")
+                        .max_height(FONT_LIST_HEIGHT)
+                        .min_scrolled_height(FONT_LIST_HEIGHT)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for size in FONT_SIZES {
+                                let selected = (choice.size - size).abs() < 0.01;
+                                if ui
+                                    .selectable_label(selected, format!("{size:.0}"))
+                                    .clicked()
+                                {
+                                    choice.size = size;
+                                }
+                            }
+                        });
+                });
+        });
+    });
+    if let Some(font) = picked {
+        choice.select(font);
+    }
+
+    ui.add_space(8.0);
+    ui.label("미리보기");
+    egui::Frame::new()
+        .fill(palette.dialog_footer_bg)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(4)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(90.0);
+            let font = egui::FontId::new(
+                choice.size,
+                egui::FontFamily::Name(fonts::FONT_PREVIEW_FAMILY.into()),
+            );
+            // 미리보기 패밀리는 앱이 다음 프레임에 등록한다 — 그전에는 기본 고정폭으로
+            let font = if ui.fonts(|f| f.families().contains(&font.family)) {
+                font
+            } else {
+                egui::FontId::monospace(choice.size)
+            };
+            egui::ScrollArea::horizontal()
+                .id_salt("font-sample")
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(FONT_SAMPLE).font(font)).extend());
+                });
+        });
+    ui.label(
+        RichText::new(
+            "선택한 글꼴에 없는 글자(한글 등)는 기본 글꼴로 표시합니다. \
+             확대/축소(Ctrl+= / Ctrl+-)는 이 크기에 곱해집니다.",
+        )
+        .small()
+        .weak(),
+    );
+}
+
+/// 도움말 표의 묶음 제목.
+fn help_heading(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.label(RichText::new(title).strong());
+    ui.add_space(2.0);
 }
 
 /// 줄 이동 입력을 1-기반 줄 번호로 읽는다. 범위 밖·숫자가 아니면 안내 문구.
@@ -1079,6 +1552,76 @@ mod tests {
             "{out:?}"
         );
         assert!(dialog.is_none());
+    }
+
+    #[test]
+    fn help_dialogs_close_with_enter_or_escape_and_filter_shortcuts() {
+        let tabs = Tabs::new();
+
+        // 정보: Enter = 닫기
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::About { copied: false });
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Enter)]);
+        assert!(matches!(out, Some(DialogOutcome::Dismissed)), "{out:?}");
+
+        // 정규식 문법: Esc = 닫기
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::RegexHelp);
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Escape)]);
+        assert!(matches!(out, Some(DialogOutcome::Dismissed)), "{out:?}");
+
+        // 단축키 목록: 열자마자 입력하면 검색란에 들어가고, Esc로 닫힌다
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::shortcuts(&Keymap::current(), &ctx));
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        frame(&ctx, &mut dialog, &tabs, vec![Event::Text("탭".into())]);
+        assert!(matches!(&dialog, Some(Dialog::Shortcuts { filter, .. }) if filter == "탭"));
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Escape)]);
+        assert!(matches!(out, Some(DialogOutcome::Dismissed)), "{out:?}");
+    }
+
+    #[test]
+    fn font_dialog_enter_applies_choice_and_escape_cancels() {
+        let tabs = Tabs::new();
+        let current = EditorFont {
+            name: "D2Coding".into(),
+            path: "D2Coding.ttc".into(),
+            face: 0,
+        };
+
+        // 열 때 지금 글꼴을 미리보기로 요청하고, Enter = 확인 (고른 글꼴·크기 그대로)
+        let ctx = egui::Context::default();
+        let mut choice = FontChoice::new(Some(current.clone()), 15.0);
+        assert_eq!(choice.preview_request.take(), Some(Some(current.clone())));
+        let mut dialog = Some(Dialog::EditorFont(Box::new(choice)));
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Enter)]);
+        assert!(
+            matches!(&out, Some(DialogOutcome::SetEditorFont { font: Some(f), size })
+                if *f == current && *size == 15.0),
+            "{out:?}"
+        );
+
+        // 기본값으로 = 기본 글꼴·크기, 미리보기도 기본으로
+        let mut choice = FontChoice::new(Some(current), 20.0);
+        choice.preview_request = None;
+        choice.select(None);
+        assert_eq!(choice.preview_request, Some(None));
+        choice.select(None);
+        assert_eq!(
+            choice.preview_request,
+            Some(None),
+            "같은 선택은 다시 요청하지 않음"
+        );
+
+        // Esc = 취소
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::EditorFont(Box::new(FontChoice::new(None, 13.0))));
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Escape)]);
+        assert!(matches!(out, Some(DialogOutcome::Dismissed)), "{out:?}");
     }
 
     #[test]

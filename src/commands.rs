@@ -172,6 +172,8 @@ pub enum Command {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// 편집기 글꼴·크기 대화상자 (P5-UX)
+    ShowFontDialog,
     SetViewMode(ViewMode),
     ToggleMdPreview,
     ToggleMdSplit,
@@ -241,6 +243,7 @@ impl Command {
             Self::ZoomIn => "확대".to_owned(),
             Self::ZoomOut => "축소".to_owned(),
             Self::ZoomReset => "원래 크기".to_owned(),
+            Self::ShowFontDialog => "글꼴…".to_owned(),
             Self::SetViewMode(mode) => format!("Markdown 보기: {}", mode.label()),
             Self::ToggleMdPreview => "Markdown 소스 ↔ 미리보기 전환".to_owned(),
             Self::ToggleMdSplit => "Markdown 분할 보기 토글".to_owned(),
@@ -433,6 +436,16 @@ impl Keymap {
             .chain(self.editor_menu_shortcuts.iter())
             .find(|b| b.command == command)
             .map(|b| b.shortcut)
+    }
+
+    /// 특정 [`Command`]에 대응하는 모든 [`KeyboardShortcut`] (도움말 → 단축키 목록, P5-UX).
+    pub fn shortcuts_for(&self, command: Command) -> Vec<KeyboardShortcut> {
+        self.bindings
+            .iter()
+            .chain(self.editor_menu_shortcuts.iter())
+            .filter(|b| b.command == command)
+            .map(|b| b.shortcut)
+            .collect()
     }
 
     /// 메뉴 항목 우측에 표시할 단축키 문자열을 포맷한다.

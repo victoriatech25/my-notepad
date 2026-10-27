@@ -27,7 +27,7 @@ use std::time::Instant;
 use eframe::egui::{self, FontId, Key, Modifiers, ViewportCommand};
 
 use crate::commands::{Command, KeyDispatcher, Keymap, ThemeMode, ViewMode};
-use crate::config::{Settings, WindowGeometry};
+use crate::config::{EditorFont, Settings, WindowGeometry};
 use crate::core::buffer::byte_to_char_offset;
 use crate::core::document::Document;
 use crate::core::encoding::{TextEncoding, decode_with_encoding, find_unmappable_chars};
@@ -39,7 +39,7 @@ use crate::fonts;
 use crate::single_instance::Listener;
 use crate::tabs::{ExternalChange, Tabs};
 use crate::ui::{
-    dialogs::{self, Dialog, DialogOutcome},
+    dialogs::{self, Dialog, DialogOutcome, FontChoice},
     doc_view,
     editor::{self, EditorOptions},
     markdown_view::{LinkAction, PreviewStep},
@@ -121,6 +121,11 @@ pub struct NotepadApp {
     /// 기동 후 창이 화면 안에 있는지 확인했는지
     window_checked: bool,
     zoom: f32,
+    /// 편집기 글꼴 (`None` = 기본)과 확대 전 크기 (P5-UX `보기 → 글꼴…`)
+    editor_font: Option<EditorFont>,
+    editor_font_size: f32,
+    /// 글꼴 대화상자 미리보기 글꼴을 등록해 두었는지 (닫히면 뺀다)
+    font_preview_active: bool,
     /// Markdown 분할 비율 (P3-06)
     split_ratio: f32,
     scroll_sync: bool,
@@ -161,6 +166,18 @@ impl NotepadApp {
     ) -> Self {
         let (mut font_defs, report) = fonts::explicit_chain();
         fonts::set_tab_size(&mut font_defs, f32::from(settings.tab_width));
+        // 지난번 고른 편집기 글꼴 (지워졌으면 기본 글꼴로 — 설정에서도 뺀다)
+        let mut editor_font = settings.editor_font.clone();
+        if let Some(font) = &editor_font
+            && let Err(e) = fonts::set_editor_font(
+                &mut font_defs,
+                Some((&font.path, font.face)),
+                f32::from(settings.tab_width),
+            )
+        {
+            log::warn!("편집기 글꼴 \"{}\"을 읽지 못해 기본 글꼴로: {e}", font.name);
+            editor_font = None;
+        }
         cc.egui_ctx.set_fonts(font_defs.clone());
         theme::configure_visuals(&cc.egui_ctx);
         cc.egui_ctx.set_theme(settings.theme.to_egui());
@@ -202,6 +219,9 @@ impl NotepadApp {
             window_focused: false,
             window_checked: false,
             zoom: settings.zoom,
+            editor_font,
+            editor_font_size: settings.editor_font_size,
+            font_preview_active: false,
             split_ratio: settings.split_ratio,
             scroll_sync: true,
             highlight: HighlightOptions {
@@ -284,6 +304,40 @@ impl NotepadApp {
         }
     }
 
+    // ── 편집기 글꼴 (P5-UX) ──
+
+    /// 글꼴 대화상자에서 고른 글꼴·크기를 편집기에 적용한다. 글꼴을 읽지 못하면 기본 글꼴로 두고 알린다.
+    fn apply_editor_font(&mut self, ctx: &egui::Context, font: Option<EditorFont>, size: f32) {
+        let range = crate::config::EDITOR_FONT_SIZE_RANGE;
+        self.editor_font_size = size.clamp(*range.start(), *range.end());
+        if font == self.editor_font {
+            return;
+        }
+        let tab = f32::from(self.tab_width);
+        let source = font.as_ref().map(|f| (f.path.as_path(), f.face));
+        match fonts::set_editor_font(&mut self.font_defs, source, tab) {
+            Ok(()) => self.editor_font = font,
+            Err(e) => {
+                log::warn!("편집기 글꼴 적용 실패: {e}");
+                let _ = fonts::set_editor_font(&mut self.font_defs, None, tab);
+                self.editor_font = None;
+                self.dialogs
+                    .push_back(Dialog::message("글꼴을 적용하지 못했습니다", e));
+            }
+        }
+        ctx.set_fonts(self.font_defs.clone());
+    }
+
+    /// 글꼴 대화상자 미리보기 패밀리를 바꾼다 (`None` = 기본 고정폭 체인).
+    fn set_font_preview(&mut self, ctx: &egui::Context, font: Option<&EditorFont>) {
+        let source = font.map(|f| (f.path.as_path(), f.face));
+        if let Err(e) = fonts::set_preview_font(&mut self.font_defs, source) {
+            log::warn!("글꼴 미리보기 실패: {e}");
+        }
+        self.font_preview_active = true;
+        ctx.set_fonts(self.font_defs.clone());
+    }
+
     // ── 설정 영속화 (P2-08) ──
 
     /// 지금 앱 상태를 설정으로 모은다.
@@ -293,6 +347,8 @@ impl NotepadApp {
             sidebar_open: self.sidebar_open,
             sidebar_folder: self.sidebar.folder().map(Path::to_path_buf),
             zoom: self.zoom,
+            editor_font: self.editor_font.clone(),
+            editor_font_size: self.editor_font_size,
             split_ratio: self.split_ratio,
             word_wrap: self.word_wrap,
             tab_width: self.tab_width,
@@ -530,6 +586,13 @@ impl NotepadApp {
             Command::ZoomReset => {
                 self.zoom = 1.0;
             }
+            Command::ShowFontDialog => {
+                self.dialogs
+                    .push_back(Dialog::EditorFont(Box::new(FontChoice::new(
+                        self.editor_font.clone(),
+                        self.editor_font_size,
+                    ))))
+            }
             Command::SetViewMode(mode) => self.set_view_mode(mode),
             Command::ToggleMdPreview => {
                 let tab = self.tabs.active_mut();
@@ -569,6 +632,11 @@ impl NotepadApp {
             Command::SetLineEnding(le) => {
                 self.tabs.active_mut().doc.set_line_ending(le);
             }
+
+            // ── 도움말 (P5-UX) ──
+            Command::ShowShortcuts => self.dialogs.push_back(Dialog::shortcuts(&self.keymap, ctx)),
+            Command::ShowRegexHelp => self.dialogs.push_back(Dialog::RegexHelp),
+            Command::ShowAbout => self.dialogs.push_back(Dialog::About { copied: false }),
             _ => {}
         }
     }
@@ -1696,7 +1764,7 @@ impl eframe::App for NotepadApp {
             .preview
             .set_find(preview_query.map(|q| (q, self.search.pattern(), self.search.options())));
         // 6. 본문 영역: 활성 탭 에디터
-        let font_size = ui.style().text_styles[&egui::TextStyle::Monospace].size * self.zoom;
+        let font_size = self.editor_font_size * self.zoom;
         let options = EditorOptions {
             word_wrap: self.word_wrap,
             font: FontId::monospace(font_size),
@@ -1791,8 +1859,19 @@ impl eframe::App for NotepadApp {
         // 7. 대화상자 (한 번에 하나씩)
         let mut current = self.dialogs.pop_front();
         let outcome = dialogs::show(&ctx, &mut current, &self.tabs);
+        // 글꼴 대화상자: 고른 글꼴을 미리보기 패밀리로 등록 (다음 프레임부터 미리보기에 보인다)
+        if let Some(Dialog::EditorFont(choice)) = &mut current
+            && let Some(font) = choice.preview_request.take()
+        {
+            self.set_font_preview(&ctx, font.as_ref());
+        }
         if let Some(dialog) = current {
             self.dialogs.push_front(dialog);
+        }
+        if self.font_preview_active && !matches!(self.dialogs.front(), Some(Dialog::EditorFont(_)))
+        {
+            self.set_font_preview(&ctx, None);
+            self.font_preview_active = false;
         }
         match outcome {
             Some(DialogOutcome::OpenBinary(loaded)) => {
@@ -1849,6 +1928,9 @@ impl eframe::App for NotepadApp {
             }
             Some(DialogOutcome::Reopen { tab_id, encoding }) => {
                 self.reopen_tab(&ctx, tab_id, encoding);
+            }
+            Some(DialogOutcome::SetEditorFont { font, size }) => {
+                self.apply_editor_font(&ctx, font, size);
             }
             Some(DialogOutcome::Dismissed) | None => {}
         }

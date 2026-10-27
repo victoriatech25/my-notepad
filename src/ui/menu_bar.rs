@@ -313,6 +313,7 @@ fn view_menu(
     );
 
     ui.separator();
+    menu_item(ui, ctx, keymap, "글꼴…", Command::ShowFontDialog, triggered);
     menu_item(ui, ctx, keymap, "확대", Command::ZoomIn, triggered);
     menu_item(ui, ctx, keymap, "축소", Command::ZoomOut, triggered);
     menu_item(ui, ctx, keymap, "원래 크기", Command::ZoomReset, triggered);
