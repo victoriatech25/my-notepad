@@ -310,8 +310,8 @@ cargo xtask try search      # 5-1~5-3: search_ko.txt 사본 + 1MB 로그 + 10MB 
 | :--- | :--- |
 | G3 (Phase 3) | Markdown 분할 보기 시나리오 1회 → §4 (4-9a) |
 | P4-04·P4-05·G4 (Phase 4) | 찾기 `Cmd+F`, 다음/이전 `Cmd+G` / `Cmd+Shift+G`, 바꾸기 `Cmd+Option+F` → §5 |
-| P5-03 (Phase 5) | `.dmg` 설치 후 첫 실행의 Gatekeeper 경고를 `docs/install.md` 절차(macOS 15+: 시스템 설정 → 개인정보 보호 및 보안 → 그래도 열기)로 넘기면 이후 경고 없이 실행 (서명·공증 없는 배포), Apple Silicon/Intel 실행, Finder "다음으로 열기"로 `.md` 열기·실행 중이면 같은 창의 새 탭 |
-| P5-UX·P6-A (Windows 통과 2026-10-27) — **P5-03 때 함께** | `cargo xtask try help`: 도움말 → 단축키 목록(⌘ 표기가 실제 단축키와 같은지)·정규식 문법·Vic Notepad 정보 / 보기 → 글꼴…: 목록에 macOS 글꼴(`/System/Library/Fonts`·`~/Library/Fonts`)이 보이고 기본은 Menlo, 바꾸면 편집기와 **탐색기 트리 이름이 같은 글꼴·크기**로, 재실행 후 유지 / `cargo xtask try syntax`: 예제 24개 탭의 색(라이트·다크), 상태 표시줄 언어 이름 클릭·보기 → 문법 강조로 바꾸기·끄기 |
+| P5-03 (Phase 5) — ✅ 2026-10-27 | `.dmg` 설치 후 첫 실행의 Gatekeeper 경고를 `docs/install.md` 절차(macOS 15+: 시스템 설정 → 개인정보 보호 및 보안 → 그래도 열기)로 넘기면 이후 경고 없이 실행 (서명·공증 없는 배포), Apple Silicon/Intel 실행, Finder "다음으로 열기"로 `.md` 열기·실행 중이면 같은 창의 새 탭 |
+| P5-UX·P6-A (Windows 통과 2026-10-27) — **P5-03 때 함께** ✅ 2026-10-27 | `cargo xtask try help`: 도움말 → 단축키 목록(⌘ 표기가 실제 단축키와 같은지)·정규식 문법·Vic Notepad 정보 / 보기 → 글꼴…: 목록에 macOS 글꼴(`/System/Library/Fonts`·`~/Library/Fonts`)이 보이고 기본은 Menlo, 바꾸면 편집기와 **탐색기 트리 이름이 같은 글꼴·크기**로, 재실행 후 유지 / `cargo xtask try syntax`: 예제 24개 탭의 색(라이트·다크), 상태 표시줄 언어 이름 클릭·보기 → 문법 강조로 바꾸기·끄기 |
 | P5-06 (Phase 5) | `docs/manual-test.md` 전체 항목 macOS 통과 |
 
 ## 장비 전환 규칙 요약 (§0.8)
