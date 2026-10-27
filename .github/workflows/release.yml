@@ -1,0 +1,134 @@
+# 릴리스 파이프라인 (P5-05): `v*` 태그를 push하면 빌드·테스트·패키징 → 체크섬 → 초안(draft) GitHub Release에 첨부.
+#
+# - 태그는 `Cargo.toml` 버전과 맞아야 한다: `v0.1.0` 또는 `v0.1.0-rc.1`처럼 `v<버전>[-꼬리]`
+#   (`-`가 붙으면 시험판 prerelease로 올린다)
+# - Windows: `cargo xtask package` → 설치 프로그램(Inno Setup)·포터블 zip
+# - macOS: 지금은 검사·테스트만 — `.app`·`.dmg` 패키징은 P5-03에서 더한다
+# - 릴리스는 초안으로만 만든다. 공개(publish)는 사람이 확인한 뒤 GitHub에서 직접 한다
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows 패키지
+    runs-on: windows-latest
+    steps:
+      - name: Configure git core.autocrlf
+        run: git config --global core.autocrlf false
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check tag matches Cargo.toml version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"$' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $tag = "${{ github.ref_name }}"
+          if ($tag -ne "v$version" -and -not $tag.StartsWith("v$version-")) {
+            Write-Error "태그 $tag 가 Cargo.toml 버전 $version 과 맞지 않습니다 (v$version 또는 v$version-...)"
+            exit 1
+          }
+          "버전 $version · 태그 $tag"
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Environment doctor
+        run: cargo xtask doctor
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Ensure Inno Setup 6
+        shell: pwsh
+        run: |
+          $known = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe")
+          if (-not (Get-Command ISCC.exe -ErrorAction SilentlyContinue) -and -not ($known | Where-Object { Test-Path $_ })) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Package (installer + portable zip)
+        run: cargo xtask package
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Set-Location target/dist
+          $lines = Get-ChildItem -File -Filter "vic-notepad-*" | Sort-Object Name | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          }
+          $lines | Set-Content -Encoding utf8NoBOM SHA256SUMS-windows.txt
+          $lines
+          "### Windows SHA256`n``````n$($lines -join "`n")`n``````" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            target/dist/vic-notepad-*
+            target/dist/SHA256SUMS-windows.txt
+          if-no-files-found: error
+
+  macos:
+    name: macOS 검사 (패키징은 P5-03)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Environment doctor
+        run: cargo xtask doctor
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
+
+  release:
+    name: 초안 릴리스
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          {
+            echo "Vic Notepad ${TAG} — 서명 없는 배포 (설치 시 SmartScreen \"추가 정보 → 실행\", docs/install.md)"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS-*.txt
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --draft $prerelease \
+            --title "Vic Notepad ${TAG}" --notes-file notes.md
