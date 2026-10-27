@@ -1689,12 +1689,15 @@ impl eframe::App for NotepadApp {
                 .default_size(self.settings.sidebar_width)
                 .size_range(140.0..=480.0)
                 .show(ui, |ui| {
+                    // 트리 이름은 편집기와 똑같은 글꼴·크기 (편집기 글꼴 × 확대율, P5-UX)
+                    let name_font = FontId::monospace(self.editor_font_size * self.zoom);
                     sidebar_action = sidebar::show(
                         ui,
                         &mut self.sidebar,
                         &palette,
                         &toggle_shortcut,
                         current.as_deref(),
+                        &name_font,
                     );
                 });
             self.settings.sidebar_width = panel.response.rect.width().round();
