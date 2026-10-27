@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::mem;
+use std::path::PathBuf;
 use std::rc::Weak;
 use std::time::Instant;
 
@@ -9,7 +10,9 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
     NSApplicationTerminateReply, NSRunningApplication,
 };
-use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProtocol};
+use objc2_foundation::{
+    MainThreadMarker, NSArray, NSNotification, NSObject, NSObjectProtocol, NSURL,
+};
 
 use super::event_handler::EventHandler;
 use super::event_loop::{notify_windows_of_exit, stop_app_immediately, ActiveEventLoop, PanicInfo};
@@ -77,8 +80,24 @@ declare_class!(
         fn app_should_terminate(&self, sender: &NSApplication) -> NSApplicationTerminateReply {
             self.should_terminate(sender)
         }
+
+        #[method(application:openURLs:)]
+        fn app_open_urls(&self, _application: &NSApplication, urls: &NSArray<NSURL>) {
+            self.open_urls(urls)
+        }
     }
 );
+
+thread_local! {
+    /// My-Notepad: receives the files from `application:openURLs:`. Set on the main thread with
+    /// `platform::macos::set_open_files_handler` before the event loop runs.
+    static OPEN_FILES_HANDLER: RefCell<Option<Box<dyn Fn(Vec<PathBuf>)>>> =
+        const { RefCell::new(None) };
+}
+
+pub(crate) fn set_open_files_handler(handler: Box<dyn Fn(Vec<PathBuf>)>) {
+    OPEN_FILES_HANDLER.with(|slot| *slot.borrow_mut() = Some(handler));
+}
 
 impl ApplicationDelegate {
     pub(super) fn new(
@@ -190,6 +209,30 @@ impl ApplicationDelegate {
             self.maybe_queue_window_event(window_id, WindowEvent::CloseRequested);
         }
         NSApplicationTerminateReply::NSTerminateCancel
+    }
+
+    /// My-Notepad: Finder "Open With", double-click on an associated document, dropping a file on
+    /// the Dock icon and `open -a` all send an `odoc` Apple event, which AppKit turns into
+    /// `application:openURLs:`. Without this method AppKit shows "cannot open files" and winit
+    /// has no event for it, so hand the file paths to the app's handler instead.
+    /// The first batch can arrive before `applicationDidFinishLaunching:` (launch by opening a
+    /// file), so the handler must queue them rather than expect a window.
+    fn open_urls(&self, urls: &NSArray<NSURL>) {
+        trace_scope!("application:openURLs:");
+        let paths: Vec<PathBuf> = urls
+            .iter()
+            .filter(|url| unsafe { url.isFileURL() })
+            .filter_map(|url| unsafe { url.path() })
+            .map(|path| PathBuf::from(path.to_string()))
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        OPEN_FILES_HANDLER.with(|slot| {
+            if let Some(handler) = slot.borrow().as_ref() {
+                handler(paths);
+            }
+        });
     }
 
     fn will_terminate(&self, _notification: &NSNotification) {

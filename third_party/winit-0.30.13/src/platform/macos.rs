@@ -380,6 +380,14 @@ impl WindowAttributesExtMacOS for WindowAttributes {
     }
 }
 
+/// My-Notepad: calls `handler` with the paths of files the system asks the app to open
+/// (Finder "Open With", double-click on an associated document, dropping on the Dock icon,
+/// `open -a`). Must be called on the main thread before the event loop runs, so that files that
+/// launched the app are not lost; they can arrive before any window exists.
+pub fn set_open_files_handler(handler: impl Fn(Vec<std::path::PathBuf>) + 'static) {
+    crate::platform_impl::set_open_files_handler(Box::new(handler));
+}
+
 pub trait EventLoopBuilderExtMacOS {
     /// Sets the activation policy for the application. If used, this will override
     /// any relevant settings provided in the package manifest.

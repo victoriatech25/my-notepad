@@ -6,13 +6,16 @@
 //! - Windows: 이름 있는 뮤텍스(`Local\…`)로 첫 인스턴스를 가리고, 이름 있는 파이프(`\\.\pipe\…`)로 경로를 넘긴다.
 //!   보내는 쪽이 `AllowSetForegroundWindow`로 받는 쪽에 포커스 권한을 넘겨, 최소화된 창도 복원해 앞으로 나온다.
 //!   탐색기에서 여러 파일을 고르면 프로세스가 파일마다 거의 동시에 뜨므로, 파이프가 바쁘면 잠시 기다렸다 다시 붙는다
-//! - macOS: `.app` 번들은 OS가 이미 하나만 띄운다 (Finder 파일 열기 이벤트는 P5-03). 그 밖의 OS에서는 아무것도 하지 않는다
+//! - macOS: `.app` 번들은 OS가 이미 하나만 띄우고, Finder에서 연 파일(다음으로 열기·더블클릭·Dock 아이콘에 끌어 놓기)은
+//!   실행 인자가 아니라 `application:openURLs:`로 온다 (P5-03). winit 사본의 훅(`third_party/README.md` 수정 5)으로 받아
+//!   Windows 파이프와 같은 경로로 넘긴다. 앱을 실행시킨 첫 파일은 창이 생기기 전에 오므로 채널에 쌓였다가 첫 프레임에 열린다.
+//!   그 밖의 OS에서는 아무것도 하지 않는다
 //!
 //! 메시지(바이트): `[파일 수 u32 LE]` + 파일마다 `[UTF-16 길이 u32 LE][UTF-16 LE]`, 받는 쪽은 1바이트로 응답한다.
 
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -86,7 +89,12 @@ pub fn acquire(files: &[PathBuf]) -> Startup {
         let name = win::instance_name();
         win::acquire_named(&name, files)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = files;
+        Startup::Primary(mac::listen())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = files;
         Startup::Primary(Listener::none())
@@ -165,8 +173,8 @@ fn path_of(wide: &[u16]) -> PathBuf {
     PathBuf::from(String::from_utf16_lossy(wide))
 }
 
-/// 받은 요청을 앱에 넘기고 화면을 깨운다. (파이프 서버는 Windows 전용 — 다른 OS에서는 테스트만 쓴다)
-#[cfg(any(windows, test))]
+/// 받은 요청을 앱에 넘기고 화면을 깨운다. (Windows 파이프 서버·macOS 파일 열기 이벤트, 그 밖의 OS에서는 테스트만 쓴다)
+#[cfg(any(windows, target_os = "macos", test))]
 fn deliver(tx: &Sender<Vec<PathBuf>>, target: &Mutex<Target>, files: Vec<PathBuf>) {
     let _ = tx.send(files);
     let target = target.lock().unwrap_or_else(|e| e.into_inner());
@@ -176,6 +184,27 @@ fn deliver(tx: &Sender<Vec<PathBuf>>, target: &Mutex<Target>, files: Vec<PathBuf
     }
     if let Some(ctx) = &target.ctx {
         ctx.request_repaint();
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use super::{Listener, Target, deliver};
+    use std::sync::{Arc, Mutex, mpsc};
+
+    /// Finder가 여는 파일을 받기 시작한다 — 이벤트 루프가 돌기 전에, 메인 스레드에서 불러야 한다
+    pub fn listen() -> Listener {
+        let (tx, rx) = mpsc::channel();
+        let target = Arc::new(Mutex::new(Target::default()));
+        let shared = Arc::clone(&target);
+        winit::platform::macos::set_open_files_handler(move |files| {
+            log::info!("Finder에서 파일 {}개 열기 요청", files.len());
+            deliver(&tx, &shared, files);
+        });
+        Listener {
+            requests: Some(rx),
+            target,
+        }
     }
 }
 
