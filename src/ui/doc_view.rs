@@ -759,7 +759,7 @@ mod tests {
                 let source_y =
                     tab.editor.offset_for_line(&tab.doc, line, 0.0).unwrap() - source_offset;
                 let preview_y =
-                    markdown_view::line_to_y(tab.preview.positions(), line) - preview_offset;
+                    markdown_view::line_to_y(tab.preview.line_map(), line) - preview_offset;
                 // 두 쪽 모두 화면 안에 보이는 제목만
                 if (0.0..height).contains(&source_y) && (0.0..height).contains(&preview_y) {
                     let diff = (source_y - preview_y).abs() / height;
@@ -783,7 +783,8 @@ mod tests {
         );
         assert!(checked > 50, "확인한 제목이 너무 적음: {checked}");
         // 두 쪽 레이아웃 차이(소스 줄바꿈, 미리보기 표 칸 줄바꿈 — P3-03 사용자 결정)로 큰 표 근처 제목은 10%를
-        // 넘을 수 있다 — 회귀 방지 기준 (P3-08 11.0% → P3-03 표 줄바꿈 후 19.0%)
+        // 넘을 수 있다 — 회귀 방지 기준 (P3-08 11.0% → P3-03 표 줄바꿈 후 19.0% → Phase 5 §7 표 행 추가로 23.0% —
+        // 표를 블록 하나로 두고 줄 비율로 나누던 것을 행마다 나눠(`line_map`) 19.9%)
         assert!(worst <= 0.22, "최대 차이 {:.1}% > 22%", worst * 100.0);
         assert!(
             over * 10 <= checked,

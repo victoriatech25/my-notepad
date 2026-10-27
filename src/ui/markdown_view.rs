@@ -78,7 +78,10 @@ pub struct PreviewState {
     cache: MarkdownCache,
     /// 마지막으로 그린 파싱 결과 (제목 줄 조회용)
     parsed: Option<std::sync::Arc<markdown::Document>>,
+    /// 최상위 블록마다의 위치 (블록 순서와 같다 — 그리기·찾기·더블클릭용)
     positions: Vec<BlockPos>,
+    /// 소스 줄 ↔ y 변환용 위치표 (표는 행마다 — [`HeightCache::line_map`])
+    line_map: Vec<BlockPos>,
     /// 마지막 프레임의 세로 스크롤 위치
     offset_y: f32,
     /// 마지막 프레임의 보이는 높이와 세로 스크롤 최대값
@@ -172,6 +175,8 @@ struct HeightCache {
     /// (본문 폭 px, 확대 배율 ×100, 다크 모드)
     layout: Option<(i32, i32, bool)>,
     heights: HashMap<u64, f32>,
+    /// 최상위 표 블록의 행 높이 (원문 해시 → [머리글, 1행, 2행, …]) — 줄 ↔ y 위치표용
+    table_rows: HashMap<u64, Vec<f32>>,
     /// `keys`를 계산한 파싱 결과
     keys_for: Option<Arc<markdown::Document>>,
     /// 최상위 블록마다의 원문 해시
@@ -188,6 +193,7 @@ impl PreviewState {
             cache: MarkdownCache::default(),
             parsed: None,
             positions: Vec::new(),
+            line_map: Vec::new(),
             offset_y: 0.0,
             view_height: 0.0,
             max_offset: 0.0,
@@ -282,12 +288,12 @@ impl PreviewState {
 
     /// 마지막으로 그린 화면에서 위로부터 `dy`만큼 내려간 곳의 소스 줄.
     pub fn line_at(&self, dy: f32) -> Option<f32> {
-        (!self.positions.is_empty()).then(|| y_to_line(&self.positions, self.offset_y + dy))
+        (!self.line_map.is_empty()).then(|| y_to_line(&self.line_map, self.offset_y + dy))
     }
 
     /// `line`이 위로부터 `dy` 위치에 오는 세로 스크롤 위치 (0 미만이면 0).
     pub fn offset_for_line(&self, line: f32, dy: f32) -> f32 {
-        (line_to_y(&self.positions, line) - dy).max(0.0)
+        (line_to_y(&self.line_map, line) - dy).max(0.0)
     }
 
     /// 마지막 프레임의 (스크롤 비율 0~1, 보이는 높이). 스크롤할 내용이 없으면 비율은 0.
@@ -337,6 +343,11 @@ impl PreviewState {
     /// 마지막으로 그린 최상위 블록 위치표.
     pub fn positions(&self) -> &[BlockPos] {
         &self.positions
+    }
+
+    /// 소스 줄 ↔ y 변환용 위치표 ([`line_to_y`]·[`y_to_line`]에 넘긴다 — 표는 행마다 나뉘어 있다).
+    pub fn line_map(&self) -> &[BlockPos] {
+        &self.line_map
     }
 
     /// 문서가 통째로 바뀌었을 때 다음 그리기에서 다시 파싱하게 한다.
@@ -422,15 +433,17 @@ impl PreviewState {
         let mut jumped_line = None;
         if parsing {
             self.positions.clear();
+            self.line_map.clear();
         } else {
             let heights = &mut self.heights;
             heights.prepare(&parsed, doc, width, zoom, ui.visuals().dark_mode);
             heights.measure_missing(ui, &parsed.blocks, &style, width);
             self.positions = heights.positions(&parsed.blocks, &style);
+            self.line_map = heights.line_map(&parsed.blocks, &self.positions);
             if let Some(anchor) = self.pending_anchor.take() {
                 match link::anchor_line(&parsed, &anchor) {
                     Some(line) => {
-                        self.pending_offset = Some(anchor_offset(&self.positions, line));
+                        self.pending_offset = Some(anchor_offset(&self.line_map, line));
                         jumped_line = Some(line);
                     }
                     None => link_action = Some(LinkAction::Notice(missing_anchor(&anchor))),
@@ -527,7 +540,7 @@ impl PreviewState {
             top: p.top,
         });
         if let Some(line) = self.pending_top_line.take() {
-            self.pending_offset = Some(line_to_y(&self.positions, line));
+            self.pending_offset = Some(line_to_y(&self.line_map, line));
             ui.ctx().request_repaint();
         }
         // 찾기: 그려진 현재 매치가 화면 위·아래 밖이면 가운데로 (긴 블록 안의 매치).
@@ -612,7 +625,7 @@ impl PreviewState {
                     .map(|p| p.top - MARGIN as f32),
                 Jump::BackToRef(label) => parsed
                     .footnote_ref_line(&label)
-                    .map(|line| line_to_y(&self.positions, line as f32) - view.height() / 3.0),
+                    .map(|line| line_to_y(&self.line_map, line as f32) - view.height() / 3.0),
             };
             if let Some(y) = target {
                 self.pending_offset = Some(y.max(0.0));
@@ -653,7 +666,7 @@ impl PreviewState {
         match link::anchor_line(parsed, anchor) {
             Some(line) => {
                 *jumped_line = Some(line);
-                Some(anchor_offset(&self.positions, line))
+                Some(anchor_offset(&self.line_map, line))
             }
             None => {
                 *link_action = Some(LinkAction::Notice(missing_anchor(anchor)));
@@ -795,6 +808,8 @@ struct Style<'a> {
     broken_links: RefCell<HashMap<String, bool>>,
     /// 미리보기 찾기 강조 (P4-06)
     find: Option<FindPaint>,
+    /// 방금 그린 표의 행 높이 ([`table`]이 남기고 최상위 블록을 그린 쪽이 가져간다 — 줄 ↔ y 위치표용)
+    table_rows: RefCell<Option<Vec<f32>>>,
 }
 
 /// 그리는 동안의 미리보기 찾기 강조 상태.
@@ -838,6 +853,7 @@ impl<'a> Style<'a> {
             jump: RefCell::new(None),
             broken_links: RefCell::new(HashMap::new()),
             find: None,
+            table_rows: RefCell::new(None),
         }
     }
 
@@ -1085,6 +1101,7 @@ impl HeightCache {
         if self.layout != Some(layout) {
             self.layout = Some(layout);
             self.heights.clear();
+            self.table_rows.clear();
         }
         if !self
             .keys_for
@@ -1122,8 +1139,57 @@ impl HeightCache {
                 .rect
                 .height();
             self.heights.insert(self.keys[i], height);
+            self.take_table_rows(&blocks[i], i, style);
             self.measured += 1;
         }
+    }
+
+    /// 방금 그린 블록이 최상위 표면 [`table`]이 남긴 행 높이를 보관한다 (목록 안의 표 등은 버린다).
+    fn take_table_rows(&mut self, block: &Block, index: usize, style: &Style) {
+        if let Some(rows) = style.table_rows.take()
+            && matches!(block.kind, BlockKind::Table { .. })
+        {
+            self.table_rows.insert(self.keys[index], rows);
+        }
+    }
+
+    /// 줄 ↔ y 위치표: [`Self::positions`]에서 최상위 표를 행마다 나눈다. 표 행은 길이에 따라 높이가 크게 달라
+    /// 블록 하나로 두고 줄 비율로 나누면 큰 표 근처에서 분할 스크롤이 어긋난다. GFM 표는 행마다 소스 한 줄이다
+    /// (머리글 + 구분 줄 = 머리글 행, 그 뒤 한 줄 = 한 행). 줄 수가 맞지 않거나 아직 그리지 않았으면 블록 그대로.
+    fn line_map(&self, blocks: &[Block], positions: &[BlockPos]) -> Vec<BlockPos> {
+        let mut map = Vec::with_capacity(positions.len());
+        for (i, (block, &pos)) in blocks.iter().zip(positions).enumerate() {
+            let rows = self
+                .table_rows
+                .get(&self.keys[i])
+                .filter(|rows| block.last_line + 1 - block.first_line == rows.len() + 1);
+            let Some(rows) = rows else {
+                map.push(pos);
+                continue;
+            };
+            let mut top = pos.top;
+            for (r, &height) in rows.iter().enumerate() {
+                let (first_line, last_line) = if r == 0 {
+                    (block.first_line, block.first_line + 1)
+                } else {
+                    (block.first_line + 1 + r, block.first_line + 1 + r)
+                };
+                // 마지막 행은 블록 끝(가로 스크롤 여백 등)까지
+                let height = if r + 1 == rows.len() {
+                    (pos.top + pos.height - top).max(0.0)
+                } else {
+                    height
+                };
+                map.push(BlockPos {
+                    first_line,
+                    last_line,
+                    top,
+                    height,
+                });
+                top += height;
+            }
+        }
+        map
     }
 
     /// 원문 해시가 `key`인 블록 중 `index`에 가장 가까운 것.
@@ -1201,6 +1267,7 @@ impl HeightCache {
             if let Some(find) = &style.find {
                 find.block.set(None);
             }
+            self.take_table_rows(block, i, style);
             let rect = child.min_rect();
             self.rendered += 1;
             if let Some((line, color)) = style.cursor
@@ -1530,6 +1597,7 @@ fn table(
         })
         .collect();
     let size = egui::vec2(widths.iter().sum(), heights.iter().sum());
+    style.table_rows.replace(Some(heights.clone()));
 
     // 가로 스크롤바가 마지막 행을 가리지 않도록 아래 여백을 둔다.
     ui.spacing_mut().scroll.content_margin.bottom = ui.spacing().scroll.bar_width as i8;
@@ -2982,9 +3050,48 @@ mod tests {
         assert!(output.jumped_line.is_some(), "{:?}", output.link);
     }
 
+    /// 표의 행 높이가 크게 달라도 줄 → y가 실제로 그린 행 위치와 맞는다 (분할 스크롤 동기화 기준).
+    /// 표를 블록 하나로 두고 줄 비율로 나누면 긴 행 뒤의 행이 수십 px 위로 계산된다.
+    #[test]
+    fn line_map_follows_table_row_heights() {
+        let long = "아주 긴 칸 ".repeat(60);
+        let text = format!(
+            "앞 문단\n\n| 이름 | 설명 |\n| :--- | :--- |\n| 첫행 | 짧음 |\n| 긴행 | {long} |\n| 끝행 | 짧음 |\n\n뒤 문단\n"
+        );
+        let d = doc(&text);
+        let ctx = egui::Context::default();
+        let mut state = PreviewState::new(1);
+        let mut texts = Vec::new();
+        for _ in 0..4 {
+            texts = output_frame(&ctx, &mut state, &d, Vec::new()).1;
+        }
+        let y_of = |needle: &str| {
+            texts
+                .iter()
+                .find(|(t, _, _)| t == needle)
+                .unwrap_or_else(|| panic!("{needle} 안 그려짐"))
+                .1
+                .y
+        };
+        // 표: 머리글(2·3줄) + 행 3개(4·5·6줄) → 위치표 4칸
+        let map = state.line_map();
+        assert_eq!(map.len(), state.positions().len() + 3, "{map:?}");
+        let drawn = y_of("끝행") - y_of("첫행");
+        let mapped = line_to_y(map, 6.0) - line_to_y(map, 4.0);
+        assert!(drawn > 100.0, "긴 행이 줄바꿈되어야 함: {drawn}");
+        assert!(
+            (drawn - mapped).abs() <= 1.0,
+            "그린 {drawn} · 위치표 {mapped}"
+        );
+        for line in [2.0, 3.5, 4.0, 5.25, 6.0] {
+            let back = y_to_line(map, line_to_y(map, line));
+            assert!((back - line).abs() < 1e-3, "{line} → {back}");
+        }
+    }
+
     /// 제목 줄이 스크롤되어 화면 안(문서 끝이라 맨 위까지 못 오면 그 아래)에 보인다.
     fn assert_heading_on_screen(state: &PreviewState, line: usize) {
-        let y = line_to_y(state.positions(), line as f32) - state.offset_y();
+        let y = line_to_y(state.line_map(), line as f32) - state.offset_y();
         assert!(state.offset_y() > 0.0, "스크롤하지 않음");
         assert!((0.0..760.0).contains(&y), "제목이 화면 밖: y {y}");
     }
