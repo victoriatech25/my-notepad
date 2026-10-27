@@ -39,6 +39,20 @@ pub struct WindowGeometry {
     pub maximized: bool,
 }
 
+/// 편집기 글꼴 (P5-UX, `보기 → 글꼴…`). 시작할 때 글꼴 폴더를 다시 훑지 않도록 파일 경로까지 기억한다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorFont {
+    pub name: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub face: u32,
+}
+
+/// 편집기 글꼴 크기 기본값 (egui 기본 고정폭 크기와 같다).
+pub const DEFAULT_EDITOR_FONT_SIZE: f32 = 13.0;
+/// 글꼴 대화상자에서 고를 수 있는 크기 범위.
+pub const EDITOR_FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 6.0..=48.0;
+
 /// 사용자 설정 전체.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -48,6 +62,10 @@ pub struct Settings {
     pub sidebar_width: f32,
     /// 사이드바에 마지막으로 연 폴더
     pub sidebar_folder: Option<PathBuf>,
+    /// 편집기 글꼴 (`None` = 기본: Windows Consolas · macOS Menlo)
+    pub editor_font: Option<EditorFont>,
+    /// 편집기 글꼴 크기 (확대율을 곱하기 전)
+    pub editor_font_size: f32,
     /// 에디터 글꼴 확대율 (1.0 = 100%)
     pub zoom: f32,
     pub word_wrap: bool,
@@ -76,6 +94,8 @@ impl Default for Settings {
             sidebar_open: true,
             sidebar_width: 220.0,
             sidebar_folder: None,
+            editor_font: None,
+            editor_font_size: DEFAULT_EDITOR_FONT_SIZE,
             zoom: 1.0,
             word_wrap: true,
             tab_width: 4,
@@ -198,6 +218,14 @@ impl Settings {
         } else {
             1.0
         };
+        self.editor_font_size = if self.editor_font_size.is_finite() {
+            self.editor_font_size.clamp(
+                *EDITOR_FONT_SIZE_RANGE.start(),
+                *EDITOR_FONT_SIZE_RANGE.end(),
+            )
+        } else {
+            DEFAULT_EDITOR_FONT_SIZE
+        };
         if ![2, 4, 8].contains(&self.tab_width) {
             self.tab_width = 4;
         }
@@ -282,6 +310,12 @@ mod tests {
             sidebar_open: false,
             sidebar_width: 300.0,
             sidebar_folder: Some(PathBuf::from("C:/devel/프로젝트")),
+            editor_font: Some(EditorFont {
+                name: "D2Coding".into(),
+                path: PathBuf::from("C:/Windows/Fonts/D2Coding.ttc"),
+                face: 1,
+            }),
+            editor_font_size: 15.0,
             zoom: 1.3,
             word_wrap: false,
             tab_width: 8,
@@ -347,6 +381,7 @@ mod tests {
     fn out_of_range_values_are_fixed() {
         let mut s = Settings {
             zoom: 9.0,
+            editor_font_size: 200.0,
             tab_width: 3,
             sidebar_width: 5.0,
             window: Some(WindowGeometry {
@@ -361,6 +396,10 @@ mod tests {
         };
         s.sanitize();
         assert_eq!(s.zoom, 3.0);
+        assert_eq!(s.editor_font_size, 48.0);
+        s.editor_font_size = f32::NAN;
+        s.sanitize();
+        assert_eq!(s.editor_font_size, DEFAULT_EDITOR_FONT_SIZE);
         assert_eq!(s.tab_width, 4);
         assert_eq!(s.sidebar_width, 140.0);
         assert_eq!(s.window, None, "너무 작은 창 크기는 버림");

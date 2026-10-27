@@ -172,6 +172,8 @@ pub enum Command {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// 편집기 글꼴·크기 대화상자 (P5-UX)
+    ShowFontDialog,
     SetViewMode(ViewMode),
     ToggleMdPreview,
     ToggleMdSplit,
@@ -241,6 +243,7 @@ impl Command {
             Self::ZoomIn => "확대".to_owned(),
             Self::ZoomOut => "축소".to_owned(),
             Self::ZoomReset => "원래 크기".to_owned(),
+            Self::ShowFontDialog => "글꼴…".to_owned(),
             Self::SetViewMode(mode) => format!("Markdown 보기: {}", mode.label()),
             Self::ToggleMdPreview => "Markdown 소스 ↔ 미리보기 전환".to_owned(),
             Self::ToggleMdSplit => "Markdown 분할 보기 토글".to_owned(),

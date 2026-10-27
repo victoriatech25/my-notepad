@@ -11,18 +11,21 @@
 //!   디스크에서 지워진 파일을 닫을 때 저장 확인에 삭제 안내
 //! - UX-3 피드백: 모든 대화상자를 Notepad++ 형태 공통 모양(제목 띠 + `×` / 본문 / 버튼 띠)으로 통일
 //! - P5-UX: 도움말 창 3개 — 단축키 목록(검색란 + 메뉴별 표), 정규식 문법, 정보(아이콘·버전·설정 파일 위치)
+//! - P5-UX: 글꼴 — 편집기 글꼴(목록 + 찾기 + 고정폭만)·크기만 고른다 (Notepad++ 스타일 설정처럼 세부 항목은 두지 않음)
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 
 use eframe::egui::{self, RichText};
 
 use crate::branding;
 use crate::commands::Keymap;
-use crate::config::Settings;
+use crate::config::{DEFAULT_EDITOR_FONT_SIZE, EDITOR_FONT_SIZE_RANGE, EditorFont, Settings};
 use crate::core::document::DiskMetadata;
 use crate::core::encoding::{TextEncoding, UnmappableChar};
 use crate::core::file_io::LoadedFile;
+use crate::fonts::{self, FontEntry};
 use crate::tabs::Tabs;
 use crate::ui::help::{self, ShortcutSection};
 use crate::ui::tab_bar::{self, UNSAVED_PATH_HINT};
@@ -102,6 +105,52 @@ pub enum Dialog {
         /// `버전 정보 복사`를 눌렀음 (버튼 문구로 알린다)
         copied: bool,
     },
+    /// 보기 → 글꼴… (편집기 글꼴·크기, P5-UX)
+    EditorFont(Box<FontChoice>),
+}
+
+/// 글꼴 대화상자 상태.
+#[derive(Debug)]
+pub struct FontChoice {
+    /// 설치된 글꼴 (작업 스레드에서 읽는 중이면 `None`)
+    fonts: Option<Vec<FontEntry>>,
+    loading: Option<Receiver<Vec<FontEntry>>>,
+    /// 고른 글꼴 (`None` = 기본)
+    pub selected: Option<EditorFont>,
+    pub size: f32,
+    monospace_only: bool,
+    filter: String,
+    /// 미리보기 글꼴을 바꿔 달라는 요청 (앱이 `set_fonts`로 적용하고 비운다, `Some(None)` = 기본)
+    pub preview_request: Option<Option<EditorFont>>,
+    /// 목록을 다 읽으면 지금 글꼴이 보이게 한 번 스크롤한다
+    reveal_selected: bool,
+}
+
+impl FontChoice {
+    /// 지금 설정으로 연다. 글꼴 목록은 작업 스레드에서 읽는다.
+    pub fn new(current: Option<EditorFont>, size: f32) -> Self {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(fonts::scan_fonts(&fonts::font_dirs()));
+        });
+        Self {
+            fonts: None,
+            loading: Some(rx),
+            preview_request: Some(current.clone()),
+            selected: current,
+            size,
+            monospace_only: true,
+            filter: String::new(),
+            reveal_selected: true,
+        }
+    }
+
+    fn select(&mut self, font: Option<EditorFont>) {
+        if self.selected != font {
+            self.preview_request = Some(font.clone());
+            self.selected = font;
+        }
+    }
 }
 
 /// 대화상자를 닫으며 사용자가 고른 결과.
@@ -141,6 +190,11 @@ pub enum DialogOutcome {
         tab_id: u64,
         encoding: TextEncoding,
     },
+    /// 글꼴: 편집기 글꼴·크기 적용
+    SetEditorFont {
+        font: Option<EditorFont>,
+        size: f32,
+    },
     /// 줄 이동: 1-기반 줄 번호
     GoToLine {
         tab_id: u64,
@@ -176,6 +230,7 @@ impl Dialog {
             Self::Shortcuts { .. } => "shortcuts",
             Self::RegexHelp => "regex-help",
             Self::About { .. } => "about",
+            Self::EditorFont(_) => "editor-font",
         };
         egui::Id::unique(("app-dialog", kind))
     }
@@ -602,6 +657,41 @@ pub fn show(
                         outcome = Some(DialogOutcome::Dismissed);
                     }
                 }
+                Dialog::EditorFont(choice) => {
+                    ui.set_width(520.0);
+                    close_button = title_bar(ui, &palette, "글꼴");
+                    body_area(ui, |ui| font_body(ui, &palette, choice));
+                    let mut ok = false;
+                    footer_with(
+                        ui,
+                        &palette,
+                        |ui| {
+                            if button(ui, "기본값으로")
+                                .on_hover_text(format!(
+                                    "{} · {}",
+                                    fonts::DEFAULT_MONO_NAME,
+                                    DEFAULT_EDITOR_FONT_SIZE
+                                ))
+                                .clicked()
+                            {
+                                choice.select(None);
+                                choice.size = DEFAULT_EDITOR_FONT_SIZE;
+                            }
+                        },
+                        |ui| {
+                            if button(ui, "취소").clicked() {
+                                outcome = Some(DialogOutcome::Dismissed);
+                            }
+                            ok = default_button(ui, "확인").clicked();
+                        },
+                    );
+                    if ok {
+                        outcome = Some(DialogOutcome::SetEditorFont {
+                            font: choice.selected.clone(),
+                            size: choice.size,
+                        });
+                    }
+                }
             }
         });
 
@@ -888,6 +978,174 @@ fn about_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let texture = ctx.load_texture("about-icon", image, egui::TextureOptions::LINEAR);
     ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
     Some(texture)
+}
+
+/// 글꼴 대화상자에서 고를 수 있는 크기 (목록 밖 크기는 위 입력란으로).
+const FONT_SIZES: [f32; 15] = [
+    8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0, 28.0, 32.0,
+];
+/// 글꼴·크기 목록 높이.
+const FONT_LIST_HEIGHT: f32 = 220.0;
+/// 미리보기 글.
+const FONT_SAMPLE: &str = "The quick brown fox jumps over the lazy dog.\n0O 1lI {}[]() => != ;\n다람쥐 헌 쳇바퀴에 타고파. 한글 가나다 ABC";
+
+/// 글꼴: [글꼴 목록 | 크기 목록] / 미리보기 / 안내.
+fn font_body(ui: &mut egui::Ui, palette: &Palette, choice: &mut FontChoice) {
+    if let Some(rx) = &choice.loading {
+        match rx.try_recv() {
+            Ok(list) => {
+                // 지금 글꼴이 고정폭이 아니면 목록에 보이게 거르기를 끈다
+                if let Some(current) = &choice.selected
+                    && list.iter().any(|f| f.name == current.name && !f.monospace)
+                {
+                    choice.monospace_only = false;
+                }
+                choice.fonts = Some(list);
+                choice.loading = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => ui.ctx().request_repaint(),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                choice.fonts = Some(Vec::new());
+                choice.loading = None;
+            }
+        }
+    }
+
+    let mut picked: Option<Option<EditorFont>> = None;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 16.0;
+        // 글꼴
+        ui.vertical(|ui| {
+            ui.set_width(320.0);
+            ui.label("글꼴");
+            ui.add(
+                egui::TextEdit::singleline(&mut choice.filter)
+                    .hint_text("글꼴 이름으로 찾기")
+                    .desired_width(f32::INFINITY),
+            );
+            egui::Frame::new()
+                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                .inner_margin(2)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("font-list")
+                        .max_height(FONT_LIST_HEIGHT)
+                        .min_scrolled_height(FONT_LIST_HEIGHT)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let default_label = format!("기본 ({})", fonts::DEFAULT_MONO_NAME);
+                            if ui
+                                .selectable_label(choice.selected.is_none(), default_label)
+                                .clicked()
+                            {
+                                picked = Some(None);
+                            }
+                            let Some(list) = &choice.fonts else {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(RichText::new("글꼴 목록을 읽는 중…").weak());
+                                });
+                                return;
+                            };
+                            let filter = choice.filter.trim().to_lowercase();
+                            let reveal = std::mem::take(&mut choice.reveal_selected);
+                            for font in list.iter().filter(|f| {
+                                (!choice.monospace_only || f.monospace)
+                                    && (filter.is_empty()
+                                        || f.name.to_lowercase().contains(&filter))
+                            }) {
+                                let selected = choice
+                                    .selected
+                                    .as_ref()
+                                    .is_some_and(|s| s.name == font.name);
+                                let row = ui.selectable_label(selected, font.name.as_str());
+                                if selected && reveal {
+                                    row.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                if row.clicked() {
+                                    picked = Some(Some(EditorFont {
+                                        name: font.name.clone(),
+                                        path: font.path.clone(),
+                                        face: font.face,
+                                    }));
+                                }
+                            }
+                        });
+                });
+            ui.checkbox(&mut choice.monospace_only, "고정폭 글꼴만")
+                .on_hover_text("글자 폭이 모두 같은 글꼴 (코드·표 맞춤에 좋음)");
+        });
+        // 크기
+        ui.vertical(|ui| {
+            ui.label("크기");
+            ui.add(
+                egui::DragValue::new(&mut choice.size)
+                    .range(EDITOR_FONT_SIZE_RANGE)
+                    .speed(0.2)
+                    .fixed_decimals(0),
+            );
+            egui::Frame::new()
+                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                .inner_margin(2)
+                .show(ui, |ui| {
+                    ui.set_width(80.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("font-size-list")
+                        .max_height(FONT_LIST_HEIGHT)
+                        .min_scrolled_height(FONT_LIST_HEIGHT)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for size in FONT_SIZES {
+                                let selected = (choice.size - size).abs() < 0.01;
+                                if ui
+                                    .selectable_label(selected, format!("{size:.0}"))
+                                    .clicked()
+                                {
+                                    choice.size = size;
+                                }
+                            }
+                        });
+                });
+        });
+    });
+    if let Some(font) = picked {
+        choice.select(font);
+    }
+
+    ui.add_space(8.0);
+    ui.label("미리보기");
+    egui::Frame::new()
+        .fill(palette.dialog_footer_bg)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(4)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(90.0);
+            let font = egui::FontId::new(
+                choice.size,
+                egui::FontFamily::Name(fonts::FONT_PREVIEW_FAMILY.into()),
+            );
+            // 미리보기 패밀리는 앱이 다음 프레임에 등록한다 — 그전에는 기본 고정폭으로
+            let font = if ui.fonts(|f| f.families().contains(&font.family)) {
+                font
+            } else {
+                egui::FontId::monospace(choice.size)
+            };
+            egui::ScrollArea::horizontal()
+                .id_salt("font-sample")
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(FONT_SAMPLE).font(font)).extend());
+                });
+        });
+    ui.label(
+        RichText::new(
+            "선택한 글꼴에 없는 글자(한글 등)는 기본 글꼴로 표시합니다. \
+             확대/축소(Ctrl+= / Ctrl+-)는 이 크기에 곱해집니다.",
+        )
+        .small()
+        .weak(),
+    );
 }
 
 /// 도움말 표의 묶음 제목.
@@ -1320,6 +1578,48 @@ mod tests {
         frame(&ctx, &mut dialog, &tabs, vec![]);
         frame(&ctx, &mut dialog, &tabs, vec![Event::Text("탭".into())]);
         assert!(matches!(&dialog, Some(Dialog::Shortcuts { filter, .. }) if filter == "탭"));
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Escape)]);
+        assert!(matches!(out, Some(DialogOutcome::Dismissed)), "{out:?}");
+    }
+
+    #[test]
+    fn font_dialog_enter_applies_choice_and_escape_cancels() {
+        let tabs = Tabs::new();
+        let current = EditorFont {
+            name: "D2Coding".into(),
+            path: "D2Coding.ttc".into(),
+            face: 0,
+        };
+
+        // 열 때 지금 글꼴을 미리보기로 요청하고, Enter = 확인 (고른 글꼴·크기 그대로)
+        let ctx = egui::Context::default();
+        let mut choice = FontChoice::new(Some(current.clone()), 15.0);
+        assert_eq!(choice.preview_request.take(), Some(Some(current.clone())));
+        let mut dialog = Some(Dialog::EditorFont(Box::new(choice)));
+        frame(&ctx, &mut dialog, &tabs, vec![]);
+        let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Enter)]);
+        assert!(
+            matches!(&out, Some(DialogOutcome::SetEditorFont { font: Some(f), size })
+                if *f == current && *size == 15.0),
+            "{out:?}"
+        );
+
+        // 기본값으로 = 기본 글꼴·크기, 미리보기도 기본으로
+        let mut choice = FontChoice::new(Some(current), 20.0);
+        choice.preview_request = None;
+        choice.select(None);
+        assert_eq!(choice.preview_request, Some(None));
+        choice.select(None);
+        assert_eq!(
+            choice.preview_request,
+            Some(None),
+            "같은 선택은 다시 요청하지 않음"
+        );
+
+        // Esc = 취소
+        let ctx = egui::Context::default();
+        let mut dialog = Some(Dialog::EditorFont(Box::new(FontChoice::new(None, 13.0))));
+        frame(&ctx, &mut dialog, &tabs, vec![]);
         let out = frame(&ctx, &mut dialog, &tabs, vec![press(Key::Escape)]);
         assert!(matches!(out, Some(DialogOutcome::Dismissed)), "{out:?}");
     }
