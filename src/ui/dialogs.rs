@@ -1573,7 +1573,7 @@ mod tests {
         assert!(matches!(out, Some(DialogOutcome::Dismissed)), "{out:?}");
 
         // 단축키 목록: 열자마자 입력하면 검색란에 들어가고, Esc로 닫힌다
-        let ctx = egui::Context::default();
+        let ctx = crate::ui::help::tests::started_context();
         let mut dialog = Some(Dialog::shortcuts(&Keymap::current(), &ctx));
         frame(&ctx, &mut dialog, &tabs, vec![]);
         frame(&ctx, &mut dialog, &tabs, vec![Event::Text("탭".into())]);

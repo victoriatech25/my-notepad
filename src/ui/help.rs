@@ -275,7 +275,7 @@ pub fn platform() -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::search::{SearchOptions, SearchQuery};
 
@@ -309,9 +309,18 @@ mod tests {
         }
     }
 
+    /// 첫 프레임을 한 번 돌린 컨텍스트 — macOS 단축키 표기(`⌘`)는 글꼴을 확인하므로 첫 프레임 전에는 만들 수 없다
+    /// (앱에서는 늘 프레임 안에서 부른다).
+    pub(crate) fn started_context() -> egui::Context {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
+        out.textures_delta.clear();
+        ctx
+    }
+
     #[test]
     fn sections_show_os_shortcuts_and_filter() {
-        let ctx = egui::Context::default();
+        let ctx = started_context();
         let sections = shortcut_sections(&Keymap::current(), &ctx);
         let titles: Vec<_> = sections.iter().map(|s| s.title).collect();
         assert_eq!(

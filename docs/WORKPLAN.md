@@ -1028,17 +1028,19 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
   - [ ] 남은 UX 백로그를 함께 검토해 `보류` 항목은 Phase 6으로 이관 확정
 
 #### P5-05 릴리스 파이프라인 · M
+- **상태**: 🤖 Windows 부분 완료 (2026-10-27, 브랜치 `wu/P5-05-release-pipeline`) · macOS `.dmg`는 P5-03 뒤 — `.github/workflows/release.yml`: `v*` 태그 → 태그·`Cargo.toml` 버전 일치 확인(`v<버전>[-꼬리]`, 꼬리 있으면 prerelease) → Windows·macOS 검사·테스트 → Windows `cargo xtask package`(Inno Setup 없으면 choco) → `SHA256SUMS-windows.txt` → **초안(draft) GitHub Release**에 첨부 (공개는 사람이 직접). 시험 태그 3번: `v0.1.0-rc.1`(macOS clippy `deliver` 미사용 — P5-04부터 `main` CI도 실패하던 원인, `.gitignore *.log`로 `app.log` 픽스처 누락) → `rc.2`(macOS 테스트 3건: 글꼴 목록에 Menlo 누락(Mac Roman 이름 기록) · 첫 프레임 전 `⌘` 표기 테스트) → **`rc.3` 전부 녹색**, 초안 릴리스에 setup.exe 6.0MB·portable.zip 5.9MB·체크섬, 내려받아 SHA256 일치 확인. 이 PC에서 macOS 대상 clippy: `cargo clippy --target aarch64-apple-darwin`. 남은 경고: Node.js 20 기반 actions(`checkout@v4`·`upload-artifact@v4`) 지원 종료 예정
 - **산출물**: `.github/workflows/release.yml` (태그 푸시 → 빌드·테스트·패키징·아티팩트 업로드)
 - **선행**: P5-02, P5-03
 - 🤖 **자동 검증**
-  - [ ] 테스트 태그로 파이프라인 실행 → Windows 설치 파일·zip, macOS dmg 생성
-  - [ ] 생성물 체크섬 출력
+  - [x] 테스트 태그로 파이프라인 실행 → Windows 설치 파일·zip — 🤖 2026-10-27 `v0.1.0-rc.3` (macOS dmg는 P5-03 뒤에 다시)
+  - [x] 생성물 체크섬 출력 — 🤖 2026-10-27 `SHA256SUMS-windows.txt`·작업 요약·릴리스 설명, 내려받은 파일과 일치
 
 #### P5-06 릴리스 후보 전체 회귀 · M
+- **상태**: 🤖 §1.3 최종 측정 완료 (2026-10-27, §9.3 — 모두 충족) · `docs/manual-test.md` 새로 작성 (11개 영역 50개 항목, 설치본 기준) · 👤 Windows `v0.1.0-rc.3` 설치본으로 대기 · 🍎 P5-03 뒤
 - **목표**: Phase 0~4에서 누적한 `docs/manual-test.md` 전체 수행, §1.3 최종 측정
 - **선행**: P5-01 ~ P5-05, P5-UX
 - 🤖 **자동 검증**
-  - [ ] §1.3 전 항목 최종 측정값 기록
+  - [x] §1.3 전 항목 최종 측정값 기록 — 🤖 2026-10-27 (`cargo xtask measure --app` 신설, §9.3)
 - 👤 **사용자 화면 검증**
   - [ ] `docs/manual-test.md` 전체 항목 Windows에서 통과
 - 🍎 **macOS 검증**
@@ -1265,6 +1267,10 @@ UI와 사용성은 **구현이 끝난 뒤가 아니라 가능한 한 빨리** �
 | 2026-10-27 | 문법 강조 1MB 훑기 (P6-A) | `core::syntax::tokenize`, `syntax.rs` 반복 약 1MB, 릴리스 5회 평균 (`cargo test --release --lib -- --ignored --nocapture tokenize_1mb`) | 처음 Rust 14.9 · TS 17.1 · JSON 12.4 · 로그 4.4ms → 시작 바이트 표·키워드 이진 탐색 후 **Rust 5.7 · TS 6.1 · JSON 4.4 · 로그 4.0ms** | ≤ 10ms (PLAN v0.7) | 충족 |
 | 2026-10-27 | 문법 강조 입력 지연 (P6-A) | P3-10과 같은 방식(1280×900 헤드리스, 레이아웃+테셀레이션, 30프레임 연속 입력, 릴리스) — `.md` 1,047,179 B·Rust 992,902 B (`syntax_frame_time`), 3회 | 2·3회째: Rust 끔 16.0/16.7 → 켬 16.6/17.1ms(**+0.4~0.6ms**), `.md` 21.4/21.3 → 23.3/23.5ms(**+1.9~2.2ms**). 1회째는 Rust +11.4ms·최대 251.8ms, `.md` +10.3ms — 직전 빌드 부하가 겹친 값으로 재현 안 됨 | 색상 끔 대비 +3ms 이내 | 충족 |
 | 2026-10-27 | 실행 파일 크기 (P6-A, Windows) | `my-notepad.exe` 릴리스, `glow` 단독 | 14,550,528 B (**13.88MB**) | ≤ 15MB, P6-A 증가 ≤ 0.3MB | 충족 — 13.71MB 대비 +0.17MB (추가 크레이트 없음) |
+| 2026-10-27 | **P5-06 §1.3 최종 측정 (RC `v0.1.0-rc.1`, Windows)** — 메모리·기동 (빈 문서) | `cargo xtask measure --app` (신설): 본 앱 릴리스 `--measure-out`, 설정 파일 안 읽음(기본 글꼴), 첫 프레임 + 1.5초 뒤 Working Set, 10회 | 첫 화면 **327ms** (281~397) · **114MB** (113~115) | warm ≤ 400ms · ≤ 120MB | 충족 — G1 220ms보다 늘었음(아이콘·글꼴 대화상자·문법 표 등 기능 추가, 측정 장비 부하 차이도 있음), 여유 73ms |
+| 2026-10-27 | P5-06 — 대용량 뷰어 | `cargo xtask measure --viewer --runs 3` | 10MB 첫 화면 **402ms**·스크롤 평균 3·최대 4ms·**125MB** / 50MB 730ms·평균 3·최대 5ms·168MB | 10MB ≤ 1s·≤ 150MB, 50MB ≤ 2s, 스크롤 ≤ 16ms | 충족 |
+| 2026-10-27 | P5-06 — 검색·Markdown·입력 (측정 테스트 7개 동시 실행) | `cargo test --release --lib -- --ignored --nocapture` (테스트 스레드 병렬 — 단독 실행보다 수치가 다소 큼) | 10MB 검색: 입력 중 프레임 평균 0.44·최대 3.5ms, 마지막 입력 → 결과 136ms / 100KB 미리보기 반영 156~171ms(디바운스 150ms + 갱신 4~7ms) / 1MB 미리보기 스크롤 평균 1.44·최대 4.35ms / 100KB 모드 전환 최대 23.1ms / 1MB 입력 프레임 평균 10.8ms(최대 20.0, 강조 유지) · 1MB `.md` 색상 켬 25.9ms · Rust 17.2ms / 문법 훑기 1MB 5.3~7.8ms | 검색 ≤ 200ms, 미리보기 ≤ 디바운스+50ms, 스크롤 60fps, 전환 ≤ 100ms, 입력 ≤ 16ms(1MB 이하) | 충족 — 입력 16ms 목표는 1MB 일반 텍스트 기준 평균 10.8ms로 충족, 짧은 줄이 매우 많은 1MB `.md`는 P3-10 기록대로 색상과 무관하게 20ms대(사용자 체감 통과) |
+| 2026-10-27 | P5-06 — 실행 파일 크기 | `my-notepad.exe` 릴리스 | 13.88MB | ≤ 15MB | 충족 |
 | 2026-10-25 | Markdown 미리보기 스크롤 (P3-05) | `gfm_all.md`+`korean.md` 반복 1MB(최상위 블록 18,924개), 600×800 헤드리스, 처음부터 끝까지 300프레임 스크롤 위치 지정, 릴리스 (`cargo test --release --lib -- --ignored --nocapture preview_scroll_frame_time`) | 평균 **0.76ms** · 최대 2.02ms, 첫 표시까지 142ms(백그라운드 파싱 + 전체 높이 측정) | 60fps(≤ 16ms) | 충족 |
 | 2026-10-25 | Markdown 미리보기 갱신 (P3-07) | 100KB `.md`(103,243 B)에서 문단 하나 수정, 실제 시간으로 60fps 프레임(16ms 간격), 5회, 릴리스 (`cargo test --release --lib -- --ignored --nocapture preview_refresh_time`) | 반영 **169~171ms** = 디바운스 150ms + 다음 프레임 대기 + 갱신 프레임 4.1~4.8ms | ≤ 디바운스 + 50ms | 충족 |
 | 2026-10-25 | 소스 구문 색상 입력 지연 (P3-10) | `gfm_all.md`+`korean.md` 반복 1,047,179 B `.md`, 1280×900 헤드리스, 레이아웃 + 테셀레이션, 30프레임 연속 입력, 릴리스 (`cargo test --release --lib -- --ignored --nocapture markdown_syntax_frame_time`) | 색상 끔 평균 21.1ms·최대 24.0ms / **켬 평균 23.7ms·최대 36.4ms**, 멈춘 뒤 다시 계산 프레임 18.1ms (전체 칠하기 52.9ms) | 체감 지연 없음 (👤) — 입력 ≤ 16ms는 색상 끔에서도 이 문서(짧은 줄이 많음) 미달 | 사용자 확인 통과 |

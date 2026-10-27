@@ -306,6 +306,8 @@ fn main() -> ExitCode {
                 .unwrap_or(10);
             if args.iter().any(|a| a == "--viewer") {
                 measure::run_viewer(&workspace_root(), runs.min(5))
+            } else if args.iter().any(|a| a == "--app") {
+                measure::run_app(&workspace_root(), runs)
             } else {
                 measure::run(&workspace_root(), runs)
             }
@@ -345,6 +347,9 @@ fn print_help() {
     println!("  measure [--runs N]  메모리·기동 시간 측정 (렌더러 × 한글 폰트 × 문서, 기본 10회)");
     println!(
         "  measure --viewer [--runs N]  본 앱 대용량 뷰어 10MB·50MB: 첫 화면·스크롤 프레임·메모리 (P1-14, 기본 3회)"
+    );
+    println!(
+        "  measure --app [--runs N]  본 앱 빈 문서: 첫 화면·메모리·실행 파일 크기 (P5-06 §1.3, 기본 10회)"
     );
     println!("  help             이 도움말\n");
     println!("시나리오:");

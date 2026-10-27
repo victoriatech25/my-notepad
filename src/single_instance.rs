@@ -11,7 +11,9 @@
 //! 메시지(바이트): `[파일 수 u32 LE]` + 파일마다 `[UTF-16 길이 u32 LE][UTF-16 LE]`, 받는 쪽은 1바이트로 응답한다.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Receiver;
+#[cfg(any(windows, test))]
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 /// 시작할 때 고른 역할.
@@ -163,7 +165,8 @@ fn path_of(wide: &[u16]) -> PathBuf {
     PathBuf::from(String::from_utf16_lossy(wide))
 }
 
-/// 받은 요청을 앱에 넘기고 화면을 깨운다.
+/// 받은 요청을 앱에 넘기고 화면을 깨운다. (파이프 서버는 Windows 전용 — 다른 OS에서는 테스트만 쓴다)
+#[cfg(any(windows, test))]
 fn deliver(tx: &Sender<Vec<PathBuf>>, target: &Mutex<Target>, files: Vec<PathBuf>) {
     let _ = tx.send(files);
     let target = target.lock().unwrap_or_else(|e| e.into_inner());

@@ -434,7 +434,32 @@ fn family_name(face: &ttf_parser::Face<'_>) -> Option<String> {
             return Some(name.trim().to_owned());
         }
     }
+    // 오래된 Apple 글꼴(Menlo 등)은 이름을 Mac 플랫폼(Mac Roman) 기록에만 두기도 한다 — 영문 이름은 ASCII와 같다
+    for id in [TYPOGRAPHIC_FAMILY, FAMILY] {
+        let name = face
+            .names()
+            .into_iter()
+            .find(|n| {
+                n.name_id == id
+                    && n.platform_id == ttf_parser::PlatformId::Macintosh
+                    && n.encoding_id == 0
+            })
+            .and_then(|n| mac_roman_ascii(n.name));
+        if name.is_some() {
+            return name;
+        }
+    }
     None
+}
+
+/// Mac Roman 이름 기록을 글자로 바꾼다 (ASCII만 — 그 밖의 글자가 있으면 `None`).
+fn mac_roman_ascii(bytes: &[u8]) -> Option<String> {
+    let text: String = bytes
+        .iter()
+        .map(|&b| b.is_ascii().then_some(char::from(b)))
+        .collect::<Option<_>>()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 /// 편집기 글꼴을 `Monospace` 체인 맨 앞에 넣는다 (`None`이면 빼고 기본 체인으로). 바꾼 정의는
@@ -685,6 +710,13 @@ mod tests {
     }
 
     #[test]
+    fn mac_roman_names_are_read_as_ascii() {
+        assert_eq!(mac_roman_ascii(b" Menlo "), Some("Menlo".to_owned()));
+        assert_eq!(mac_roman_ascii(b"Caf\x8E"), None, "ASCII 밖 글자는 버린다");
+        assert_eq!(mac_roman_ascii(b"  "), None);
+    }
+
+    #[test]
     fn scan_reads_family_names_and_skips_missing_folders() {
         // 폴더 안 글꼴 아닌 파일(LICENSE 등)과 없는 폴더는 건너뛴다
         let dirs = [
@@ -705,7 +737,22 @@ mod tests {
         let default = fonts
             .iter()
             .find(|f| f.name == DEFAULT_MONO_NAME)
-            .unwrap_or_else(|| panic!("{DEFAULT_MONO_NAME} 없음 ({}개)", fonts.len()));
+            .unwrap_or_else(|| {
+                // 다시 실패하면 원인을 볼 수 있게 비슷한 이름을 같이 보인다
+                let near: Vec<_> = fonts
+                    .iter()
+                    .filter(|f| {
+                        f.name
+                            .to_lowercase()
+                            .contains(&DEFAULT_MONO_NAME[..3].to_lowercase())
+                    })
+                    .map(|f| format!("{} ({})", f.name, f.path.display()))
+                    .collect();
+                panic!(
+                    "{DEFAULT_MONO_NAME} 없음 ({}개) — 비슷한 이름: {near:?}",
+                    fonts.len()
+                )
+            });
         assert!(default.monospace);
         // 이름순·중복 없음
         for pair in fonts.windows(2) {

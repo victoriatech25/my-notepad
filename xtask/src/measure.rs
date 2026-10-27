@@ -257,6 +257,75 @@ pub fn run_viewer(root: &Path, runs: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// 본 앱 빈 문서 측정 (`cargo xtask measure --app`, P5-06): 첫 화면 시간·메모리를 PLAN.md §1.3 목표
+/// (warm 기동 ≤ 400ms, 빈 문서 메모리 ≤ 120MB)와 비교한다. 측정 실행은 설정 파일을 읽지 않는다(기본 글꼴).
+pub fn run_app(root: &Path, runs: usize) -> Result<(), String> {
+    let status = Command::new(super::cargo())
+        .current_dir(root)
+        .args(["build", "--release", "--package", "my-notepad"])
+        .status()
+        .map_err(|e| format!("cargo 실행 실패: {e}"))?;
+    if !status.success() {
+        return Err("my-notepad 빌드 실패".into());
+    }
+    let exe = root
+        .join("target/release")
+        .join(format!("my-notepad{}", std::env::consts::EXE_SUFFIX));
+    let size = std::fs::metadata(&exe).map(|m| m.len()).unwrap_or(0);
+    let mut first = Vec::new();
+    let mut memory = Vec::new();
+    for i in 0..runs {
+        let out =
+            std::env::temp_dir().join(format!("my-notepad-app-{}-{i}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let mut child = Command::new(&exe)
+            .current_dir(root)
+            .arg("--measure-out")
+            .arg(&out)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("실행 실패: {e}"))?;
+        let started = Instant::now();
+        let report = loop {
+            if let Ok(text) = std::fs::read_to_string(&out)
+                && text.contains("done=1")
+            {
+                break Some(text);
+            }
+            if started.elapsed() > TIMEOUT {
+                break None;
+            }
+            sleep(Duration::from_millis(50));
+        };
+        sleep(SETTLE);
+        memory.extend(memory_mb(child.id()));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&out);
+        first.extend(report.and_then(|r| {
+            r.lines()
+                .find_map(|l| l.strip_prefix("first_frame_ms=")?.parse::<f64>().ok())
+        }));
+    }
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+    let judge = |ok: bool| if ok { "충족" } else { "미달" };
+    println!(
+        "본 앱 빈 문서 ({runs}회, 실행 파일 {:.2}MB)\n  첫 화면 ms: {}\n  메모리 MB : {}",
+        size as f64 / 1_048_576.0,
+        stats(&first),
+        stats(&memory)
+    );
+    println!(
+        "  목표: warm 기동 ≤ 400ms {} · 메모리 ≤ 120MB {} · 실행 파일 ≤ 15MB {}",
+        judge(!first.is_empty() && mean(&first) <= 400.0),
+        judge(!memory.is_empty() && mean(&memory) <= 120.0),
+        judge(size as f64 <= 15.0 * 1_048_576.0)
+    );
+    Ok(())
+}
+
 /// "평균 (최소~최대)"
 fn stats(values: &[f64]) -> String {
     if values.is_empty() {
