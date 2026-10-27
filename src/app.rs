@@ -1689,9 +1689,8 @@ impl eframe::App for NotepadApp {
                 .default_size(self.settings.sidebar_width)
                 .size_range(140.0..=480.0)
                 .show(ui, |ui| {
-                    // 트리 이름은 편집기 글꼴 설정을 따른다 (크기 13 = 지금 UI 글자 크기, P5-UX)
-                    let name_font =
-                        sidebar::name_font(ui, self.editor_font.is_some(), self.editor_font_size);
+                    // 트리 이름은 편집기와 똑같은 글꼴·크기 (편집기 글꼴 × 확대율, P5-UX)
+                    let name_font = FontId::monospace(self.editor_font_size * self.zoom);
                     sidebar_action = sidebar::show(
                         ui,
                         &mut self.sidebar,

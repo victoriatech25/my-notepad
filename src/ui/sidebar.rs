@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Align, Align2, Color32, FontFamily, FontId, Layout, RichText, Sense};
 
-use crate::config::DEFAULT_EDITOR_FONT_SIZE;
 use crate::core::file_icons::{FileIcon, file_icon, folder_icon};
 use crate::core::fs_tree::{DEFAULT_HIDDEN, FsTree, NodeId};
 use crate::fonts::ICON_FAMILY;
@@ -60,20 +59,8 @@ impl SidebarState {
     }
 }
 
-/// 트리 이름 글꼴: 편집기 글꼴을 골랐으면 그 글꼴(`Monospace` 체인 맨 앞), 아니면 UI 글꼴.
-/// 크기는 편집기 글꼴 크기를 따르되 기본 크기(13)일 때 지금 UI 글자 크기와 같게 비례시킨다 (P5-UX).
-pub fn name_font(ui: &egui::Ui, custom_font: bool, editor_size: f32) -> FontId {
-    let size =
-        ui.text_style_height(&egui::TextStyle::Body) * editor_size / DEFAULT_EDITOR_FONT_SIZE;
-    if custom_font {
-        FontId::monospace(size)
-    } else {
-        FontId::proportional(size)
-    }
-}
-
 /// 사이드바 패널 내용을 그린다. `current`는 활성 탭 파일 경로 (트리에서 선택 표시),
-/// `name_font`는 트리 이름 글꼴 ([`name_font`]).
+/// `name_font`는 트리 이름 글꼴 — 앱은 편집기와 똑같은 글꼴·크기를 넘긴다 (P5-UX).
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut SidebarState,
@@ -278,6 +265,7 @@ pub fn rail(ui: &mut egui::Ui, toggle_shortcut: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_EDITOR_FONT_SIZE;
     use eframe::egui::{Event, PointerButton, Pos2, RawInput, Rect};
     use std::fs;
 
@@ -298,7 +286,7 @@ mod tests {
             egui::Panel::left("sidebar")
                 .exact_size(300.0)
                 .show(ui, |ui| {
-                    let font = name_font(ui, false, DEFAULT_EDITOR_FONT_SIZE);
+                    let font = FontId::monospace(DEFAULT_EDITOR_FONT_SIZE);
                     action = show(ui, state, &Palette::light(), "Ctrl+B", current, &font);
                 });
         });
@@ -361,49 +349,55 @@ mod tests {
         );
     }
 
-    /// 트리 이름은 편집기 글꼴 설정을 따른다: 기본은 지금 UI 글꼴·크기, 글꼴을 고르면 그 글꼴(고정폭 체인)·비례 크기.
+    /// 트리 이름은 넘겨받은 글꼴(앱: 편집기와 똑같은 글꼴·크기)로 그리고, 줄 높이도 그 크기에 맞춘다.
     #[test]
-    fn tree_names_follow_editor_font_setting() {
+    fn tree_names_use_given_editor_font() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("main.rs"), b"").unwrap();
+        fs::write(dir.path().join("a.rs"), b"").unwrap();
+        fs::write(dir.path().join("b.rs"), b"").unwrap();
         let ctx = egui::Context::default();
         let mut state = SidebarState::default();
         state.open_folder(dir.path()).unwrap();
-        let font_of = |state: &mut SidebarState, custom: bool, size: f32| {
+        let mut drawn = |font: &FontId| {
             let raw = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 500.0))),
                 ..Default::default()
             };
-            let mut body = 0.0;
             let mut full = ctx.run_ui(raw, |ui| {
                 egui::Panel::left("sidebar")
                     .exact_size(300.0)
                     .show(ui, |ui| {
-                        body = ui.text_style_height(&egui::TextStyle::Body);
-                        let font = name_font(ui, custom, size);
-                        show(ui, state, &Palette::light(), "Ctrl+B", None, &font);
+                        show(ui, &mut state, &Palette::light(), "Ctrl+B", None, font);
                     });
             });
             full.textures_delta.clear();
-            let font = full
-                .shapes
-                .iter()
-                .find_map(|c| match &c.shape {
-                    egui::Shape::Text(t) if t.galley.text() == "main.rs" => {
-                        Some(t.galley.job.sections[0].format.font_id.clone())
-                    }
-                    _ => None,
-                })
-                .expect("main.rs 줄");
-            (font, body)
+            let row = |name: &str| {
+                full.shapes
+                    .iter()
+                    .find_map(|c| match &c.shape {
+                        egui::Shape::Text(t) if t.galley.text() == name => {
+                            Some((t.galley.job.sections[0].format.font_id.clone(), t.pos.y))
+                        }
+                        _ => None,
+                    })
+                    .expect("트리 줄")
+            };
+            let (a_font, a_y) = row("a.rs");
+            let (_, b_y) = row("b.rs");
+            (a_font, b_y - a_y)
         };
 
-        let (font, body) = font_of(&mut state, false, DEFAULT_EDITOR_FONT_SIZE);
-        assert_eq!(font, FontId::proportional(body), "기본은 지금과 같음");
-        let (font, body) = font_of(&mut state, true, DEFAULT_EDITOR_FONT_SIZE * 2.0);
-        assert_eq!(font, FontId::monospace(body * 2.0));
+        let small = FontId::monospace(15.0);
+        let (font, small_gap) = drawn(&small);
+        assert_eq!(font, small, "편집기 글꼴·크기 그대로");
+        let large = FontId::monospace(30.0);
+        let (font, large_gap) = drawn(&large);
+        assert_eq!(font, large);
+        assert!(
+            large_gap > small_gap,
+            "줄 높이도 커짐: {small_gap} → {large_gap}"
+        );
     }
-
     #[test]
     fn draws_only_visible_rows_for_huge_folders() {
         let dir = tempfile::tempdir().unwrap();
@@ -452,7 +446,7 @@ mod tests {
             egui::Panel::left("sidebar")
                 .exact_size(300.0)
                 .show(ui, |ui| {
-                    let font = name_font(ui, false, DEFAULT_EDITOR_FONT_SIZE);
+                    let font = FontId::monospace(DEFAULT_EDITOR_FONT_SIZE);
                     show(
                         ui,
                         &mut state,
