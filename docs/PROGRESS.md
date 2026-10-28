@@ -43,11 +43,13 @@
 | 👤 P5-06 설치본 회귀 `v0.1.0-rc.3` — manual-test.md 50개 + 첫 화면 | Windows | ✅ 2026-10-27 |
 | 🍎👤 P5-03 `.dmg` 설치·첫 실행 경고 넘기기·Finder 다음으로 열기(`.md`, 실행 중이면 같은 창 탭) — `cargo xtask package` (WORKPLAN P5-03 🍎 3개) | MacBook | ✅ 2026-10-27 |
 | 🍎 P5-UX·P6-A macOS 확인 — `cargo xtask try help`·`cargo xtask try syntax` (macos-checklist §6) | MacBook | ✅ 2026-10-27 |
+| 🍎👤 P5-06 macOS 설치본 회귀 `v0.1.0-rc.4` — manual-test.md 전체(macOS 대응표) | MacBook | ⏳ 2026-10-28 요청 |
 
 ## 최근 작업 기록
 
 > 최신이 위. 대화를 마칠 때 한 줄씩 추가하고, 10줄이 넘으면 오래된 줄은 지운다 (상세는 git log·WORKPLAN §9).
 
+- 2026-10-28 — P5-06 macOS 회귀 준비: rc.4 `.dmg` 체크섬 일치, manual-test.md에 macOS 대응표, 🍎👤 확인 요청
 - 2026-10-27 — P5-05 마무리: 릴리스 파이프라인에 macOS Universal `.dmg`·체크섬, `v0.1.0-rc.4` 전부 녹색 — **P5-05 완료**
 - 2026-10-27 — P5-03 🍎👤 통과(`.dmg` 설치·Gatekeeper·Finder 열기) + P5-UX·P6-A macOS 확인 통과, `main`에 병합 — **P5-03 완료**
 - 2026-10-27 — P5-03 macOS 패키지 구현: Universal `.app`·ad-hoc 서명·`.dmg`(12.7MB), 문서 종류 연결, Finder 파일 열기(winit 수정 5) — 같은 창 탭 2개·Rosetta 기동 확인, 🍎👤 확인 요청
@@ -57,4 +59,3 @@
 - 2026-10-27 — P5-06: §1.3 최종 측정 모두 충족(기동 327ms·114MB 등), `docs/manual-test.md` 50개 항목 작성
 - 2026-10-27 — 탐색기 글꼴·P6-A 문법 강조 Windows 🎨👤 통과, `main`에 병합 — **P6-A 완료**
 - 2026-10-27 — 탐색기 트리 이름을 편집기와 똑같은 글꼴·크기로 (편집기 크기 × 확대율 — 사용자 피드백)
-- 2026-10-27 — P6-A 문법 강조 구현(언어 24개 데이터 표·스캐너, 보기 → 문법 강조·상태 표시줄), 1MB 훑기 ≤ 6.1ms·입력 +0.6ms·실행 파일 +0.17MB, 🎨👤 확인 요청

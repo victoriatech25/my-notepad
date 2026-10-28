@@ -11,10 +11,26 @@
 | 설치 파일 | GitHub `Releases`의 초안(Draft) `Vic Notepad v0.1.0-rc.N` → `vic-notepad-0.1.0-windows-x64-setup.exe`·`…-portable.zip`·`SHA256SUMS-windows.txt` |
 | 체크섬 | PowerShell `Get-FileHash .\vic-notepad-*-setup.exe` 값이 `SHA256SUMS-windows.txt`와 같은지 |
 | 시험 파일 | 저장소 `tests\fixtures` 폴더를 **통째로 다른 곳에 복사**해서 쓴다 (예: `%USERPROFILE%\Desktop\vic-test`). 앱에서 저장하면 바이트가 바뀌는데 원본 픽스처는 바이트 그대로 보존해야 한다 |
-| 큰 파일 | `cargo xtask gen-samples` → `spikes\samples\text-1mb.txt`·`text-10mb.txt`·`text-50mb.txt`·`long_1mb.md` (이것도 복사본으로) |
+| 큰 파일 | `cargo xtask gen-samples` → `spikes\samples\text-1mb.txt`·`text-10mb.txt`·`text-50mb.txt`·`md-1mb.md` (이것도 복사본으로). MT-5-4의 2MB 파일은 `text-1mb.txt` 두 개를 이어 붙여 만든다 (안내 막대 1MB 초과·뷰어 5MB 초과) |
 | 이전 설치 | 이미 설치돼 있으면 먼저 `설정 → 앱 → Vic Notepad 제거` (설정 폴더는 남겨도 됨) |
 
-macOS는 P5-03(`.dmg`) 이후 같은 순서로 하되 `Ctrl` → `Cmd`, 메뉴 위치는 macos-checklist를 따른다.
+macOS는 P5-03(`.dmg`) 이후 같은 순서로 하되 `Ctrl` → `Cmd`, 메뉴 위치는 macos-checklist를 따른다. 단축키는 앱의 `도움말 → 단축키 목록`에 적힌 ⌘ 표기를 따른다 (예: 다음 찾기 `Cmd+G`, 바꾸기 `Cmd+Option+F`).
+
+### macOS 대응
+
+| 항목 | macOS에서 |
+| :--- | :--- |
+| 설치 파일 | 초안 릴리스의 `vic-notepad-0.1.0-macos-universal.dmg`·`SHA256SUMS-macos.txt`, 체크섬은 `shasum -a 256 -c SHA256SUMS-macos.txt` |
+| 설정·로그 폴더 | `~/Library/Application Support/My-Notepad` · `~/Library/Logs/My-Notepad` |
+| 메모장 | 텍스트 편집기(TextEdit) |
+| MT-1-1 | `.dmg`를 열어 Vic Notepad를 `응용 프로그램`으로 끌기 → 첫 실행 경고를 `docs/install.md` macOS 절차로 넘김 → 다시 실행하면 경고 없음 |
+| MT-1-2 | Launchpad·Spotlight에서 실행, Dock·`Cmd+Tab`에 앱 아이콘, 창 제목 "… - Vic Notepad" |
+| MT-1-3 | Finder에서 앱 `정보 가져오기` → 이름 Vic Notepad · 버전 0.1.0, `종류: 응용 프로그램 (Universal)` |
+| MT-1-4 | `.md` 우클릭 → `다음으로 열기`에 Vic Notepad, 고르면 열림 |
+| MT-1-5 | — (Windows 우클릭 "Vic Notepad로 편집" 전용) |
+| MT-1-6 | 앱이 떠 있을 때 Finder에서 `.md` 여러 개 → `다음으로 열기 → Vic Notepad` → **기존 창의 새 탭**으로, Dock으로 최소화돼 있어도 앞으로 |
+| MT-1-7 | — (포터블 없음) |
+| MT-11-2 | 앱을 휴지통으로 옮기면 Launchpad에서 사라짐, 설정 폴더는 남음 (묻는 단계 없음) |
 
 ## 1. 설치·OS 통합 (P5-01·P5-02·P5-04)
 
@@ -24,9 +40,9 @@ macOS는 P5-03(`.dmg`) 이후 같은 순서로 하되 `Ctrl` → `Cmd`, 메뉴 �
 | MT-1-2 | 시작 메뉴에서 실행, 작업 표시줄·Alt+Tab에 앱 아이콘, 창 제목 "… - Vic Notepad" | | |
 | MT-1-3 | 실행 파일 속성 → 자세히: 제품명 Vic Notepad · 버전 0.1.0 | | |
 | MT-1-4 | `.md` 우클릭 → 연결 프로그램 목록에 Vic Notepad, 고르면 열림 | | |
-| MT-1-5 | 아무 파일 우클릭 → (Windows 11은 "추가 옵션 표시") "Vic Notepad로 편집" → 탭으로 열림 | | |
+| MT-1-5 | 아무 파일 우클릭 → (Windows 11은 "추가 옵션 표시") "Vic Notepad로 편집" → 탭으로 열림 | | — |
 | MT-1-6 | 앱이 떠 있을 때 파일 여러 개 우클릭 "Vic Notepad로 편집" → **기존 창의 새 탭**으로, 최소화돼 있어도 앞으로 | | |
-| MT-1-7 | 포터블 zip을 풀어 `Vic Notepad\my-notepad.exe` 바로 실행 | | |
+| MT-1-7 | 포터블 zip을 풀어 `Vic Notepad\my-notepad.exe` 바로 실행 | | — |
 
 ## 2. 첫 실행·도움말·글꼴 (P1-10·P5-UX)
 
@@ -102,7 +118,7 @@ macOS는 P5-03(`.dmg`) 이후 같은 순서로 하되 `Ctrl` → `Cmd`, 메뉴 �
 | MT-8-4 | 분할 모드에서 입력 → 잠시 뒤 미리보기 반영, 깜박임·스크롤 튐 없음 | | |
 | MT-8-5 | 소스·미리보기 어느 쪽을 스크롤해도 따라옴, 멈추면 떨림 없음, 미리보기 더블클릭 → 소스 그 줄로 | | |
 | MT-8-6 | `links\index.md` 외부 링크(브라우저)·상대 `.md`(새 탭)·`#앵커`(한글 제목) 이동, 없는 파일 링크는 다른 색 | | |
-| MT-8-7 | `long_1mb.md` 미리보기 빠르게 스크롤해도 끊기지 않음, 소스 구문 색상 켠 채 입력해도 지연 없음 | | |
+| MT-8-7 | `md-1mb.md` 미리보기 빠르게 스크롤해도 끊기지 않음, 소스 구문 색상 켠 채 입력해도 지연 없음 | | |
 | MT-8-8 | 미리보기 텍스트 드래그 복사, 다크 테마에서 코드·표·인용 색 | | |
 
 ## 9. 찾기·바꾸기 (P4-01~P4-06)
