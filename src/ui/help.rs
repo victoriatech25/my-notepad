@@ -258,7 +258,7 @@ pub const REGEX_SECTIONS: &[RegexSection] = &[
 /// 정보 창에 보이는 버전 (`Cargo.toml`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// 정보 창·버그 신고용 한 줄 (`Vic Notepad 0.1.0 (Windows x86_64)`).
+/// 정보 창·버그 신고용 한 줄 (`Vic Notepad 1.0.0 (Windows x86_64)`).
 pub fn version_line() -> String {
     format!("{} {VERSION} ({})", crate::branding::APP_NAME, platform())
 }
