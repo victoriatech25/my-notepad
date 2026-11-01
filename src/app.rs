@@ -42,7 +42,7 @@ use crate::ui::{
     dialogs::{self, Dialog, DialogOutcome, FontChoice},
     doc_view,
     editor::{self, EditorOptions},
-    markdown_view::{LinkAction, PreviewStep},
+    markdown_view::{self, LinkAction, PreviewStep},
     menu_bar::{self, MenuBarState, MenuTabEntry},
     search_bar::{BarEvent, SearchBar, Step},
     sidebar::{self, SidebarAction, SidebarState},
@@ -1781,7 +1781,7 @@ impl eframe::App for NotepadApp {
             tab_spaces: self.tab_spaces,
             search: self.search.marks(),
         };
-        let zoom = self.zoom;
+        let zoom = markdown_view::preview_scale(self.zoom, self.editor_font_size);
         let mut switch_to_edit = false;
         let mut switch_to_split = false;
         let mut link_action = None;
