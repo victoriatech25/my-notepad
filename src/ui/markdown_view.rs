@@ -39,6 +39,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::config::DEFAULT_EDITOR_FONT_SIZE;
 use crate::core::document::Document;
 use crate::core::image_load::{self, ImageSource};
 use crate::core::link::{self, LinkTarget};
@@ -60,6 +61,12 @@ const MARGIN: i8 = 16;
 pub const MAX_BODY_WIDTH: f32 = 860.0;
 /// 편집 후 미리보기를 다시 파싱하기까지 기다리는 시간 (초, PLAN.md §3.8-2 "약 150~200ms").
 pub const REFRESH_DEBOUNCE: f64 = 0.15;
+
+/// 미리보기 글자 배율 = 확대율 × (편집기 글꼴 크기 ÷ 기본 크기).
+/// `보기 → 글꼴…` 크기를 키운 만큼 본문·제목·코드가 같은 비율로 커진다 (PLAN.md §2.4, P6-J).
+pub fn preview_scale(zoom: f32, editor_font_size: f32) -> f32 {
+    zoom * editor_font_size / DEFAULT_EDITOR_FONT_SIZE
+}
 
 /// 최상위 블록 하나의 소스 줄 범위와 화면 위치.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -365,7 +372,7 @@ impl PreviewState {
         self.cache.parse_count()
     }
 
-    /// 문서를 미리보기로 그린다. `zoom`은 에디터 확대/축소 배율,
+    /// 문서를 미리보기로 그린다. `zoom`은 글자 배율([`preview_scale`]),
     /// `cursor_line`(0부터)이 있으면 그 줄을 포함한 최상위 블록에 옅은 배경을 깐다 (분할 모드 커서 위치, P3-08).
     pub fn show(
         &mut self,
@@ -3264,6 +3271,13 @@ mod tests {
             (zoomed / normal - 2.0).abs() < 0.2,
             "확대 배율을 따라야 함: {normal} → {zoomed}"
         );
+    }
+
+    #[test]
+    fn preview_scale_follows_editor_font_size() {
+        assert_eq!(preview_scale(1.0, DEFAULT_EDITOR_FONT_SIZE), 1.0);
+        assert!((preview_scale(1.0, DEFAULT_EDITOR_FONT_SIZE * 2.0) - 2.0).abs() < 1e-6);
+        assert!((preview_scale(1.5, DEFAULT_EDITOR_FONT_SIZE * 2.0) - 3.0).abs() < 1e-6);
     }
 
     #[test]
